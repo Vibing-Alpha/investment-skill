@@ -543,13 +543,13 @@ def bootstrap(root: Path, *, yes: bool, prefer_copy: bool) -> int:
     elif env_example.exists():
         lines = _read(env_example).splitlines()
         print("  Get keys: financialdatasets.ai (required) · "
-              "financialmodelingprep.com (FMP, optional) · finnhub.io (optional)")
+              "financialmodelingprep.com (FMP, required) · finnhub.io (optional)")
         # Default each key to its current env var: interactive → press-enter
         # reuses an exported key; non-interactive (`--yes`/no-tty) → keys come
         # straight from the environment (CI / automated setup).
         fds = _prompt("  FINANCIAL_DATASETS_API_KEY (required): ", secret=True, yes=yes,
                       default=os.environ.get("FINANCIAL_DATASETS_API_KEY", ""))
-        fmp = _prompt("  FMP_API_KEY (optional, enter to skip): ", secret=True, yes=yes,
+        fmp = _prompt("  FMP_API_KEY (required): ", secret=True, yes=yes,
                       default=os.environ.get("FMP_API_KEY", ""))
         fin = _prompt("  FINNHUB_API_KEY (optional, enter to skip): ", secret=True, yes=yes,
                       default=os.environ.get("FINNHUB_API_KEY", ""))
@@ -560,6 +560,8 @@ def bootstrap(root: Path, *, yes: bool, prefer_copy: bool) -> int:
         print("  • wrote .env")
         if not fds:
             print("  ! FINANCIAL_DATASETS_API_KEY left empty — set it before /score-business.")
+        if not fmp:
+            print("  ! FMP_API_KEY left empty — set it before /score-business or /screen-stocks.")
 
     # 4. strategy.yaml
     print("\n[2/4] Strategy (strategy.yaml)")

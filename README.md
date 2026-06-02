@@ -61,8 +61,9 @@ Updates are opt-in and never overwrite your local edits. Release notes:
 
 ### Requirements
 
-Python 3.10+, `yfinance` + `PyYAML`. A `FINANCIAL_DATASETS_API_KEY` (from
-financialdatasets.ai) is required; `FMP_API_KEY` / `FINNHUB_API_KEY` optional.
+Python 3.10+, `yfinance` + `PyYAML`. Two data-API keys are required —
+`FINANCIAL_DATASETS_API_KEY` (financialdatasets.ai) and `FMP_API_KEY`
+(financialmodelingprep.com); `FINNHUB_API_KEY` (finnhub.io) is optional.
 
 ---
 
@@ -113,5 +114,6 @@ python3 -m scripts.update apply     # 快进到最新版 + 显示更新日志
 
 ### 环境要求
 
-Python 3.10+,`yfinance` + `PyYAML`。必须有 `FINANCIAL_DATASETS_API_KEY`
-(来自 financialdatasets.ai);`FMP_API_KEY` / `FINNHUB_API_KEY` 可选。
+Python 3.10+,`yfinance` + `PyYAML`。需要两个数据 API key:`FINANCIAL_DATASETS_API_KEY`
+(financialdatasets.ai)和 `FMP_API_KEY`(financialmodelingprep.com);
+`FINNHUB_API_KEY`(finnhub.io)可选。

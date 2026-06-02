@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.3 — 2026-06-02
+
+- FMP_API_KEY is now required (was mislabeled optional): financials fallback for foreign ADRs / non-Dec fiscal years + /screen-stocks needs it. Bootstrap prompts for it as required + warns if empty. FINNHUB_API_KEY stays optional.
+
 ## v1.0.2 — 2026-06-02
 
 - Fix Windows GBK console crash — UTF-8 stdout/stderr; no more PYTHONUTF8=1 needed

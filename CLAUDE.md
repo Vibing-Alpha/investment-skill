@@ -16,8 +16,9 @@ make setup                                      # or: python3 -m scripts.distrib
 ```
 
 `make setup` guides you through:
-- `.env` — your `FINANCIAL_DATASETS_API_KEY` (required; get one at
-  financialdatasets.ai). `FMP_API_KEY` / `FINNHUB_API_KEY` optional.
+- `.env` — two required data-API keys: `FINANCIAL_DATASETS_API_KEY`
+  (financialdatasets.ai) and `FMP_API_KEY` (financialmodelingprep.com);
+  `FINNHUB_API_KEY` (finnhub.io) optional.
 - `strategy.yaml` — your investment preferences (from `strategy.example.yaml`).
 - `portfolio-state.yaml` — your holdings + watchlist (from the example).
 
