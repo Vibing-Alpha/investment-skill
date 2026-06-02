@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.2 — 2026-06-02
+
+- Fix Windows GBK console crash — UTF-8 stdout/stderr; no more PYTHONUTF8=1 needed
+
 ## v1.0.1 — 2026-06-02
 
 - Slimmer distribution: the published repo no longer carries dev/maintenance
