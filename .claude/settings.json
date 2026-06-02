@@ -1,0 +1,15 @@
+{
+  "$comment": "Committed project settings. The SessionStart hook auto-detects a newer skill RELEASE (gstack-style): it runs the consumer update check, which self-throttles (once/hour), times out fast, is network-safe, notifies ONLY when a higher VERSION is released, and stays SILENT otherwise. It NEVER auto-updates — the user runs `python3 -m scripts.update apply` to opt in. The command is a bare exec (no shell operators) so it is well-formed on POSIX and cmd; `scripts.update check` already always exits 0 and is silent on errors, so no `|| true` guard is needed. `python3` follows the repo convention (WSL/POSIX-oriented; native-Windows users run inside WSL or adjust this hook). Personal permissions/env live in the gitignored settings.local.json.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -m scripts.update check --quiet"
+          }
+        ]
+      }
+    ]
+  }
+}

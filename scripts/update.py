@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Consumer-side skill update: detect a new release + apply it (gstack-style).
+
+A recipient clones the published org repo (e.g. Vibing-Alpha/investment-skill).
+This module lets them DETECT when the maintainer has shipped a new release and
+CHOOSE to update — it never auto-mutates the repo.
+
+    python3 -m scripts.update check    # is a newer release available? (throttled, silent, network-safe)
+    python3 -m scripts.update apply    # fast-forward to the latest release + show the changelog
+
+`check` is wired to run on Claude Code session start (see .claude/settings.json:
+`SessionStart` → `update check --quiet`). It self-throttles (default once/hour
+via a gitignored state file), times out fast, and is SILENT unless an update
+exists — so it never slows or breaks a session. Codex/Cursor/OpenCode users run
+`check`/`apply` manually (or wire their own hook).
+
+Update model = git pull (the repo IS the distribution unit): `check` does a
+lightweight `git fetch`; `apply` does `git pull --ff-only` (refuses to clobber
+local edits). Version + notes come from the shipped `VERSION` + `CHANGELOG.md`.
+
+stdlib-only, cross-platform; `check` ALWAYS exits 0 (must never fail a session).
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+_SEMVER = re.compile(r"^\s*(\d+)\.(\d+)\.(\d+)")
+
+
+def _version_gt(a: str, b: str) -> bool:
+    """True iff semver a > b. Unparseable either side → False (don't notify)."""
+    ma, mb = _SEMVER.match(a), _SEMVER.match(b)
+    if not ma or not mb:
+        return False
+    return tuple(int(x) for x in ma.groups()) > tuple(int(x) for x in mb.groups())
+
+STATE_FILE = ".skill-update-check"   # gitignored; mtime = last check time
+DEFAULT_THROTTLE_S = 3600            # once per hour, like gstack
+FETCH_TIMEOUT_S = 8                  # never hang a session on a slow network
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _git(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
+    """Run git; return (rc, stdout, stderr). Never raises (timeout/OS error → rc=-1)."""
+    try:
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return -1, "", str(e)
+
+
+def _upstream_branch(root: Path) -> tuple[str, str]:
+    """(remote, branch) to check against — the current branch's upstream, else
+    origin/main."""
+    rc, out, _ = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=root)
+    if rc == 0 and "/" in out:
+        remote, _, branch = out.partition("/")
+        return remote, branch
+    return "origin", "main"
+
+
+def _file_at(root: Path, ref: str, path: str) -> str:
+    rc, out, _ = _git(["show", f"{ref}:{path}"], cwd=root)
+    return out if rc == 0 else ""
+
+
+def _changelog_top(text: str) -> str:
+    """The first `## ...` section of a CHANGELOG (the latest release notes)."""
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## ")), None)
+    if start is None:
+        return ""
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+               len(lines))
+    return "\n".join(lines[start:end]).strip()
+
+
+def _throttled(root: Path, throttle_s: int) -> bool:
+    state = root / STATE_FILE
+    try:
+        if state.is_file() and (time.time() - state.stat().st_mtime) < throttle_s:
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _touch_state(root: Path) -> None:
+    try:
+        (root / STATE_FILE).write_text(str(int(time.time())), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def check(root: Path, *, throttle_s: int, force: bool, quiet: bool) -> int:
+    """Detect whether a newer release is available. ALWAYS returns 0."""
+    if not force and _throttled(root, throttle_s):
+        return 0
+    _touch_state(root)  # stamp BEFORE network so a hang can't cause a re-check storm
+
+    remote, branch = _upstream_branch(root)
+    rc, _, _ = _git(["fetch", "--quiet", remote, branch], cwd=root, timeout=FETCH_TIMEOUT_S)
+    if rc != 0:
+        return 0  # offline / no remote / timeout → silent
+
+    rc_l, local, _ = _git(["rev-parse", "HEAD"], cwd=root)
+    rc_r, remote_sha, _ = _git(["rev-parse", "FETCH_HEAD"], cwd=root)
+    if rc_l != 0 or rc_r != 0:
+        return 0
+    # A "release" is signalled by a HIGHER VERSION — NOT merely being behind by
+    # commits. This keeps the session-start check silent on the maintainer's own
+    # dev commits (which don't bump VERSION) and on any non-release upstream
+    # movement; recipients are notified only on a real release.
+    have = (_file_at(root, "HEAD", "VERSION") or "0.0.0").strip()
+    new = (_file_at(root, "FETCH_HEAD", "VERSION") or "0.0.0").strip()
+    if not _version_gt(new, have):
+        if not quiet:
+            print("Skills are up to date (no newer release).")
+        return 0
+
+    notes = _changelog_top(_file_at(root, "FETCH_HEAD", "CHANGELOG.md"))
+    print(f"\n✨ A new skill release is available: v{new} (you have v{have}).")
+    print("   Update with:  python3 -m scripts.update apply")
+    if notes:
+        print("   What's new:")
+        for ln in notes.splitlines():
+            print(f"     {ln}")
+    # if local has its own commits, ff-only apply may need a manual merge
+    if _git(["merge-base", "--is-ancestor", local, remote_sha], cwd=root)[0] != 0:
+        print("   (note: your repo has local commits; `apply` is fast-forward-only "
+              "and may need a manual merge.)")
+    print()
+    return 0
+
+
+def apply(root: Path) -> int:
+    """Fast-forward to the latest release. Refuses to clobber local edits."""
+    remote, branch = _upstream_branch(root)
+    before = _file_at(root, "HEAD", "VERSION") or "?"
+    rc, out, err = _git(["pull", "--ff-only", remote, branch], cwd=root, timeout=60)
+    if rc != 0:
+        print("Could not fast-forward — you have local commits or uncommitted "
+              "changes that diverge from the release. Resolve manually "
+              f"(git status). Details:\n{err or out}", file=sys.stderr)
+        return 1
+    _touch_state(root)
+    after = _file_at(root, "HEAD", "VERSION") or "?"
+    if before == after:
+        print("Already up to date.")
+        return 0
+    print(f"✅ Updated skills: v{before} → v{after}")
+    notes = _changelog_top((root / "CHANGELOG.md").read_text(encoding="utf-8")
+                           if (root / "CHANGELOG.md").is_file() else "")
+    if notes:
+        print(notes)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="update",
+                                description="Detect + apply skill releases.")
+    sub = p.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("check", help="Is a newer release available? (throttled, silent)")
+    c.add_argument("--throttle", type=int, default=DEFAULT_THROTTLE_S,
+                   help=f"min seconds between checks (default {DEFAULT_THROTTLE_S})")
+    c.add_argument("--force", action="store_true", help="ignore the throttle")
+    c.add_argument("--quiet", action="store_true", help="print only when an update exists")
+    sub.add_parser("apply", help="fast-forward to the latest release")
+    args = p.parse_args(argv)
+    root = repo_root()
+    if args.command == "check":
+        return check(root, throttle_s=args.throttle, force=args.force, quiet=args.quiet)
+    if args.command == "apply":
+        return apply(root)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

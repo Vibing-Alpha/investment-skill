@@ -1,0 +1,49 @@
+# Investment strategy config — copy to strategy.yaml and customize
+
+# Language for human-facing output (summary markdown, briefs)
+# JSON output is always English regardless of this setting
+output_language: zh-CN            # zh-CN | en-US
+
+# Investment principles (used by /portfolio)
+# Write each principle as natural language. The system extracts quantifiable
+# limits as hard constraints and uses the rest to guide LLM reasoning.
+# Remove this section to use defaults from rules/portfolio-safety.md.
+# Other skills (/score-business, /investment-thesis) use risk:/exit:/scoring: below.
+principles:
+  # - "single-stock position capped at 20% of total equity"
+  # - "keep at least 10% cash"
+  # - "do not chase highs going into earnings"
+
+# Mandate
+mandate:
+  style: concentrated_growth      # concentrated_growth | diversified_value | balanced
+  edge: [AI, semiconductors, space]
+  return_target: "50%+ annual"
+
+# BQ scoring dimension weights (must sum to 1.0)
+# Remove this section to use defaults: fundamental=0.35, forward=0.35, industry=0.30
+scoring:
+  dimension_weights:
+    fundamental: 0.35
+    forward: 0.35
+    industry: 0.30
+
+# Risk limits
+risk:
+  max_single_position: 0.20       # single stock cap
+  max_sector: 0.50                # single sector cap
+  cash_target: 0.10               # reference target, not hard limit
+
+# Exit rules
+exit:
+  hard_triggers:
+    - thesis_break
+    - valuation_exhausted
+    - risk_escalation
+  stop_loss_atr_multiplier: 2.0
+
+# Order preferences
+orders:
+  broker: IBKR                    # IBKR | paper
+  default_duration: gtc           # day | gtc
+  earnings_window_days: 7

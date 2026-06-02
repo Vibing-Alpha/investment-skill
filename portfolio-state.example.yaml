@@ -1,0 +1,23 @@
+# Portfolio state — copy to portfolio-state.yaml and fill in your actual positions
+# This file is gitignored (personal data)
+
+holdings:
+  # NVDA:
+  #   shares: 100
+  #   cost_basis: 120.50
+  # MU:
+  #   shares: 200
+  #   cost_basis: 89.30
+
+cash: 0
+
+watchlist:
+  # - MRVL
+  # - LITE
+
+# Optional: existing open GTC orders (for stress test completeness)
+# open_orders:
+#   - ticker: MU
+#     type: limit_buy
+#     shares: 50
+#     price: 82.00

@@ -1,0 +1,8 @@
+# Runtime dependencies — stdlib-only core per CLAUDE.md, these 2 are the
+# only non-stdlib imports used by scripts/.
+yfinance==1.2.0
+PyYAML==6.0.1
+
+# Test-only (pytest runs the entire safety net: unit, invariants, fuzz,
+# properties, golden, determinism, cross-source, audit).
+pytest>=7.0

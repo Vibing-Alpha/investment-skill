@@ -1,0 +1,44 @@
+# Normalize line endings on checkout so byte-sensitive consumers are stable
+# across Linux / macOS / Windows clones:
+#   - scripts/distribute.py:compute_source_hash (AGENTS.md drift detector)
+#   - tests/golden/* and the DL3c golden snapshot + .sha256 integrity check
+# Without this, git autocrlf=true on Windows would check these out as CRLF,
+# changing their bytes and spuriously failing `distribute check` / golden CI.
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.toml text eol=lf
+*.cfg  text eol=lf
+*.sha256 text eol=lf
+*.example text eol=lf
+Makefile text eol=lf
+.githooks/* text eol=lf
+
+# --- Distribution curation (consumed by `git archive`, i.e. scripts/publish.py) ---
+# Dev/maintenance-only artifacts are EXCLUDED from the published snapshot via
+# `export-ignore` (git archive honors it). The dev repo keeps them; only the
+# end-user product is slimmed. End-users get the skills + runtime + a
+# user-facing guide (CLAUDE.md via dev-only marker strip; README.md / Makefile
+# via .dist swap — see publish.py), not the test suite, design docs, CI, or
+# empty spec dirs.
+tests/          export-ignore
+docs/           export-ignore
+schema/         export-ignore
+.github/        export-ignore
+.githooks/      export-ignore
+.replay-accepted-drift-dl4.yaml export-ignore
+
+# Dev/maintenance/publish-only scripts (no runtime importer — verified). Kept
+# for the maintainer; end-users never run publish/release/audit/test/dev tools.
+# (scripts/distribute.py = setup and scripts/update.py = updates are KEPT.)
+scripts/publish.py            export-ignore
+scripts/release.py            export-ignore
+scripts/audit_fail_open.py    export-ignore
+scripts/smoke_test.py         export-ignore
+scripts/replay_and_diff.py    export-ignore
+scripts/check_artifact_compat.py export-ignore
+scripts/dev/    export-ignore

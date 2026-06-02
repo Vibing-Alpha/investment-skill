@@ -1,0 +1,41 @@
+# Reports (output, not source)
+reports/
+
+# User strategy (personal config)
+strategy.yaml
+strategy.compiled.yaml
+portfolio-state.yaml
+
+# Runtime state
+.task-state.yaml
+.task-run-log.yaml
+.portfolio-active
+
+# Environment (secrets)
+.env
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# mutmut runtime
+mutants/
+.mutmut-cache/
+setup.cfg
+
+# pytest / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# skill-iteration workspaces (eval artifacts, not source)
+.claude/skills/*-workspace/
+
+# Skill update-check throttle state (machine-local, per scripts/update.py)
+.skill-update-check
+
+# Generated per-agent skill adapters — derived from .claude/skills + CLAUDE.md
+# + .claude/rules (like strategy.compiled.yaml). Regenerate with
+# `python3 -m scripts.distribute sync`; never hand-edit.
