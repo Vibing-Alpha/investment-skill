@@ -118,6 +118,14 @@ _SEGMENTED_NUMERIC_FIELDS = frozenset({
     "revenue", "amount", "value",
 })
 
+# Codex review 2026-06: only these `income_statement.revenue.<dim>` breakdowns
+# are emitted into the `segmented_revenues` artifact — they are the axes the
+# score-fundamental agent consumes (product / geography / business segment).
+# An unknown dimension (e.g. a "total" rollup) is dropped so it cannot make
+# the adapter return a hollow PASSED with no consumable revenue mix (which
+# would suppress fetch.py's filing-notes fallback).
+_SEGMENTED_REVENUE_DIMENSIONS = frozenset({"product", "geography", "segment"})
+
 # ISS-166 (Loop20 cycle 1 fresh-session-7): earnings snapshot returns
 # actual/estimate/surprise numerics. Pre-fix _sanitize_dict_numerics
 # left strings unchanged; `{"earnings": {"actual_eps": "not-a-number"}}`
@@ -1184,37 +1192,122 @@ def fetch_news_data(ticker: str, limit: int = 10) -> AdapterResult:
 def fetch_segmented_revenues(
     ticker: str, limit: int = 5,
 ) -> AdapterResult:
-    """Fetch segmented revenue data (by business segment/geography)."""
+    """Fetch segmented REVENUE data (by product / geography / business segment).
+
+    2026-06 endpoint migration: `/financials/segmented-revenues` was retired
+    (now HTTP 404) and the data moved to `/financials/segments`, which returns
+    a nested per-period shape:
+
+        {"segmented_financials": [{
+            "ticker", "report_period", "fiscal_period", "period", "currency",
+            "income_statement": {
+                "revenue":          {"product"|"geography"|"segment": [{label,value}]},
+                "operating_income": {"segment": [{label,value}]}}}]}
+
+    We flatten the `income_statement.revenue.<dim>` block to one denormalized
+    row per (period, dimension, label) so the numeric `value` sits at row top
+    level — exactly the list-of-rows shape `emit_with_numeric_coerce` coerces —
+    and the downstream score-fundamental agent filters by `dimension`
+    (product/geography/segment) to compute a revenue mix. `currency` is carried
+    per row (NOT assumed USD) for non-USD ADRs.
+
+    We deliberately emit ONLY the `revenue` statement, NOT `operating_income`:
+    the artifact key (`segmented_revenues`) and the sole consumer
+    (prompts/score-fundamental.md — revenue mix) are revenue-only, and the
+    `operating_income.segment` rows share labels with `revenue.segment`
+    (e.g. "Americas" appears in both with different values), which would let a
+    revenue-mix calculation double-count or mix profit into a revenue %.
+    (Codex review 2026-06, producer-consumer finding.) No consumer reads
+    operating-income-by-segment today; add a separate artifact key if one does.
+    """
     src = "financial_datasets.fetch_segmented_revenues"
     try:
         # ISS-027: urlencode all params.
-        url = f"{BASE_URL}/financials/segmented-revenues?" + urllib.parse.urlencode({
+        url = f"{BASE_URL}/financials/segments?" + urllib.parse.urlencode({
             "ticker": ticker, "period": "annual", "limit": limit,
         })
         response = _make_request(url)
         v = validate_api_shape(response, FD_SEGMENTED_SHAPE)
         if not v.ok:
             return AdapterResult.failed_from_shape(v, source=src)
-        revenues = response.get("segmented_revenues", [])
+        periods = response.get("segmented_financials", [])
 
-        if not revenues:
+        # Flatten nested income_statement.revenue.<dim>[].{label,value} into
+        # denormalized rows. Skip unlabeled rows fail-closed (rules/
+        # producer-consumer.md #4 — never fabricate a segment label).
+        segments = []
+        for block in periods:
+            if not isinstance(block, dict):
+                continue
+            base = {
+                "ticker": block.get("ticker"),
+                "report_period": block.get("report_period"),
+                "fiscal_period": block.get("fiscal_period"),
+                "period": block.get("period"),
+                # Normalize per repo currency convention (DL3a §2) — the only
+                # currency signal on these rows for non-USD ADRs; raw passthrough
+                # would let " jpy "/case drift into the artifact.
+                "currency": normalize_currency(block.get("currency")),
+            }
+            income = block.get("income_statement") or {}
+            if not isinstance(income, dict):
+                continue
+            revenue = income.get("revenue") or {}
+            if not isinstance(revenue, dict):
+                continue
+            for dimension, items in revenue.items():
+                # Only emit consumer-known dimensions (see
+                # _SEGMENTED_REVENUE_DIMENSIONS) so an unknown rollup can't
+                # produce a hollow PASSED with no usable mix.
+                if dimension not in _SEGMENTED_REVENUE_DIMENSIONS:
+                    continue
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    label = item.get("label")
+                    if not isinstance(label, str) or not label.strip():
+                        continue
+                    segments.append({
+                        **base,
+                        "dimension": dimension,
+                        "label": label,
+                        "value": item.get("value"),
+                    })
+
+        # ISS-105 + ISS-185: per-row numeric `value` field. The denormalized
+        # row shape means emit_with_numeric_coerce's list-of-rows branch
+        # handles bool/NaN/Inf (deep) + string-drift coercion at `value`.
+        segments = emit_with_numeric_coerce(
+            segments, numeric_fields=_SEGMENTED_NUMERIC_FIELDS,
+        )
+
+        # Fail closed when NO row carries a usable POSITIVE numeric value
+        # (rules/producer-consumer.md #4): a labels-only / all-coerced-to-None
+        # / all-zero / all-negative feed cannot yield a revenue mix (zero
+        # denominator / nonsensical share). Revenue segments are definitionally
+        # non-negative, so we require at least one strictly-positive value.
+        # Returning NOT_FOUND (not a hollow PASSED) lets fetch.py promote to the
+        # filing-revenue-notes fallback, which only triggers on status ==
+        # FAILED. (Codex review 2026-06, silent-pass finding.) bool is already
+        # coerced to None by emit_with_numeric_coerce above; the isinstance(bool)
+        # guard is belt-and-suspenders.
+        if not any(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+            for v in (r.get("value") for r in segments)
+        ):
             return AdapterResult.failed(
                 code=ErrorCode.NOT_FOUND,
-                detail="empty segmented_revenues list",
+                detail="no usable (positive) revenue segment values in segmented_financials",
                 source=src,
                 data={"segments": [], "periods": 0},
             )
 
-        # ISS-105 + ISS-185: segmented revenue rows have numeric `revenue`
-        # field per segment. _emit_with_numeric_coerce handles bool/NaN
-        # plus string-drift coercion — list-of-rows shape recurses
-        # automatically.
         return AdapterResult.passed(
             data={
-                "segments": emit_with_numeric_coerce(
-                    revenues, numeric_fields=_SEGMENTED_NUMERIC_FIELDS,
-                ),
-                "periods": len(revenues),
+                "segments": segments,
+                "periods": len(periods),
             },
             meta={"source_hint": "fd_segmented"},
         )

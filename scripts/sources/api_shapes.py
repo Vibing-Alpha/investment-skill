@@ -421,8 +421,14 @@ FD_NEWS_SHAPE = {
     }],
 }
 
+# 2026-06 endpoint migration: FD retired `/financials/segmented-revenues`
+# (now HTTP 404) and moved the data to `/financials/segments`, renaming the
+# top-level response key `segmented_revenues` → `segmented_financials`. The
+# per-period rows STILL carry `ticker` + `report_period` at top level (the
+# numeric breakdowns moved into a nested `income_statement.<stmt>.<dim>[]`
+# block), so this loose per-item shape is unchanged across the migration.
 FD_SEGMENTED_SHAPE = {
-    "segmented_revenues": [{"ticker": str, "report_period": str}],
+    "segmented_financials": [{"ticker": str, "report_period": str}],
 }
 
 FD_INSIDER_SHAPE = {
