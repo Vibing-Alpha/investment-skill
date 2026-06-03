@@ -51,8 +51,12 @@ def repo_root() -> Path:
 def _git(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
     """Run git; return (rc, stdout, stderr). Never raises (timeout/OS error → rc=-1)."""
     try:
+        # errors="replace": this helper's docstring promises "Never raises" and update runs
+        # on SessionStart (must exit 0). It only catches TimeoutExpired/OSError, so a strict
+        # decode of malformed git bytes would ESCAPE — replace degrades instead of crashing
+        # the hook. Other scripts keep strict utf-8 (Linux parity) where bad output is signal.
         r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except (subprocess.TimeoutExpired, OSError) as e:
         return -1, "", str(e)

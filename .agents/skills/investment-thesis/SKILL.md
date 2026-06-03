@@ -257,7 +257,7 @@ if ! python3 -m scripts.thesis.stamp_events_meta --report-dir "$REPORT_DIR"; the
 import json, sys
 from scripts.delta.probe import _safe_normalize_to_et_date
 try:
-    m = json.load(open('$REPORT_DIR/events.json')).get('meta', {})
+    m = json.load(open('$REPORT_DIR/events.json', encoding='utf-8')).get('meta', {})
 except Exception:
     sys.exit(1)
 ga = m.get('generated_at') if isinstance(m, dict) else None
@@ -326,14 +326,14 @@ python3 -m scripts.extract_fcf --ticker "$TICKER" \
 # (Deliberately a bare structural check — NOT the typed loader, which rejects
 # the null-FCF error artifact that fail-close legitimately produces.)
 for f in historical_multiples.json fcf_inputs.json; do
-  python3 -c "import json,sys; d=json.load(open('$REPORT_DIR/data/$f')); sys.exit(0 if isinstance(d,dict) and 'status' in d else 1)" \
+  python3 -c "import json,sys; d=json.load(open('$REPORT_DIR/data/$f', encoding='utf-8')); sys.exit(0 if isinstance(d,dict) and 'status' in d else 1)" \
     || { echo "FATAL: $REPORT_DIR/data/$f missing/unparseable/status-less — producer crash, not a DL4 fail-close" >&2; exit 1; }
 done
 
 # Peer multiples — peer_tickers come from bq_analysis dimensions.industry.peer_tickers.
 python3 -c "
 import json, subprocess, sys
-with open('$REPORT_DIR/bq_analysis.json') as f:
+with open('$REPORT_DIR/bq_analysis.json', encoding='utf-8') as f:
     pts = json.load(f).get('dimensions',{}).get('industry',{}).get('peer_tickers',[])
 if pts:
     subprocess.run([sys.executable, '-m', 'scripts.peers', '--tickers'] + pts +
@@ -352,7 +352,7 @@ if pts:
 # stub instead of reading a non-existent file.
 python3 -c "
 import json, subprocess, sys
-with open('$REPORT_DIR/data/fcf_inputs.json') as f:
+with open('$REPORT_DIR/data/fcf_inputs.json', encoding='utf-8') as f:
     inp = json.load(f)
 fcf = inp.get('fcf_per_share') or 0
 price = inp.get('current_price') or 0
@@ -680,7 +680,7 @@ fi
 if [ -f "$REPORT_DIR/.alpha_status.json" ]; then
     PHASE_3_RAN=$(python3 -c "
 import json
-s = json.load(open('$REPORT_DIR/.alpha_status.json'))
+s = json.load(open('$REPORT_DIR/.alpha_status.json', encoding='utf-8'))
 print('yes' if 'phase_3' in s.get('phases_completed', []) else 'no')
 ")
     if [ "$PHASE_3_RAN" = "yes" ]; then

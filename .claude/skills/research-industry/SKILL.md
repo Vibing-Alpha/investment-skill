@@ -146,7 +146,7 @@ ctx = {
     'user_force_refresh': bool('$FORCE_FLAG'),
 }
 import pathlib
-pathlib.Path('$REPORT_DIR/.tier_context.json').write_text(json.dumps(ctx, indent=2))
+pathlib.Path('$REPORT_DIR/.tier_context.json').write_text(json.dumps(ctx, indent=2), encoding='utf-8')
 "
 ```
 
@@ -194,11 +194,16 @@ JSON + `output_language`. Word count is target ≤1200, not strict gate.
 ### Step 5: Write run_meta + append changelog
 
 ```bash
-# F15 (codex review cycle 2): use mktemp with a slug-specific template
-# so two parallel /research-industry invocations in the same shell don't
-# collide on the same $$-based path. trap ensures cleanup on any exit path.
-TIER_REFRESH_JSON=$(mktemp -t "research_industry_${SLUG}_framing.XXXXXXXX.json")
-COST_JSON=$(mktemp -t "research_industry_${SLUG}_cost.XXXXXXXX.json")
+# F15 (codex review cycle 2): slug-specific mktemp template so two parallel
+# /research-industry runs in the same shell don't collide on a $$-based path.
+# Full-path template with TRAILING Xs (NOT `mktemp -t "...XXXX.json"`): portable
+# across GNU (Linux / Windows git-bash) and BSD (macOS) mktemp — BSD `-t` has
+# divergent semantics and rejects a suffix after the Xs. The .json extension is
+# dropped (run_meta reads these by path, not by extension). ${TMPDIR:-/tmp}
+# mirrors what `-t` selected, so git-bash still gets a POSIX temp path.
+# trap ensures cleanup on any exit path.
+TIER_REFRESH_JSON=$(mktemp "${TMPDIR:-/tmp}/research_industry_${SLUG}_framing.XXXXXXXX") || exit 1
+COST_JSON=$(mktemp "${TMPDIR:-/tmp}/research_industry_${SLUG}_cost.XXXXXXXX") || { rm -f "$TIER_REFRESH_JSON"; exit 1; }
 trap 'rm -f "$TIER_REFRESH_JSON" "$COST_JSON"' EXIT INT TERM
 
 case "$TIER" in
@@ -215,7 +220,7 @@ esac
 
 CANDIDATES_COUNT=$(python3 -c "
 import json
-print(len(json.load(open('$REPORT_DIR/industry_analysis.json'))['candidate_tickers']))
+print(len(json.load(open('$REPORT_DIR/industry_analysis.json', encoding='utf-8'))['candidate_tickers']))
 ")
 
 # Cost capture — populate from agent run notification metadata

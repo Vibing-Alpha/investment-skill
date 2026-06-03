@@ -42,3 +42,14 @@ scripts/smoke_test.py         export-ignore
 scripts/replay_and_diff.py    export-ignore
 scripts/check_artifact_compat.py export-ignore
 scripts/dev/    export-ignore
+
+# Dev-authoring rule — auto-loaded every session by Claude Code but useless to an
+# end-user who only RUNS the skills (it governs HOW to write scripts: pathlib,
+# sys.executable, no shell=True, UTF-8 file I/O). ZERO runtime reference — the
+# analysis never reads it; its CLAUDE.md mention is inside the dev-only fence
+# (also stripped). publish's bake regenerates AGENTS.md over the stripped tree, so
+# the source_hash stays consistent. NOTE: skill-architecture.md / producer-consumer.md
+# are deliberately KEPT — their `#N` clauses are cited as provenance by runtime
+# prompts + SKILL.md (unknown≠zero, subagent heredoc .md-write, atomic vocab update);
+# stripping them would leave dangling citations in the shipped files.
+.claude/rules/development.md  export-ignore

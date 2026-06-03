@@ -3550,7 +3550,7 @@ def _main_impl(
     # financials/filing). Pre-fix this returned exit 0 — only FAILED
     # mapped to 1 — so an "incomplete" run silently passed CI/orches-
     # tration as success. Documented contract is `0=success, 1=failure,
-    # 2=error` (.claude/rules/development.md), so map INCOMPLETE to 1
+    # 2=error` (project exit-code convention), so map INCOMPLETE to 1
     # alongside FAILED. PARTIAL stays 0 because the pipeline can still
     # produce a degraded report.
     return 1 if final_status in ("FAILED", "INCOMPLETE") else 0

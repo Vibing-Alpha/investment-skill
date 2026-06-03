@@ -3,6 +3,11 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.4 — 2026-06-03
+
+- Cross-platform: explicit UTF-8 on all inline + subprocess I/O (Windows cp936); portable mktemp (macOS/BSD)
+- Trim dev-only development.md rule from the published product
+
 ## v1.0.3 — 2026-06-02
 
 - FMP_API_KEY is now required (was mislabeled optional): financials fallback for foreign ADRs / non-Dec fiscal years + /screen-stocks needs it. Bootstrap prompts for it as required + warns if empty. FINNHUB_API_KEY stays optional.

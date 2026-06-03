@@ -76,6 +76,7 @@ Read `strategy.yaml` from the project root. Extract the `principles:` field.
    ```bash
    python3 -c "
    import hashlib, json, sys, yaml
+   sys.stdin.reconfigure(encoding='utf-8')  # Windows cp936: strategy.yaml principles are UTF-8 (e.g. zh-CN) — must match portfolio_log._verify_source_hash's open(encoding='utf-8') or the source_hash diverges
    data = yaml.safe_load(sys.stdin)
    principles = data.get('principles', [])
    print(hashlib.sha256(json.dumps(principles, ensure_ascii=False).encode()).hexdigest())
@@ -324,7 +325,7 @@ python3 -c "
 import json, tempfile, os, sys
 orders = json.loads(sys.stdin.read())
 fd, path = tempfile.mkstemp(suffix='.json')
-with os.fdopen(fd, 'w') as f: json.dump(orders, f)
+with os.fdopen(fd, 'w', encoding='utf-8') as f: json.dump(orders, f)
 print(path)
 " <<'ORDERS'
 [{"ticker":"MU","action":"buy","type":"market","shares":50,"est_price":90.0}]

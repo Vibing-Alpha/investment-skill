@@ -90,7 +90,7 @@ def _cli():
         )
     except OSError as e:
         # Guard against unreadable prior / unwritable current (permission
-        # issues, disk full, etc.) — report + exit 2 per development.md.
+        # issues, disk full, etc.) — report + exit 2 (0=ok/1=failure/2=error).
         print(
             f"append_changelog: ERROR — changelog IO failed "
             f"(prior={prior_path}, current={args.current}): {e}",

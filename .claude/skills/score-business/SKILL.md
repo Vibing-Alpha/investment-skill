@@ -268,9 +268,9 @@ and invoke assembler:
 python3 -c "
 import json, pathlib
 p = pathlib.Path('$REPORT_DIR/data/00_validation.json')
-v = json.loads(p.read_text())
+v = json.loads(p.read_text(encoding='utf-8'))
 v['tier_decided'] = '$TIER'
-p.write_text(json.dumps(v, indent=2, ensure_ascii=False))
+p.write_text(json.dumps(v, indent=2, ensure_ascii=False), encoding='utf-8')
 "
 
 # 2) Write tier-context-json (transient)

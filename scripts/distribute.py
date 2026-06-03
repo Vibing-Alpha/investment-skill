@@ -604,7 +604,7 @@ def bootstrap(root: Path, *, yes: bool, prefer_copy: bool) -> int:
         try:
             rc = subprocess.run(
                 [sys.executable, "-m", "scripts.smoke_test", "--loaders-only"],
-                cwd=str(root), capture_output=True, text=True, timeout=120,
+                cwd=str(root), capture_output=True, text=True, encoding="utf-8", timeout=120,
             )
             print("  loaders:", "OK" if rc.returncode == 0 else f"non-zero ({rc.returncode})")
         except Exception as e:  # non-fatal — onboarding sanity only
