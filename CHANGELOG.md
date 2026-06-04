@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.7 — 2026-06-04
+
+- fix(fetch): raise FDS financials limit 8->16 to capture the buried fiscal Q4 (restores FDS-direct financials + unblocks FMP-uncovered small caps/ADRs that were failing the DL4 consecutive-quarter gate)
+
 ## v1.0.6 — 2026-06-04
 
 - fix: always load .env so FMP_API_KEY/FINNHUB_API_KEY load even when FINANCIAL_DATASETS_API_KEY is already set in the environment

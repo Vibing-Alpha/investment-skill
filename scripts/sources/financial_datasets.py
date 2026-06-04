@@ -420,7 +420,33 @@ def fetch_financial_statements(ticker: str) -> AdapterResult:
 
     # ISS-027: switched to urllib.parse.urlencode below (3 sub-fetches).
     # `safe_ticker` no longer needed separately — urlencode handles it.
-    _common_params = {"ticker": ticker, "period": "quarterly", "limit": 8}
+    #
+    # 2026-06 FDS Q4-burial regression (this fix): FDS's `period=quarterly`
+    # feed now returns the *standalone fiscal Q4* row ONLY when `limit` is large
+    # enough to reach it — at `limit=8` the most-recent 8 rows are the recent
+    # Q1/Q2/Q3 quarters and EVERY company's fiscal Q4 is omitted (verified live
+    # on 26 tickers, Dec-FYE *and* non-Dec-FYE alike: MU/AMD/AAPL/NVDA/… all
+    # returned a Q3→next-year-Q1 gap at limit=8). A missing Q4 makes the trailing
+    # window non-consecutive, so the canonical DL4 gate
+    # (`quarter_window.aligned_quarters`) raised `non_consecutive` for 100% of
+    # tickers — silently routing the ENTIRE financials category to the FMP
+    # fallback (and failing outright where FMP doesn't cover the name, e.g. small
+    # caps / ADRs). At `limit>=12` FDS interleaves the real Q4 rows back in
+    # (revenue/net_income confirmed genuine), so the FDS-direct path passes the
+    # gate again. 16 = the proven threshold (12) + one fiscal-year of margin
+    # against the threshold drifting. It is ALSO the floor `historical_multiples`
+    # needs: its 2Y lens caps to the most-recent 8 trailing-4Q windows
+    # (historical_multiples.py:476), which requires >=11 consecutive raw quarters;
+    # at the old limit=8 it could only ever form 5 windows, silently
+    # under-sampling its own "~2 years" contract. So this fix INTENTIONALLY
+    # changes the historical-multiple summary bands (min/median/max/data_points)
+    # for new runs from a 5-window to the contract-correct 8-window 2Y sample —
+    # the latest trailing TTM (extract_fcf's strict latest-4) is unaffected.
+    # Same CLASS of silent FDS API drift as the /financials/segments migration
+    # (commit b2a3b323). Regression-locked by
+    # tests/test_sources_envelope_contract.py::
+    #   test_fetch_financials_limit_captures_fiscal_q4.
+    _common_params = {"ticker": ticker, "period": "quarterly", "limit": 16}
 
     # Per-endpoint missing-key guard — ISS-005 fix.
     # Pre-fix: `response.get("income_statements", [])` masked upstream schema
