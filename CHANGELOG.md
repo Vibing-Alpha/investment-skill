@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.9 — 2026-06-04
+
+- fix(update): SessionStart auto-check now surfaces a USER-VISIBLE update notice (--emit-hook-json → systemMessage) — a session-start hook's plain stdout reaches only Claude's context, so the release notice was previously invisible to the user
+
 ## v1.0.8 — 2026-06-04
 
 - fix(update): throttle only the auto (--quiet) session-start check, never a manual one — a manual 'update check' is now always live + prints its conclusion (was silenced when the SessionStart hook had checked within the hour)
