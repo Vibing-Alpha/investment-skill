@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -m scripts.update check --quiet --emit-hook-json codex",
+            "statusMessage": "Checking for skill updates"
+          }
+        ]
+      }
+    ]
+  }
+}

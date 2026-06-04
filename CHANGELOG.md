@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.10 — 2026-06-04
+
+- feat(update): the auto update-check now also notifies Codex (.codex/hooks.json SessionStart + --emit-hook-json codex) — Claude Code and Codex both get the session-start release notice; Cursor/OpenCode still manual
+
 ## v1.0.9 — 2026-06-04
 
 - fix(update): SessionStart auto-check now surfaces a USER-VISIBLE update notice (--emit-hook-json → systemMessage) — a session-start hook's plain stdout reaches only Claude's context, so the release notice was previously invisible to the user

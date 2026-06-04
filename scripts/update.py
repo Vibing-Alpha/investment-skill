@@ -8,18 +8,25 @@ CHOOSE to update — it never auto-mutates the repo.
     python3 -m scripts.update check    # is a newer release available? (manual: always live + prints; network-safe)
     python3 -m scripts.update apply    # fast-forward to the latest release + show the changelog
 
-`check` is wired to run on Claude Code session start (see .claude/settings.json:
-`SessionStart` → `update check --quiet --emit-hook-json`). That AUTOMATIC
-`--quiet` path self-throttles (default once/hour via a gitignored state file),
-times out fast, and is SILENT unless an update exists — so it never slows or
-breaks a session. `--emit-hook-json` makes the release notice a user-visible
-`systemMessage` (a SessionStart hook's plain stdout reaches only Claude's
-context, not the user; see check(emit_hook_json=...)).
+`check` is wired to run on session start for two agents:
+  - Claude Code: .claude/settings.json `SessionStart` →
+    `update check --quiet --emit-hook-json` (defaults to `--emit-hook-json
+    claude`) → user-visible `systemMessage`.
+  - Codex: .codex/hooks.json `SessionStart` →
+    `update check --quiet --emit-hook-json codex` → `hookSpecificOutput.
+    additionalContext` only (Codex's exact schema; it has no user-visible hook
+    field, so the notice lands in Codex's model context and the agent relays
+    it). See check(hook_format=...).
+That AUTOMATIC `--quiet` path self-throttles (default once/hour via a gitignored
+state file), times out fast, and is SILENT unless an update exists — so it never
+slows or breaks a session. A SessionStart hook's plain stdout reaches only the
+agent's context, not the user, which is why we emit the structured hook JSON.
 The THROTTLE applies ONLY to the `--quiet` path: a manual `check` (no `--quiet`)
 is an explicit human request, so it ALWAYS does the live fetch+compare and always
 prints its conclusion ("up to date" or the release notice). `--force` bypasses
-the throttle on either path. Codex/Cursor/OpenCode users run `check`/`apply`
-manually (or wire their own hook).
+the throttle on either path. Cursor/OpenCode users run `check`/`apply` manually
+(or wire their own hook — Cursor's sessionStart is informational-only; OpenCode
+needs a plugin).
 
 Update model = git pull (the repo IS the distribution unit): `check` does a
 lightweight `git fetch`; `apply` does `git pull --ff-only` (refuses to clobber
@@ -114,16 +121,21 @@ def _touch_state(root: Path) -> None:
 
 
 def check(root: Path, *, throttle_s: int, force: bool, quiet: bool,
-          emit_hook_json: bool = False) -> int:
+          hook_format: str | None = None) -> int:
     """Detect whether a newer release is available. ALWAYS returns 0.
 
-    `emit_hook_json` (Claude Code SessionStart adapter): when an update is
-    found, emit a JSON object with a user-visible `systemMessage` instead of
-    plain text. A SessionStart hook's plain stdout only reaches Claude's
-    context, NOT the user's terminal (per the Claude Code hooks docs), so the
-    plain notice was invisible to the recipient. JSON mode is silent (empty
-    stdout) when there is no update. Default OFF keeps the portable plain-text
-    behavior for manual runs and non-Claude-Code agents.
+    `hook_format` (agent SessionStart adapter): emit a JSON object instead of
+    plain text when an update is found; silent (empty stdout) when there is
+    none. A SessionStart hook's plain stdout reaches only the agent's context,
+    NOT the user's terminal, so plain text alone is invisible to the recipient.
+      - "claude": top-level `systemMessage` (Claude Code shows it to the USER)
+        + `hookSpecificOutput.additionalContext`.
+      - "codex":  `hookSpecificOutput.additionalContext` ONLY — Codex's exact
+        documented schema (it has no user-visible field; the notice reaches
+        Codex's model context and the agent relays it). We omit `systemMessage`
+        there since Codex may not expect that key.
+    Default None keeps the portable plain-text behavior for manual runs and
+    non-hook agents.
     """
     # Throttle ONLY the automatic path (the SessionStart hook runs `check
     # --quiet`). A manual `check` is an explicit human request — silencing it
@@ -153,9 +165,9 @@ def check(root: Path, *, throttle_s: int, force: bool, quiet: bool,
     have = (_file_at(root, "HEAD", "VERSION") or "0.0.0").strip()
     new = (_file_at(root, "FETCH_HEAD", "VERSION") or "0.0.0").strip()
     if not _version_gt(new, have):
-        # `emit_hook_json` consumers expect JSON-or-nothing; never emit the
-        # plain up-to-date line into that channel.
-        if not quiet and not emit_hook_json:
+        # hook-json consumers expect JSON-or-nothing; never emit the plain
+        # up-to-date line into that channel.
+        if not quiet and hook_format is None:
             print("Skills are up to date (no newer release).")
         return 0
 
@@ -175,19 +187,24 @@ def check(root: Path, *, throttle_s: int, force: bool, quiet: bool,
                      "fast-forward-only and may need a manual merge.)")
     msg = "\n".join(lines)
 
-    if emit_hook_json:
-        # Claude Code SessionStart adapter: a SessionStart hook's plain stdout
-        # reaches only Claude's context, NOT the user — emit a user-visible
-        # `systemMessage` (+ additionalContext so Claude can field follow-ups).
-        # ensure_ascii=True (default) keeps the ✨ on the wire as \uXXXX, safe
-        # on a Windows cp936 console; Claude Code decodes it back for display.
-        print(json.dumps({
-            "systemMessage": msg,
+    if hook_format is not None:
+        # Agent SessionStart adapter: a hook's plain stdout reaches only the
+        # agent's context, NOT the user. ensure_ascii=True (default) keeps the
+        # ✨ on the wire as \uXXXX — safe on a Windows cp936 console; the agent
+        # decodes it back for display. `additionalContext` (model context) is
+        # always emitted; Claude Code ALSO gets a top-level `systemMessage` it
+        # shows the user — Codex has no such field so we omit it there.
+        payload = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": msg,
             },
-        }))
+        }
+        if hook_format == "claude":
+            # Claude Code shows a top-level `systemMessage` to the USER. Codex
+            # has no such field (and may not expect the key), so omit it there.
+            payload["systemMessage"] = msg
+        print(json.dumps(payload))
         return 0
 
     print("\n" + msg + "\n")
@@ -231,16 +248,20 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--quiet", action="store_true",
                    help="auto/hook mode: print only on an update AND honor the "
                         "once/hour throttle")
-    c.add_argument("--emit-hook-json", action="store_true",
-                   help="Claude Code SessionStart adapter: on an update, emit a "
-                        "JSON object with a user-visible `systemMessage` (plain "
-                        "hook stdout reaches only Claude's context, not the user)")
+    c.add_argument("--emit-hook-json", nargs="?", const="claude", default=None,
+                   choices=["claude", "codex"], dest="hook_format",
+                   help="agent SessionStart adapter: on an update, emit a JSON "
+                        "object instead of plain text. 'claude' (default) adds a "
+                        "user-visible `systemMessage`; 'codex' emits only "
+                        "`hookSpecificOutput.additionalContext` (Codex's exact "
+                        "schema). Plain hook stdout reaches only the agent's "
+                        "context, not the user.")
     sub.add_parser("apply", help="fast-forward to the latest release")
     args = p.parse_args(argv)
     root = repo_root()
     if args.command == "check":
         return check(root, throttle_s=args.throttle, force=args.force,
-                     quiet=args.quiet, emit_hook_json=args.emit_hook_json)
+                     quiet=args.quiet, hook_format=args.hook_format)
     if args.command == "apply":
         return apply(root)
     return 2
