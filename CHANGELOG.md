@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.8 — 2026-06-04
+
+- fix(update): throttle only the auto (--quiet) session-start check, never a manual one — a manual 'update check' is now always live + prints its conclusion (was silenced when the SessionStart hook had checked within the hour)
+
 ## v1.0.7 — 2026-06-04
 
 - fix(fetch): raise FDS financials limit 8->16 to capture the buried fiscal Q4 (restores FDS-direct financials + unblocks FMP-uncovered small caps/ADRs that were failing the DL4 consecutive-quarter gate)

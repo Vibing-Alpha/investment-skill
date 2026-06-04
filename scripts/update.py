@@ -5,14 +5,18 @@ A recipient clones the published org repo (e.g. Vibing-Alpha/investment-skill).
 This module lets them DETECT when the maintainer has shipped a new release and
 CHOOSE to update — it never auto-mutates the repo.
 
-    python3 -m scripts.update check    # is a newer release available? (throttled, silent, network-safe)
+    python3 -m scripts.update check    # is a newer release available? (manual: always live + prints; network-safe)
     python3 -m scripts.update apply    # fast-forward to the latest release + show the changelog
 
 `check` is wired to run on Claude Code session start (see .claude/settings.json:
-`SessionStart` → `update check --quiet`). It self-throttles (default once/hour
-via a gitignored state file), times out fast, and is SILENT unless an update
-exists — so it never slows or breaks a session. Codex/Cursor/OpenCode users run
-`check`/`apply` manually (or wire their own hook).
+`SessionStart` → `update check --quiet`). That AUTOMATIC `--quiet` path
+self-throttles (default once/hour via a gitignored state file), times out fast,
+and is SILENT unless an update exists — so it never slows or breaks a session.
+The THROTTLE applies ONLY to the `--quiet` path: a manual `check` (no `--quiet`)
+is an explicit human request, so it ALWAYS does the live fetch+compare and always
+prints its conclusion ("up to date" or the release notice). `--force` bypasses
+the throttle on either path. Codex/Cursor/OpenCode users run `check`/`apply`
+manually (or wire their own hook).
 
 Update model = git pull (the repo IS the distribution unit): `check` does a
 lightweight `git fetch`; `apply` does `git pull --ff-only` (refuses to clobber
@@ -107,7 +111,15 @@ def _touch_state(root: Path) -> None:
 
 def check(root: Path, *, throttle_s: int, force: bool, quiet: bool) -> int:
     """Detect whether a newer release is available. ALWAYS returns 0."""
-    if not force and _throttled(root, throttle_s):
+    # Throttle ONLY the automatic path (the SessionStart hook runs `check
+    # --quiet`). A manual `check` is an explicit human request — silencing it
+    # because the hook stamped the state file within the hour gives the user
+    # zero output, indistinguishable from "up to date" even when a release is
+    # available. `quiet` is the proxy for "automatic context" (the hook is the
+    # only --quiet caller); the network-protection guarantee for session-start
+    # is preserved because the hook still passes --quiet. `--force` bypasses
+    # regardless.
+    if not force and quiet and _throttled(root, throttle_s):
         return 0
     _touch_state(root)  # stamp BEFORE network so a hang can't cause a re-check storm
 
@@ -173,11 +185,16 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="update",
                                 description="Detect + apply skill releases.")
     sub = p.add_subparsers(dest="command", required=True)
-    c = sub.add_parser("check", help="Is a newer release available? (throttled, silent)")
+    c = sub.add_parser("check",
+                       help="Is a newer release available? (manual: always live; "
+                            "--quiet/auto path: throttled + silent)")
     c.add_argument("--throttle", type=int, default=DEFAULT_THROTTLE_S,
-                   help=f"min seconds between checks (default {DEFAULT_THROTTLE_S})")
+                   help=f"min seconds between AUTOMATIC (--quiet) checks "
+                        f"(default {DEFAULT_THROTTLE_S}); ignored for a manual check")
     c.add_argument("--force", action="store_true", help="ignore the throttle")
-    c.add_argument("--quiet", action="store_true", help="print only when an update exists")
+    c.add_argument("--quiet", action="store_true",
+                   help="auto/hook mode: print only on an update AND honor the "
+                        "once/hour throttle")
     sub.add_parser("apply", help="fast-forward to the latest release")
     args = p.parse_args(argv)
     root = repo_root()
