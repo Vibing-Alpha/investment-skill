@@ -1679,8 +1679,28 @@ def _load_env() -> None:
                 os.environ.setdefault(key, value)
 
 
-if not os.environ.get("FINANCIAL_DATASETS_API_KEY"):
+def _bootstrap_env() -> None:
+    """Module-import `.env` bootstrap.
+
+    ALWAYS load `.env` — do NOT gate on any single key being present.
+    `.env` carries the whole `_ENV_KEY_ALLOWLIST` (FDS + FMP + FINNHUB +
+    FORCE_IPV4), and `_load_env()` injects each via `os.environ.setdefault`,
+    so a var already provided by the runtime environment still wins and
+    `.env` only fills the gaps.
+
+    The pre-fix guard was `if not os.environ.get("FINANCIAL_DATASETS_API_KEY")`,
+    which used the FDS key as a proxy for "config fully loaded." That broke
+    multi-key `.env`s: a runtime that exported FINANCIAL_DATASETS_API_KEY
+    (e.g. a WSL/shell profile) skipped `.env` entirely, so the `.env`-only
+    keys never loaded → scripts/screen.py FATAL'd with "FMP_API_KEY not set"
+    and the FDS→FMP financials fallback in scripts/fetch.py went silently
+    unavailable for ADRs / FDS-starved names. Regression-locked by
+    tests/test_http_get.py::test_bootstrap_env_loads_dotenv_when_fds_key_preset.
+    """
     _load_env()
+
+
+_bootstrap_env()
 
 _TIMEOUT = 30
 _MAX_RETRIES = 3

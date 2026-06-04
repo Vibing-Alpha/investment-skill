@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.6 — 2026-06-04
+
+- fix: always load .env so FMP_API_KEY/FINNHUB_API_KEY load even when FINANCIAL_DATASETS_API_KEY is already set in the environment
+
 ## v1.0.5 — 2026-06-03
 
 - Fix segmented revenue fetch: financialdatasets.ai retired /financials/segmented-revenues (HTTP 404); migrated to /financials/segments with the new nested response structure. Restores the per-segment revenue breakdown (product / geography / business segment) that analysis was silently missing, plus fail-closed hardening on unusable feeds.
