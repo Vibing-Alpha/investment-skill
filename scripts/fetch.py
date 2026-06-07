@@ -3412,6 +3412,32 @@ def _main_impl(
         # may have converted only the 12-field master set in place). Produces a
         # clean all-USD statement + repaired marker, or flags unrepairable.
         _repair_financials_currency_marker(financial_output)
+        # P1 (SNDK): flag extreme-QoQ quarters (real cyclical peak vs corrupt)
+        # into the file the fundamental agent actually reads, cross-checked
+        # against 07_earnings actuals — so the agent gets a deterministic
+        # real-vs-suspect signal instead of guessing "corrupted" and dropping a
+        # genuine peak. Runs on the post-currency-repair income statements.
+        from scripts.anomaly import detect_anomalous_quarters
+        # Cross-check against the SAME earnings object that gets saved to
+        # 07_earnings.json — `earnings_combined` is replaced by the FMP-fallback
+        # result above, so the pre-fallback `earnings_data` can be stale/empty for
+        # FMP-backfilled tickers (the foreign ADR / FDS-starved names most likely
+        # to need it). Pass the earnings object's OWN currency (NOT the combined-
+        # level normalized one, which is computed at FDS-fetch time and can be
+        # stale after fallback) so the detector judges currency basis honestly.
+        # On the mixed-currency-unrepairable path gross_profit can be native while
+        # revenue is USD, so skip the margin signal (revenue QoQ stays valid — it
+        # is always in the USD master set).
+        _margin_reliable = (
+            financial_output.get("currency_consistency", {}).get("status")
+            != "mixed_unrepairable"
+        )
+        financial_output["anomalous_quarters"] = detect_anomalous_quarters(
+            financial_output.get("income_statements", []),
+            earnings_combined.get("earnings") or {},
+            ticker=ticker,
+            margin_reliable=_margin_reliable,
+        )
         save_json(financial_output, output_dir / "02_financial_data.json")
         print("    02_financial_data.json", file=sys.stderr)
 

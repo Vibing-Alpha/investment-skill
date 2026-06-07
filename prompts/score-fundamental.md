@@ -216,6 +216,39 @@ If the company is an ADR (American Depositary Receipt):
   `data_quality_caveats`. See `currency_consistency.partial_conversion_warning`
   in the artifact.
 
+### Extreme-QoQ quarters (`anomalous_quarters`)
+
+`02_financial_data.json` may carry an `anomalous_quarters` list — quarters
+whose QoQ revenue (≥50%) or gross-margin (≥20pp) jump is so large that it
+*looks* like it could be corrupt data. Each entry is a DETERMINISTIC detection
+with the available EVIDENCE surfaced — **not** a verdict. Its purpose is so you
+don't silently drop a real cyclical peak/trough as "corrupt" (the P1 SNDK
+failure: a real +97% NAND-upcycle quarter was excluded, scoring the business on
+a false premise). **Do NOT reflexively treat a flagged quarter as corrupt** —
+adjudicate it, and only exclude it with an explicit stated reason in
+`data_quality_caveats`. Keep genuine peaks and apply through-cycle normalization
+(`scoring-calibration.md` §4): don't anchor the sub-score on the peak/trough,
+but keep the data and reflect the cycle in `interpretation` / `red_flags`.
+
+Each entry carries `qoq_revenue_pct`, `margin_delta_pp`, `yoy_revenue_pct`, a
+`note`, and `earnings_revenue_cross_check` `{actual_revenue, matches_statement,
+note}`. Weigh it:
+
+- `earnings_revenue_cross_check.matches_statement: true` — the statement revenue
+  agrees with `07_earnings` actuals on the **same currency basis**: strong
+  evidence the REVENUE level is real → keep the quarter; normalize per §4.
+- `matches_statement: false` — statement revenue and the earnings actual diverge
+  → possible unit/feed error; corroborate against the filing before trusting the
+  figure.
+- `matches_statement: null` — not comparable (no earnings actual for the period,
+  a different/unknown currency basis, or non-positive revenue — read the `note`).
+  Fall back to `yoy_revenue_pct` + `06_analyst_estimates` + the filing.
+
+The cross-check covers REVENUE ONLY — the gross-margin swing (`margin_delta_pp`)
+is **never** earnings-validated, so corroborate `gross_profit` / `cost_of_revenue`
+(filing / WebSearch) before letting the margin drive any profitability sub-score.
+Cite as `[API: 02_financial_data, anomalous_quarters]` when it shapes a sub-score.
+
 ## Output Format
 
 Write a JSON file with this structure:

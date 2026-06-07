@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.11 — 2026-06-07
+
+- feat(score-business): detect extreme-QoQ quarters (rev ≥50% / margin ≥20pp) and surface 07_earnings cross-check evidence into 02_financial_data.json, so the fundamental agent stops mistaking a real cyclical peak for corrupt data and dropping it (P1, SNDK)
+
 ## v1.0.10 — 2026-06-04
 
 - feat(update): the auto update-check now also notifies Codex (.codex/hooks.json SessionStart + --emit-hook-json codex) — Claude Code and Codex both get the session-start release notice; Cursor/OpenCode still manual
