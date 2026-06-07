@@ -239,8 +239,12 @@ _CONVERTED_USD_FIELDS: dict[str, frozenset[str]] = {
 # not in the converted-USD set). Any numeric monetary field present that is in
 # NEITHER set and is not recognized as non-monetary → the repair FAIL-CLOSES
 # (codex Loop review D: the curated set must not silently leave another ADR's
-# fields native). Cross-checked against
-# scripts/sources/financial_datasets._FINANCIAL_STATEMENT_NUMERIC_FIELDS.
+# fields native). Completeness is ENFORCED against
+# scripts/sources/financial_datasets._FINANCIALS_NUMERIC_FIELDS by
+# tests/test_currency_consistency.py::
+#   test_every_fds_financials_field_is_classified_for_repair — if FDS adds a
+# monetary field, that test fails until it is classified here (else the repair
+# fail-closes every foreign issuer carrying it; the P2 NOK failure class).
 _NATIVE_MONETARY_FIELDS: dict[str, frozenset[str]] = {
     "income_statements": frozenset({
         "cost_of_revenue", "gross_profit", "operating_expense",

@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.12 — 2026-06-07
+
+- P2 hardening + P3: enforce FDS-field classification completeness for the mixed-currency repair (test guard); scoring agent now sanity-checks impossible debt (current_debt/total_debt > total_liabilities) and skips leverage on a violation
+
 ## v1.0.11 — 2026-06-07
 
 - feat(score-business): detect extreme-QoQ quarters (rev ≥50% / margin ≥20pp) and surface 07_earnings cross-check evidence into 02_financial_data.json, so the fundamental agent stops mistaking a real cyclical peak for corrupt data and dropping it (P1, SNDK)

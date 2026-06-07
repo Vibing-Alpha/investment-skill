@@ -216,6 +216,28 @@ If the company is an ADR (American Depositary Receipt):
   `data_quality_caveats`. See `currency_consistency.partial_conversion_warning`
   in the artifact.
 
+### Impossible debt — sanity-check before using leverage
+
+`current_debt` and `total_debt` are SUBSETS of `total_liabilities`, so either
+one EXCEEDING `total_liabilities` is physically impossible. Before computing any
+leverage / coverage figure (`total_debt/equity`, debt/EBITDA, interest
+coverage), check `current_debt ≤ total_liabilities` and `total_debt ≤
+total_liabilities`. If violated (e.g. the observed LITE case: `current_debt`
+6,477M vs `total_liabilities` 4,054M, while assets = liabilities + equity still
+held — so the main table looked fine), the debt figure is UNRELIABLE — it is
+either:
+- an upstream data error (USD-domestic name) → do NOT compute leverage from it;
+  null/skip the leverage ratios, note it in `data_quality_caveats`, and source
+  the real debt from the filing / WebSearch if it is material to the score; or
+- a currency mismatch (foreign issuer whose statements are only partially
+  FX-converted — see the mixed-currency rule above): the comparison itself is
+  cross-currency, so re-check on one currency basis before concluding, and treat
+  per that rule.
+
+Either way, never feed an impossible debt value into a leverage ratio. (This is
+a judgment the agent must make — it cannot be done reliably by a producer script
+because per-field currency is not knowable at the data layer.)
+
 ### Extreme-QoQ quarters (`anomalous_quarters`)
 
 `02_financial_data.json` may carry an `anomalous_quarters` list — quarters
