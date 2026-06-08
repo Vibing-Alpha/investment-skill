@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.14 — 2026-06-08
+
+- fix(portfolio): Step 8 decision-log call used an undefined $BLOB after the P4 Write-tool switch — use the literal .decisions_blob.json path so the (non-optional) decision-log write doesn't break
+
 ## v1.0.13 — 2026-06-08
 
 - chore(P4): remove the deprecated macro us_2y/spread_10y_2y shim (^FVX is the 5Y → us_5y/spread_10y_5y only); score-industry now requires currently-tradeable peers (skip delisted/acquired); portfolio Step 8 writes its decisions blob via the Write tool (not a fragile heredoc)

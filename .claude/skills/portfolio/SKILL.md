@@ -421,7 +421,7 @@ Then call the logger:
 
 ```bash
 python3 -m scripts.portfolio_log write \
-  --decisions-blob "$BLOB" \
+  --decisions-blob reports/portfolio/{YYYYMMDD}/.decisions_blob.json \
   --state portfolio-state.yaml \
   --macro reports/portfolio/{YYYYMMDD}/macro.json \
   --constraints strategy.compiled.yaml \
