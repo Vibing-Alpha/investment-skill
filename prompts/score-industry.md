@@ -211,6 +211,12 @@ for NYSE/NASDAQ-listed companies, or add the exchange suffix for non-US stocks
 (e.g., `AWE.L` for London, `005930.KS` for Korea, `9984.T` for Tokyo).
 Do not use company names or unofficial abbreviations as tickers.
 
+Only list peers that are CURRENTLY, INDEPENDENTLY TRADED. A company acquired,
+merged away, taken private, or delisted is not a usable peer — its ticker no
+longer returns multiples and pollutes the peer set (e.g. JNPR once the HPE
+acquisition closed). If you are not certain a competitor is still trading on its
+own, verify with a current-year WebSearch before including it, or drop it.
+
 ## Critical Rules
 
 Source tagging and data handling rules are enforced by `.claude/rules/anti-hallucination.md`

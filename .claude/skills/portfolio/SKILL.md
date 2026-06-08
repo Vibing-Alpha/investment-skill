@@ -391,22 +391,31 @@ LLM-authored judgment fields. The script will fill in the deterministic
 parts (portfolio snapshot, macro, thesis metadata, stress test, etc.).
 See `prompts/portfolio-decide.md` §"Decision Log Output" for the blob
 schema. Write it to a run-scoped dotfile in the portfolio run dir
-(matching the `.validator_output.json` convention above) — portable
-(native Windows has no `/tmp`) and stable across step boundaries:
+(`reports/portfolio/{YYYYMMDD}/.decisions_blob.json`, matching the
+`.validator_output.json` convention above) — portable (native Windows has no
+`/tmp`) and stable across step boundaries.
 
-```bash
-BLOB=reports/portfolio/{YYYYMMDD}/.decisions_blob.json
-cat > "$BLOB" << 'EOF'
+**Use the Write tool** to create this `.json` file — do NOT write it with a
+Bash heredoc. You are the orchestrator (the main loop), not a subagent, so the
+Write tool works for you on a `.json` path; the `cat <<'EOF'` heredoc rule in
+`.claude/rules/skill-architecture.md` #8 exists ONLY for *subagents* (whose
+Write tool is blocked for `.md`). The blob carries CJK `notes`, apostrophes,
+and nested JSON — a heredoc quotes/escapes those fragilely (and a stray
+delimiter line truncates it silently); the Write tool sidesteps all of it.
+Content shape:
+
+```json
 {
-  "decisions": [ ... one entry per ticker in holdings + watchlist ... ],
-  "orders_proposed": [ ... sequence-numbered orders ... ],
-  "follow_ups": [ ... future catalysts to watch ... ],
-  "candidate_scan": { ... },   # REQUIRED when orders_proposed is empty (Phase 3 zero-order discipline)
+  "decisions": [ "... one entry per ticker in holdings + watchlist ..." ],
+  "orders_proposed": [ "... sequence-numbered orders ..." ],
+  "follow_ups": [ "... future catalysts to watch ..." ],
+  "candidate_scan": { },
   "principle_audit_interpretation": "Explain why any principle was not cited",
   "notes": [ "Any structural observations" ]
 }
-EOF
 ```
+(`candidate_scan` is REQUIRED when `orders_proposed` is empty — Phase 3
+zero-order discipline.)
 
 Then call the logger:
 

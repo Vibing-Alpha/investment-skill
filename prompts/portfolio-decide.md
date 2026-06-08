@@ -16,10 +16,8 @@ You will receive:
    - `bq_analysis.json` (summary): BQ score, dimension scores,
      key strengths/risks, watchlist recommendation
 3. **Macro snapshot** — broad market indicators (SPY/QQQ/DJI price + MAs),
-   VIX (current + MA20), interest rates (fed funds, 10Y, 5Y, spread —
-   `^FVX` is the 5Y; the legacy keys are a deprecation shim where
-   `us_2y` == `us_5y` and `spread_10y_2y` == `spread_10y_5y` (the 10Y−5Y
-   spread), so do not read `us_2y` as a true 2Y)
+   VIX (current + MA20), interest rates (fed funds, `us_10y`, `us_5y`, and
+   `spread_10y_5y` — the 10Y−5Y spread; `^FVX` is the 5Y, so there is no `us_2y`)
    Also includes `ticker_indicators[TICKER]` — **run-day** technical
    indicators (RSI, MACD, Bollinger `pct_b`/`position`, ATR, volume
    confirmation, RSI divergence), same shape as `indicators.json`. These are

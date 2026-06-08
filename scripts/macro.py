@@ -28,9 +28,9 @@ VIX_TICKER = "^VIX"
 TREASURY_10Y = "^TNX"
 # ^FVX is the 5-Year Treasury yield (Yahoo Finance lacks a 2Y ticker).
 # Historically this was emitted as ``us_2y`` with ``spread_10y_2y`` — a
-# mislabel that corrupted the inversion signal. Now emitted canonically
-# as ``us_5y`` / ``spread_10y_5y``; the legacy keys remain as a one-
-# release deprecation shim (see ``_deprecated_keys`` in the output).
+# mislabel that corrupted the inversion signal. Now emitted canonically as
+# ``us_5y`` / ``spread_10y_5y``; the legacy ``us_2y`` / ``spread_10y_2y``
+# deprecation shims were REMOVED (consumers migrated to the 5Y keys).
 TREASURY_5Y = "^FVX"
 # Back-compat alias so any external import keeps working for one release.
 TREASURY_5Y_AS_2Y_PROXY = TREASURY_5Y
@@ -453,15 +453,13 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # Interest rates: fallback → disk → API
     # ------------------------------------------------------------------
     # ISS-133 (Loop9 cycle 1): never mutate caller-provided rates_fallback
-    # in place. We add us_10y / us_5y / spreads / _deprecated_keys
-    # below; with the pre-fix `rates = rates_fallback` aliasing, two
-    # successive calls of `fetch_macro_snapshot(rates_fallback=X)`
-    # would see X grow each time.
-    # ISS-220 4.13 (Loop33 cycle 1): a shallow `dict(...)` copy is
-    # insufficient — `rates.setdefault("_deprecated_keys", []).append(...)`
-    # below mutates the nested list, which a shallow copy still shares
-    # with the caller's dict. Use deepcopy so caller-owned nested
-    # mutables stay untouched.
+    # in place. We add us_10y / us_5y / spreads below; with the pre-fix
+    # `rates = rates_fallback` aliasing, two successive calls of
+    # `fetch_macro_snapshot(rates_fallback=X)` would see X grow each time.
+    # ISS-220 4.13 (Loop33 cycle 1): use deepcopy (not a shallow `dict(...)`)
+    # so any caller-owned NESTED mutable stays untouched even if a future
+    # field appends to a nested list. (Historically the `_deprecated_keys`
+    # shim list was the nested mutable; that shim has since been removed.)
     import copy as _copy
     # ISS-220 4.33 (Loop38 cycle 1, iter7): truthy check (was `is not None`).
     # Pre-fix `rates_fallback={}` (empty dict) was treated as "valid
@@ -497,10 +495,10 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             }
 
     # Treasury yields from Yahoo
-    # ^FVX is the 5Y (not 2Y) — canonical key is ``us_5y``. The legacy
-    # ``us_2y`` / ``spread_10y_2y`` keys are kept as a one-release
-    # deprecation shim with identical values and flagged in
-    # ``_deprecated_keys``. Remove next release.
+    # ^FVX is the 5Y (not 2Y) — canonical keys are ``us_5y`` / ``spread_10y_5y``.
+    # The legacy ``us_2y`` / ``spread_10y_2y`` deprecation shims (identical 5Y
+    # values under a 2Y label) were REMOVED here — do NOT re-introduce a
+    # ``us_2y`` key for ^FVX (it is a 5Y; audit pattern J / rules/units.md HIGH-4).
     t10y_triple = raw.get(("treasury", "10y"))
     t5y_triple = raw.get(("treasury", "5y"))
     t10y_price = t10y_triple[0] if t10y_triple else None
@@ -514,11 +512,6 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         rates["us_10y"] = round(t10y_price, 3)
     if t5y_price is not None and "us_5y" not in rates:
         rates["us_5y"] = round(t5y_price, 3)
-        # Deprecation shim: preserve us_2y during transition window.
-        rates["us_2y"] = rates["us_5y"]
-        deprecated = rates.setdefault("_deprecated_keys", [])
-        if "us_2y" not in deprecated:
-            deprecated.append("us_2y")
 
     # Yield spread (10Y - 5Y). ``spread_10y_5y`` replaces ``spread_10y_2y``
     # (deprecated); macro.py currently emits both for back-compat.
@@ -533,11 +526,6 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     y5 = _safe_num(rates.get("us_5y"))
     if y10 is not None and y5 is not None:
         rates["spread_10y_5y"] = round(y10 - y5, 3)
-        # Deprecation shim
-        rates["spread_10y_2y"] = rates["spread_10y_5y"]
-        deprecated = rates.setdefault("_deprecated_keys", [])
-        if "spread_10y_2y" not in deprecated:
-            deprecated.append("spread_10y_2y")
 
     # ------------------------------------------------------------------
     # Ticker prices + run-day technical indicators

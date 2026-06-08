@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.13 — 2026-06-08
+
+- chore(P4): remove the deprecated macro us_2y/spread_10y_2y shim (^FVX is the 5Y → us_5y/spread_10y_5y only); score-industry now requires currently-tradeable peers (skip delisted/acquired); portfolio Step 8 writes its decisions blob via the Write tool (not a fragile heredoc)
+
 ## v1.0.12 — 2026-06-07
 
 - P2 hardening + P3: enforce FDS-field classification completeness for the mixed-currency repair (test guard); scoring agent now sanity-checks impossible debt (current_debt/total_debt > total_liabilities) and skips leverage on a violation
