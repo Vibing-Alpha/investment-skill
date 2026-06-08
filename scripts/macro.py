@@ -513,8 +513,8 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     if t5y_price is not None and "us_5y" not in rates:
         rates["us_5y"] = round(t5y_price, 3)
 
-    # Yield spread (10Y - 5Y). ``spread_10y_5y`` replaces ``spread_10y_2y``
-    # (deprecated); macro.py currently emits both for back-compat.
+    # Yield spread (10Y - 5Y) → ``spread_10y_5y``. The deprecated
+    # ``spread_10y_2y`` shim has been removed (only the 5Y spread is emitted).
     # ISS-220 4.22 (Loop35 cycle 1): coerce via safe_num before
     # arithmetic. Pre-fix `is not None` only — a string rate
     # (`"4.5"`) → TypeError on subtraction; a bool rate (True) →

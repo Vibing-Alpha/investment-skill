@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.0.15 — 2026-06-08
+
+- docs(macro): drop a stale comment that still claimed both 10Y-2Y and 10Y-5Y spreads are emitted (the 2Y shim was removed in v1.0.13; only spread_10y_5y is emitted). Comment-only, no behavior change.
+
 ## v1.0.14 — 2026-06-08
 
 - fix(portfolio): Step 8 decision-log call used an undefined $BLOB after the P4 Write-tool switch — use the literal .decisions_blob.json path so the (non-optional) decision-log write doesn't break
