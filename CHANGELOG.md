@@ -3,6 +3,14 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.1.0 — 2026-06-10
+
+- Cowork thin-plugin packaging: install from this repo's marketplace, then run /stock-v7-setup (clone-launcher: persistent clone + venv in your project folder)
+- All 8 skills hardened for Cowork fresh-shell execution (per-step root resolve, state rehydration, venv-aware $PYBIN)
+- Money-path config gate: graded single-root guard (portfolio reads block on wrong/unconfirmed clone; single-ticker analysis warns)
+- New: distribute doctor (one-shot env/config/deps/network diagnosis), bidirectional plugin-vs-clone version-skew warnings
+- Anti-hallucination: WebSearch-sourced claims now bind outlet + URL + access date, validated at load (fresh runs only; old reports unaffected)
+
 ## v1.0.15 — 2026-06-08
 
 - docs(macro): drop a stale comment that still claimed both 10Y-2Y and 10Y-5Y spreads are emitted (the 2Y shim was removed in v1.0.13; only spread_10y_5y is emitted). Comment-only, no behavior change.

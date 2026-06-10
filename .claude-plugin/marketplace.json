@@ -2,11 +2,13 @@
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "vibing-alpha-stock-v7",
   "description": "US-stock investment analysis skills (thin clone-launcher plugin).",
-  "owner": { "name": "Vibing Alpha" },
+  "owner": {
+    "name": "Vibing Alpha"
+  },
   "plugins": [
     {
       "name": "stock-v7-skills",
-      "version": "1.0.15",
+      "version": "1.1.0",
       "description": "US-stock investment analysis skills (thin clone-launcher plugin).",
       "source": "./plugins/stock-v7-skills",
       "category": "productivity"
