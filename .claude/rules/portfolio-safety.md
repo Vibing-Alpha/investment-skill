@@ -43,5 +43,34 @@ extraction logic or the compile step in `.claude/skills/portfolio/SKILL.md`.
   matches `strategy.yaml` current principles before writing any
   decision log
 
+## Single-root guard — dual standard (quick-ref)
+
+Guards: **a money-path run reading the WRONG clone's portfolio.**
+- **Setup-time = HARD**: `confirm_setup` → `find_conflicts` refuses to stamp
+  when >1 root holds a real fund-state.
+- **Runtime = GRADED** (`config_gate._single_root_guard`, keyed on
+  `root_resolve.root_source()`): marker absent (non-Cowork) / corrupt marker /
+  different-fund-state mismatch → `--portfolio` **BLOCKS**, base check
+  **WARNS + proceeds**. Cowork mounts (`/sessions/*/mnt/*`) proceed with no
+  marker (prelude single-mount fail-closed owns it). Empty marker = absent.
+  Compare roots via `samefile` / normcase-folded resolve, never raw `resolve() !=`.
+Full matrix + rationale: `rules/portfolio-safety.md` §"Single-root guard".
+
+## Advisory-only execution boundary (quick-ref)
+
+This system is **advisory-only** — `/portfolio` outputs order RECOMMENDATIONS;
+the user executes manually + maintains `portfolio-state.yaml`. No code submits
+orders (IBKR MCP = auth only). Two invariants:
+- **Never** describe a proposed order as submitted/placed/executed; never fill
+  `execution_outcomes` / `user_confirmation.status` — the user does, after acting.
+- Editing `portfolio-state.yaml`: show a before/after **diff** → user confirms
+  THAT diff → keep the prior version → re-run `config_gate check --portfolio`
+  (structure is validated, not correctness — a mistyped share count passes).
+
+Future automated execution (if ever wired) MUST go through a deterministic gateway
+(machine-verifiable `account_type` + explicit `CONFIRM LIVE <acct> <hash>`, draft
+never reportable as submitted) — NOT built now (anti-ratchet). Full boundary +
+gateway contract: `rules/portfolio-safety.md` §"Advisory-only execution boundary".
+
 Full vocabulary + action semantics + 15-rule order logic at
 `rules/portfolio-safety.md`.

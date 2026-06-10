@@ -350,7 +350,9 @@ but do not need full source tags — those are in the JSON.
 ## Rules
 
 - Anti-hallucination: every number must carry a source tag (`[API]`, `[Calc: formula]`,
-  `[WebSearch: source]`, `[Filing: 10-K/10-Q]`). No source = does not exist.
+  `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — WebSearch tags must keep
+  the url + access-date binding; preserve it verbatim when quoting from the
+  sub-analyses — `[Filing: 10-K/10-Q]`). No source = does not exist.
 - Conflicts must be surfaced and resolved explicitly, never averaged away
 - User principles are LENS, not FILTER — adjust weighting, never suppress evidence
 - All scenario targets and probabilities must come from valuation.json, not invented

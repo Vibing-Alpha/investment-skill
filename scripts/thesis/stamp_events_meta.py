@@ -106,6 +106,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         stamp_events_generated_at(events)
+        # WebSearch binding marker (Plan B Task 6). This CLI runs on the
+        # RERUN path only, i.e. events.json was freshly LLM-authored under
+        # the post-binding prompt contract — so mark it unconditionally.
+        # The SKILL then strict-validates the source tags fail-closed, and
+        # a future reuse_events copy carries the marker forward.
+        from scripts.schemas.source_tag import (
+            WEBSEARCH_BINDING_MARKER,
+            WEBSEARCH_BINDING_VERSION,
+        )
+        events[WEBSEARCH_BINDING_MARKER] = WEBSEARCH_BINDING_VERSION
         # Atomic write (temp + os.replace) so a crash mid-write can't leave a
         # partial events.json for synthesis to ingest — mirrors
         # reuse_events.py / stamp_thesis_meta.py.

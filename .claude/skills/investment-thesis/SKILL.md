@@ -27,6 +27,75 @@ conditions?**
 It does NOT answer: "How much to buy?" or "What order type?" — those
 belong to the portfolio/decision layer.
 
+## Repo-root prelude (fresh-shell — run first)
+
+Every Bash block in this skill may run in a **fresh shell with an ephemeral cwd**
+(Cowork): variables `export`ed in one block do NOT survive into the next, and the
+harness Read tool does NOT follow a bash `cd`. So the repo root is resolved exactly
+ONCE, here. `<TICKER>` below is likewise substituted by you into EACH block (never
+carried as a shell variable across blocks); each block re-runs the idempotent
+`allocate-bq-run` (current run dir) / `find-latest-prior` (prior dirs) to re-derive
+its dirs; and the COMPUTED cross-step state — the Step-2 canonical events anchor
+(which CANNOT be re-derived later: Step 4's reuse path mutates the events doc) plus
+the Step-3 events-reuse decision fields — lives in the run-scoped state file
+`$REPORT_DIR/.run_state.json`, written by Steps 2/3 and re-read by every later block.
+
+Run this block first and **CAPTURE the `STOCK_V7_ROOT=...` value it prints**. Substitute
+that absolute path for the literal `<captured-abs-ROOT>` in every later Bash block, every
+harness Read path, and every subagent-dispatch path in this skill. If this block exits
+non-zero (multiple candidate roots, or no repo found), show its stderr to the user and
+**STOP** — run nothing else.
+
+If it prints a `stock-v7: WARNING — version skew` line, relay that warning to the user verbatim and continue — it is advisory only (the installed plugin and the clone are at different versions; it tells the user which half to update), never a stop.
+
+```bash
+# --- resolver-core ---   (byte-identical to scripts/templates/root_resolver.sh — Task 5 enforces)
+# cwd-or-ancestor: if cwd (or ANY parent) is the repo, USE IT — CC-CLI/Codex/Cursor/OpenCode run from the
+# repo (or a subdir), so this is a TRUE no-op (covers subdir runs + multi-worktree dev: always the clone
+# you're in). Composite marker = scripts/ + prompts/ + strategy.example.yaml (the last is the
+# stock-v7-specific tracked file; tighter than CLAUDE.md/VERSION alone).
+ROOT=""; d="$PWD"
+while [ "$d" != "/" ]; do                # cwd-or-ancestor; marker = scripts/ + prompts/ + strategy.example.yaml
+  if [ -d "$d/scripts" ] && [ -d "$d/prompts" ] && [ -f "$d/strategy.example.yaml" ]; then ROOT="$d"; break; fi
+  d=$(dirname "$d")
+done
+case "${STOCK_V7_HOME:-}" in /*) [ -z "$ROOT" ] && ROOT="$STOCK_V7_HOME";; esac   # env override seam — ABSOLUTE only (relative/~ is ignored, mirroring resolve_root's fail-closed; nothing can set it persistently in Cowork)
+if [ -z "$ROOT" ]; then
+  # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
+  # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
+  # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
+  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+    | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
+        && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
+  if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
+    echo "stock-v7: multiple stock-v7 roots in mounts — keep ONE:" >&2; printf '%s\n' "$HITS" >&2; exit 1
+  fi
+  ROOT=$(printf '%s\n' "$HITS" | head -1)   # the sole hit, or EMPTY — the consumer tail handles empty
+fi
+# --- end resolver-core ---
+# BUSINESS tail (the setup skill replaces everything below the end-marker with its clone/pull tail):
+if [ -z "$ROOT" ]; then                                   # CC-CLI marker fallback (rare: not-in-repo + no env)
+  ROOT=$(cat "$HOME/.stock-v7-home" 2>/dev/null | tr -d '\r')   # strip CRLF if the marker was hand-edited on Windows
+  ROOT="${ROOT:-$HOME/Claude/stock-v7}"
+fi
+cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
+printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+```
+
+## Preflight: Money-path config
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.config_gate check
+```
+
+If it exits non-zero, STOP and show its stderr to the user (config not confirmed /
+required API key missing) — do NOT run any analysis or produce numbers. Then continue
+below.
+
 ## Prerequisites
 
 A complete BQ analysis must exist. Use the delta-aware resolver — NOT
@@ -35,13 +104,15 @@ same-day not-yet-assembled dirs and failed-tier runs, silently
 picking broken data.
 
 ```bash
-TICKER="AAPL"  # replace with actual ticker
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"   # agent-substituted (e.g. AAPL) — substituted into every block, never exported across them
 # delta-aware: skips corrupt / same-day-not-assembled / failed-tier dirs
-REPORT_DIR=$(python3 -m scripts.delta.resolver find-latest-prior \
-  --ticker "$TICKER" --skill score-business --include-today)
+"$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business --include-today
 ```
 
-If `REPORT_DIR` is empty, no valid BQ analysis exists. Inform the user
+If it prints nothing, no valid BQ analysis exists. Inform the user
 and suggest running `/score-business TICKER` first. Step 0 below does
 the authoritative probe (it uses the same resolver) and handles
 cascading to /score-business if needed.
@@ -57,13 +128,16 @@ are working artifacts kept for traceability.
 
 ## Scripts Available
 
+Every Bash block below first `cd`s to the captured root and runs scripts via
+`"$PYBIN" -m scripts.<module>` (venv-or-python3 indirection).
+
 | Script | Purpose | CLI |
 |--------|---------|-----|
-| `scripts.indicators` | Technical indicators (if not already computed) | `python3 -m scripts.indicators --price-json PATH --output PATH` |
-| `scripts.historical_multiples` | 2Y historical P/E, P/S, P/B, EV/EBITDA range | `python3 -m scripts.historical_multiples --ticker $TICKER --financial-json PATH --price-json PATH --output PATH` |
-| `scripts.peers` | Peer valuation multiples via yfinance batch | `python3 -m scripts.peers --tickers T1 T2 T3 --output PATH` |
-| `scripts.extract_fcf` | Extract TTM FCF/share + WACC from data files | `python3 -m scripts.extract_fcf --ticker $TICKER --financial-json PATH --price-json PATH --macro-json PATH --output PATH` |
-| `scripts.reverse_dcf` | Implied growth rate from current price | `python3 -m scripts.reverse_dcf --price PRICE --fcf-per-share FCF --discount-rate RATE --output PATH` |
+| `scripts.indicators` | Technical indicators (if not already computed) | `--price-json PATH --output PATH` |
+| `scripts.historical_multiples` | 2Y historical P/E, P/S, P/B, EV/EBITDA range | `--ticker $TICKER --financial-json PATH --price-json PATH --output PATH` |
+| `scripts.peers` | Peer valuation multiples via yfinance batch | `--tickers T1 T2 T3 --output PATH` |
+| `scripts.extract_fcf` | Extract TTM FCF/share + WACC from data files | `--ticker $TICKER --financial-json PATH --price-json PATH --macro-json PATH --output PATH` |
+| `scripts.reverse_dcf` | Implied growth rate from current price | `--price PRICE --fcf-per-share FCF --discount-rate RATE --output PATH` |
 
 ## Execution (delta-era)
 
@@ -71,46 +145,50 @@ are working artifacts kept for traceability.
 
 **Validate the ticker symbol before anything else.** `$TICKER` and
 values derived from it ($REPORT_DIR, $PRIOR_THESIS_DIR) are interpolated
-into `python3 -c '...'` heredocs. An unsanitized ticker containing
-quotes / path separators could escape the single-quoted heredoc and
-execute arbitrary Python. Restrict to the actual US ticker vocabulary:
+into `"$PYBIN" -c '...'` snippets in later steps. An unsanitized ticker
+containing quotes / path separators could escape the single-quoted
+snippet and execute arbitrary Python. Restrict to the actual US ticker
+vocabulary (letters + dot, 1-10 chars). If this block exits non-zero
+(invalid ticker), STOP and tell the user.
 
 ```bash
-TICKER="AAPL"
-if ! [[ "$TICKER" =~ ^[A-Z][A-Z.]{0,9}$ ]]; then
-    echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2
-    exit 1
-fi
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+echo "$TICKER" | grep -Eq '^[A-Z][A-Z.]{0,9}$' \
+  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2; exit 1; }
 
-REPORT_DIR=$(python3 -c "
-from scripts.delta.calendar import session_et
-from pathlib import Path
-# session_et (not today_et) — directory anchor is the trading day
-# whose close is being analyzed. Stable across ET midnight for one
-# continuous session, so consecutive /score-business + /investment-thesis
-# invocations land in the same date dir.
-p = Path('reports') / '$TICKER' / session_et().strftime('%Y%m%d')
-p.mkdir(parents=True, exist_ok=True)
-(p / 'data').mkdir(exist_ok=True)
-print(str(p))
-")
+# allocate-bq-run is session_et-anchored (not today_et) — the directory anchor
+# is the trading day whose close is being analyzed. Stable across ET midnight
+# for one continuous session, so consecutive /score-business +
+# /investment-thesis invocations land in the same date dir.
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 
 # Find prior thesis (for events reuse decision)
-PRIOR_THESIS_DIR=$(python3 -m scripts.delta.resolver find-latest-prior \
+PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill investment-thesis)
 
 # Find same-day BQ (for cascade decision — uses include-today)
-SAME_DAY_BQ_DIR=$(python3 -m scripts.delta.resolver find-latest-prior \
+SAME_DAY_BQ_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business --include-today)
+printf 'REPORT_DIR=%s\nPRIOR_THESIS_DIR=%s\nSAME_DAY_BQ_DIR=%s\n' \
+  "$REPORT_DIR" "$PRIOR_THESIS_DIR" "$SAME_DAY_BQ_DIR"
 ```
+
+Note the printed `REPORT_DIR` (relative to the repo root), `PRIOR_THESIS_DIR`
+(possibly empty = first thesis run), and `SAME_DAY_BQ_DIR` (for the Step 1
+cascade decision). Later blocks RE-RUN the same idempotent commands rather
+than relying on these variables (fresh shells lose them); you use the printed
+values for (1) the Step 1 cascade comparison and (2) composing absolute
+subagent-dispatch paths as `<captured-abs-ROOT>/<REPORT_DIR>/...`.
 
 ### Step 1: Ensure same-day BQ exists (cascade if not)
 
-If `$SAME_DAY_BQ_DIR` is empty OR it differs from `$REPORT_DIR`, invoke
-`/score-business TICKER` as a cascade before proceeding. The cascade
-will decide its own tier (full / partial / no_op).
+If the printed `SAME_DAY_BQ_DIR` is empty OR it differs from the printed
+`REPORT_DIR`, invoke `/score-business TICKER` as a cascade before
+proceeding. The cascade will decide its own tier (full / partial / no_op).
 
-Compare against `$REPORT_DIR` (the `session_et` directory anchor from
+Compare against `REPORT_DIR` (the `session_et` directory anchor from
 Step 0), NOT against the `today_et` calendar date. Both dirs are
 `session_et`-anchored, so on a weekend/holiday `today_et` (e.g.
 2026-05-25) legitimately differs from the session dir (e.g. 20260522);
@@ -124,7 +202,11 @@ valid BQ is for this session ⇒ no cascade.
 - User declines: skip the cascade. Run probe-level fetch alone so
   events has fresh data:
   ```bash
-  python3 -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
+  cd "<captured-abs-ROOT>"
+  PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+  TICKER="<TICKER>"
+  REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+  "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
     --categories 01_price_data,02_financial_data,03_company_news,04_insider_data,06_analyst_estimates,07_earnings,09_macro_rates \
     --news-limit 10 \
     --tier-decided probe
@@ -139,24 +221,51 @@ valid BQ is for this session ⇒ no cascade.
 ### Step 2: Gate 1 — classifier (prior-events-scoped), ONE call
 
 Extract the canonical anchor from prior events.json **ONCE, BEFORE any
-mutation**, then use it as `since_date`:
+mutation**, then use it as `since_date`. This Step-2-extracted value is
+the run's must-not-re-derive state: the block below persists it into
+`$REPORT_DIR/.run_state.json`, and later fresh-shell blocks (Step 7's
+classifier gate) re-read it from there instead of re-deriving it.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill investment-thesis)
 PRIOR_EVENTS=""
 if [ -n "$PRIOR_THESIS_DIR" ]; then
     PRIOR_EVENTS="$PRIOR_THESIS_DIR/events.json"
 fi
-CANONICAL_ANCHOR=$(python3 -m scripts.delta.probe canonical-events-anchor \
+CANONICAL_ANCHOR=$("$PYBIN" -m scripts.delta.probe canonical-events-anchor \
     --prior-events "$PRIOR_EVENTS" 2>/dev/null)
+
+# Persist the Step-2-extracted anchor (pre-mutation truth, spec R11/R12) into
+# the run-scoped state file. MERGE-write: a same-day /score-business cascade
+# writes {'tier': ...} into the same file and must not be clobbered.
+"$PYBIN" -c "
+import json, pathlib
+p = pathlib.Path('$REPORT_DIR/.run_state.json')
+s = json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+s['canonical_anchor'] = '$CANONICAL_ANCHOR'
+p.write_text(json.dumps(s, indent=2), encoding='utf-8')
+"
+printf 'CANONICAL_ANCHOR=%s\n' "$CANONICAL_ANCHOR"
 ```
 
-If `$CANONICAL_ANCHOR` is empty (first run, pre-delta artifact,
+If the printed `CANONICAL_ANCHOR` is empty (first run, pre-delta artifact,
 malformed meta): skip the classifier entirely (no prior to diff
 against); tier will be fresh-events.
 
-Otherwise spawn a subagent with `prompts/delta/classify-news.md`
-passing articles from `$REPORT_DIR/data/03_company_news.json` with
-`since_date=$CANONICAL_ANCHOR`. Rubric at `.claude/rules/delta-materiality.md`.
+Otherwise spawn a subagent with
+`<captured-abs-ROOT>/prompts/delta/classify-news.md` as its instructions,
+passing articles from `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json`
+with `since_date = <the printed CANONICAL_ANCHOR>`. The rubric is at
+`<captured-abs-ROOT>/.claude/rules/delta-materiality.md`. Instruct it to WRITE
+its output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.json` —
+substitute the concrete absolute path into the dispatch prompt (the subagent
+inherits neither this shell's variables nor its cwd; `.json` writes are
+allowed for subagents).
 
 This single call drives Gate 1 (material_count==0) AND supplies
 `low_signal_news_since` + `low_signal_headlines` for §7.5 synthesis
@@ -173,39 +282,81 @@ The helper extracts `canonical_events_anchor_et` BEFORE any mutation
 of the prior events doc (spec R11/R12) and enforces the 3-condition
 classifier health check. Do NOT reimplement these inline.
 
+The decision's 5 cut-fields are cross-step state: this block persists them
+into `$REPORT_DIR/.run_state.json`, and Steps 4/7 re-read them from there
+(fresh shells lose variables). If the block exits non-zero (unexpected
+decision kind), STOP and surface the error.
+
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill investment-thesis)
+
 # DECISION format: "reuse|gates_passed|gates_failed|override_reason|anchor"
-DECISION=$(python3 -m scripts.delta.probe decide-events-reuse \
+DECISION=$("$PYBIN" -m scripts.delta.probe decide-events-reuse \
     --report-dir "$REPORT_DIR" \
     --prior-thesis-dir "$PRIOR_THESIS_DIR" \
     --classifier-output "$REPORT_DIR/.classifier_output.json")
 
-# Parse decision + preserve anchor for Step 4 reuse_meta stamping.
-# The anchor field is Step 2's CANONICAL_ANCHOR re-derived by the
-# helper; both are the same value since read_prior_events_run_date
-# is pure.
-CANONICAL_ANCHOR=$(echo "$DECISION" | cut -d'|' -f5)
-```
-
-### Step 4: Events — reuse or rerun
-
-Parse gate results AND write the audit-trail JSON consumed by Step 7's
-`run_meta write --events-reuse-json`. Both paths write the file — on
-`reuse` it records what was reused from where; on `rerun` it records
-why the gates failed:
-
-```bash
 DECISION_KIND=$(echo "$DECISION" | cut -d'|' -f1)
 GATES_PASSED=$(echo "$DECISION" | cut -d'|' -f2)
 GATES_FAILED=$(echo "$DECISION" | cut -d'|' -f3)
 OVERRIDE=$(echo "$DECISION" | cut -d'|' -f4)
+DECISION_ANCHOR=$(echo "$DECISION" | cut -d'|' -f5)
+
+# Validate capture before persisting (guards against silent empty/garbled DECISION)
+case "$DECISION_KIND" in
+    reuse|rerun) ;;
+    *) echo "FATAL: decide-events-reuse returned unexpected kind: '$DECISION_KIND'" >&2; exit 1 ;;
+esac
+
+# Persist the decision fields for later fresh-shell blocks (Steps 4 + 7).
+# decision_anchor is the helper's re-derivation of Step 2's CANONICAL_ANCHOR —
+# the same value, since read_prior_events_run_date is pure and runs BEFORE any
+# mutation; Step 4's reuse_meta stamping uses it. canonical_anchor (written in
+# Step 2) stays untouched as the classifier-dispatch predicate Step 7 gates on.
+"$PYBIN" -c "
+import json, pathlib
+p = pathlib.Path('$REPORT_DIR/.run_state.json')
+s = json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+s.update({
+    'decision_kind': '$DECISION_KIND',
+    'gates_passed': '$GATES_PASSED',
+    'gates_failed': '$GATES_FAILED',
+    'override_reason': '$OVERRIDE',
+    'decision_anchor': '$DECISION_ANCHOR',
+})
+p.write_text(json.dumps(s, indent=2), encoding='utf-8')
+"
+printf 'DECISION=%s\n' "$DECISION"
 ```
+
+### Step 4: Events — reuse or rerun
+
+Branch on the printed `DECISION` kind (re-read in-block from
+`.run_state.json` — fresh shells lose the Step 3 variables). Both paths
+write the audit-trail JSON consumed by Step 7's `run_meta write
+--events-reuse-json` — on `reuse` it records what was reused from where;
+on `rerun` it records why the gates failed.
 
 If `reuse`: copy prior events.json forward with prune + stale-date
 rewrite + reuse_meta stamping via the dedicated CLI:
 
 ```bash
-python3 -m scripts.thesis.reuse_events \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill investment-thesis)
+# decision_anchor = Step 2's canonical anchor re-derived by the pure helper
+# (same value); reuse_meta is stamped with it.
+CANONICAL_ANCHOR=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['decision_anchor'])")
+GATES_PASSED=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['gates_passed'])")
+"$PYBIN" -m scripts.thesis.reuse_events \
     --decision-kind reuse \
     --report-dir "$REPORT_DIR" \
     --prior-thesis-dir "$PRIOR_THESIS_DIR" \
@@ -213,12 +364,26 @@ python3 -m scripts.thesis.reuse_events \
     --gates-passed "$GATES_PASSED"
 ```
 
-If `rerun`: spawn events agent (prompts/evaluate-events.md) on today's
-probe data AND still write the audit record so run_meta captures WHY
-fresh regeneration was chosen:
+If `rerun`: spawn the events agent with
+`<captured-abs-ROOT>/prompts/evaluate-events.md` on today's probe data
+(output: `<captured-abs-ROOT>/<REPORT_DIR>/events.json` — compose the
+dispatch prompt with concrete absolute paths; the subagent inherits
+neither this shell's variables nor its cwd) AND still write the audit
+record so run_meta captures WHY fresh regeneration was chosen.
+The events agent MUST have WebSearch access; its prompt carries a
+fail-closed preflight (one real WebSearch call before any analysis;
+host lacks the tool → the agent reports
+`cannot complete: host lacks WebSearch`). If the agent reports that,
+STOP the run — do not synthesize a thesis from memory-era events:
 
 ```bash
-python3 -m scripts.thesis.reuse_events \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+GATES_FAILED=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['gates_failed'])")
+OVERRIDE=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['override_reason'])")
+"$PYBIN" -m scripts.thesis.reuse_events \
     --decision-kind rerun \
     --report-dir "$REPORT_DIR" \
     --gates-failed "$GATES_FAILED" \
@@ -245,15 +410,20 @@ fail-safe (possibly date-early) behavior, NOT a regression. But "leave the
 fallback" is only safe if the fallback is actually a normalizable timestamp:
 if the stamp failed AND `generated_at` is missing/garbled, the downstream
 `derive_events_freshness` (Step 6.5) would hard-`raise`. So on stamp failure
-we VERIFY the fallback and abort only when it is genuinely unusable. This
+we VERIFY the fallback and abort only when it is genuinely unusable — if the
+block exits non-zero, STOP and surface the error. This
 keeps the strict Pareto property: correct value in the normal case; the
 prior fail-safe value if the stamp fails but the fallback is fine; a clear
 early abort only in the case Step 6.5 would have crashed anyway.
 
 ```bash
-if ! python3 -m scripts.thesis.stamp_events_meta --report-dir "$REPORT_DIR"; then
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+if ! "$PYBIN" -m scripts.thesis.stamp_events_meta --report-dir "$REPORT_DIR"; then
   echo "WARN: stamp_events_meta failed — verifying the agent's fallback generated_at" >&2
-  python3 -c "
+  "$PYBIN" -c "
 import json, sys
 from scripts.delta.probe import _safe_normalize_to_et_date
 try:
@@ -266,6 +436,34 @@ sys.exit(0 if (ga and _safe_normalize_to_et_date(ga)) else 1)
 fi
 ```
 
+Then (RERUN-ONLY, fail-closed) validate the fresh events.json's WebSearch
+source binding. `stamp_events_meta` marked the artifact
+(`_websearch_binding_version: 1` — fresh agent output under the
+post-binding contract); every `[WebSearch:]` citation in it must be
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`. events.json has no
+typed loader, so this inline gate is its load-boundary check (the reuse
+path is exempt: a reused pre-binding events.json is unmarked and stays
+legacy-lenient). On failure, re-dispatch the events agent ONCE with the
+SchemaError inlined; if it fails again, STOP.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+"$PYBIN" -c "
+import json, sys
+from scripts.schemas.source_tag import validate_source_tags, websearch_binding_active
+data = json.load(open('$REPORT_DIR/events.json', encoding='utf-8'))
+try:
+    validate_source_tags(data, artifact='events',
+                         strict_websearch=websearch_binding_active(data, artifact='events'))
+except ValueError as e:
+    print(f'FATAL: events.json WebSearch source-binding validation failed: {e}', file=sys.stderr)
+    sys.exit(1)
+" || { echo "[fatal] events.json failed WebSearch source-binding validation — every [WebSearch:] tag in fresh events output must bind outlet + url + access-date. Re-dispatch the events agent with the error above." >&2; exit 1; }
+```
+
 ### Step 5: Valuation + Technical (always fresh)
 
 **Step 5a — deterministic valuation inputs.** The valuation agent READS
@@ -275,14 +473,21 @@ either. Per the delta spec §7.1, the thesis run writes ALL of these
 intermediates itself — produce them here before dispatch or the agent
 silently degrades (it merely lowers `confidence` when files are missing — no
 loud error). They have no interdependencies except `reverse_dcf`, which reads
-`fcf_inputs.json` and so runs last.
+`fcf_inputs.json` and so runs last. If the genuine-crash guard inside the
+block exits non-zero, STOP and surface the error (a producer crash, not a
+DL4 fail-close).
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+
 # indicators.json is normally produced by /score-business; (re)compute only
 # if absent — e.g. the Step 1 BQ-declined probe-only path does not run it,
 # yet the technical agent requires it.
 if [ ! -f "$REPORT_DIR/data/indicators.json" ]; then
-  python3 -m scripts.indicators \
+  "$PYBIN" -m scripts.indicators \
     --price-json "$REPORT_DIR/data/01_price_data.json" \
     --output "$REPORT_DIR/data/indicators.json"
 fi
@@ -308,12 +513,12 @@ rm -f "$REPORT_DIR/data/historical_multiples.json" \
 # then verify below that the artifact was actually written — a MISSING /
 # unparseable file is a genuine producer crash and MUST abort.
 # --ticker is REQUIRED on both (DL4 aligned-window gate; extract_fcf also DL3c FX).
-python3 -m scripts.historical_multiples --ticker "$TICKER" \
+"$PYBIN" -m scripts.historical_multiples --ticker "$TICKER" \
   --financial-json "$REPORT_DIR/data/02_financial_data.json" \
   --price-json "$REPORT_DIR/data/01_price_data.json" \
   --output "$REPORT_DIR/data/historical_multiples.json" || true
 
-python3 -m scripts.extract_fcf --ticker "$TICKER" \
+"$PYBIN" -m scripts.extract_fcf --ticker "$TICKER" \
   --financial-json "$REPORT_DIR/data/02_financial_data.json" \
   --price-json "$REPORT_DIR/data/01_price_data.json" \
   --macro-json "$REPORT_DIR/data/09_macro_rates.json" \
@@ -326,12 +531,12 @@ python3 -m scripts.extract_fcf --ticker "$TICKER" \
 # (Deliberately a bare structural check — NOT the typed loader, which rejects
 # the null-FCF error artifact that fail-close legitimately produces.)
 for f in historical_multiples.json fcf_inputs.json; do
-  python3 -c "import json,sys; d=json.load(open('$REPORT_DIR/data/$f', encoding='utf-8')); sys.exit(0 if isinstance(d,dict) and 'status' in d else 1)" \
+  "$PYBIN" -c "import json,sys; d=json.load(open('$REPORT_DIR/data/$f', encoding='utf-8')); sys.exit(0 if isinstance(d,dict) and 'status' in d else 1)" \
     || { echo "FATAL: $REPORT_DIR/data/$f missing/unparseable/status-less — producer crash, not a DL4 fail-close" >&2; exit 1; }
 done
 
 # Peer multiples — peer_tickers come from bq_analysis dimensions.industry.peer_tickers.
-python3 -c "
+"$PYBIN" -c "
 import json, subprocess, sys
 with open('$REPORT_DIR/bq_analysis.json', encoding='utf-8') as f:
     pts = json.load(f).get('dimensions',{}).get('industry',{}).get('peer_tickers',[])
@@ -350,7 +555,7 @@ if pts:
 # currency would have fail-closed to status==error and been skipped here.
 # When this skips, the valuation agent emits a `reverse_dcf: {status: skipped}`
 # stub instead of reading a non-existent file.
-python3 -c "
+"$PYBIN" -c "
 import json, subprocess, sys
 with open('$REPORT_DIR/data/fcf_inputs.json', encoding='utf-8') as f:
     inp = json.load(f)
@@ -373,25 +578,30 @@ failure — the valuation agent flags the 2Y-range / DCF lenses UNAVAILABLE.
 **Step 5b — analysis agents.** Run both on today's data:
 
 ```
-Agent V: prompts/evaluate-valuation.md → $REPORT_DIR/valuation.json
-Agent T: prompts/evaluate-technical.md → $REPORT_DIR/technical.json
+Agent V: <captured-abs-ROOT>/prompts/evaluate-valuation.md → <captured-abs-ROOT>/<REPORT_DIR>/valuation.json
+Agent T: <captured-abs-ROOT>/prompts/evaluate-technical.md → <captured-abs-ROOT>/<REPORT_DIR>/technical.json
 ```
 
-Both agents MUST first read `investment-thesis/gotchas.md` for their domain's
-known failure patterns — Agent V the valuation-producer fail-close classes
-(DL4 non-consecutive quarters / unknown ADR ratio / non-USD annual-only =
-expected, not a bug) + peer-set hygiene; Agent T the partial-day-volume and
+Compose each dispatch prompt with **concrete absolute paths** (substitute the
+captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
+shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
+
+Both agents MUST first read
+`<captured-abs-ROOT>/.claude/skills/investment-thesis/gotchas.md` for their
+domain's known failure patterns — Agent V the valuation-producer fail-close
+classes (DL4 non-consecutive quarters / unknown ADR ratio / non-USD annual-only
+= expected, not a bug) + peer-set hygiene; Agent T the partial-day-volume and
 MA200-approximation notes.
 
 ### Step 6: Synthesis (with events_reuse_context if reused)
 
-Spawn synthesis agent with `prompts/evaluate-thesis.md`. If events was
-reused (Step 4 took the reuse path), include the `events_reuse_context`
-block per prompts/evaluate-thesis.md. Read `bq_analysis.json` from
+Spawn synthesis agent with `<captured-abs-ROOT>/prompts/evaluate-thesis.md`.
+If events was reused (Step 4 took the reuse path), include the
+`events_reuse_context` block per the prompt. Read `bq_analysis.json` from
 same-day or prior BQ dir.
 
 The synthesis agent MUST write BOTH deliverables (the two `## Output`
-sections of `prompts/evaluate-thesis.md`) — do NOT let the dispatch
+sections of the prompt) — do NOT let the dispatch
 emphasise the JSON and silently drop the human file:
 - `$REPORT_DIR/investment_thesis.json` — canonical machine output (Write tool)
 - `$REPORT_DIR/thesis_summary.md` — human-facing summary in
@@ -400,9 +610,10 @@ emphasise the JSON and silently drop the human file:
 > **Dispatch note (`.claude/rules/skill-architecture.md` #8):** the harness
 > blocks subagent `.md` writes via the Write tool. Instruct the synthesis
 > agent to write `thesis_summary.md` via a Bash heredoc with a content-unique
-> quoted delimiter (`cat > "reports/<TICKER>/<DATE>/thesis_summary.md" <<'THESIS_MD_EOF' … THESIS_MD_EOF`,
+> quoted delimiter (`cat > "<captured-abs-ROOT>/reports/<TICKER>/<DATE>/thesis_summary.md" <<'THESIS_MD_EOF' … THESIS_MD_EOF`,
 > UTF-8; NOT a bare `EOF`/`MD` — collision truncates; substitute the ACTUAL
-> `reports/…` path — the subagent shell has no `$REPORT_DIR`) —
+> ABSOLUTE path — the subagent shell has no `$REPORT_DIR` and its cwd is
+> ephemeral, so a relative `reports/…` path would land in the wrong place) —
 > `investment_thesis.json` writes fine via the Write tool. The hard
 > `[ -s thesis_summary.md ]` gate below catches a missing/empty deliverable (a
 > mid-file delimiter collision is prevented by the content-unique sentinel, not
@@ -412,18 +623,23 @@ It MUST ALSO return, in its final message, a one-paragraph `delta_note`
 (≤3 sentences) stating what THIS run concluded. This feeds Step 7's
 changelog; it is NOT an `investment_thesis.json` field and the prompt
 does not define it, so the orchestrator gets it from the agent's return.
-On a first thesis run (empty `$PRIOR_THESIS_DIR`) it is just "First
-thesis run — no prior to diff" + the headline stance.
+On a first thesis run (empty `PRIOR_THESIS_DIR` from Step 0) it is just
+"First thesis run — no prior to diff" + the headline stance.
 
 **Verify both files before proceeding** — a synthesis agent that emits
 only the JSON is a known failure mode (the human deliverable Step 8
 links to then 404s). Unlike `investment_thesis.json` (guarded by 6.3
 stamp + 6.4 contract validate), `thesis_summary.md` has no other gate,
 so add one here mirroring score-business's post-synthesis `summary.md`
-check. If it fires, RE-DISPATCH the synthesis agent (it is the
-contracted producer) — do not skip the deliverable:
+check. If a gate fires, RE-DISPATCH the synthesis agent ONCE (it is the
+contracted producer) — do not skip the deliverable; if it fails again,
+STOP and surface the failure:
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 [ -s "$REPORT_DIR/investment_thesis.json" ] \
   || { echo "FATAL: synthesis produced no investment_thesis.json — re-dispatch synthesis agent" >&2; exit 1; }
 [ -s "$REPORT_DIR/thesis_summary.md" ] \
@@ -433,7 +649,7 @@ contracted producer) — do not skip the deliverable:
 # cli_utils.count_word_equivalents, NOT `wc -w`: default output_language is
 # zh-CN and CJK has no inter-word spaces, so `wc -w` undercounts ~3x and the
 # gate would never fire (helper counts non-CJK tokens + CJK chars/2).
-WORDS=$(python3 -c 'import sys; from scripts.cli_utils import count_word_equivalents; print(count_word_equivalents(open(sys.argv[1], encoding="utf-8").read()))' "$REPORT_DIR/thesis_summary.md")
+WORDS=$("$PYBIN" -c 'import sys; from scripts.cli_utils import count_word_equivalents; print(count_word_equivalents(open(sys.argv[1], encoding="utf-8").read()))' "$REPORT_DIR/thesis_summary.md")
 if [ "$WORDS" -gt 600 ]; then
     echo "WARN: thesis_summary.md exceeded 600 words" >&2
 fi
@@ -448,14 +664,19 @@ once produced an artifact with no `meta` and aborted Step 6.4), the
 orchestrator stamps the three required fields deterministically —
 mirroring `assemble.py` for `bq_analysis.json`. The stamper is idempotent
 and preserves any agent-emitted `meta.current_price` / `current_price_source`.
+If either block below exits non-zero, STOP and surface the error.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 # --analysis-date defaults to today_et() — the ET CALENDAR run date (NOT the
 # session being analyzed; that is market_asof_date in bq_analysis). This is the
 # same source assemble.py stamps onto bq_analysis.json.meta.analysis_date, so
 # both artifacts in this run dir agree. On a weekend/holiday it differs from the
 # session_et directory date (e.g. dir 20260522 vs analysis_date 2026-05-25).
-if ! python3 -m scripts.thesis.stamp_thesis_meta \
+if ! "$PYBIN" -m scripts.thesis.stamp_thesis_meta \
   --report-dir "$REPORT_DIR" \
   --ticker "$TICKER"; then
   echo "[fatal] stamp_thesis_meta failed — meta would be missing/invalid at Step 6.4. Aborting." >&2
@@ -473,7 +694,11 @@ never divides by a zero/garbage `max_downside` (the schema's strict-negative MD
 gate catches that in 6.4). The synthesis agent no longer emits CE.
 
 ```bash
-if ! python3 -m scripts.thesis.compute_thesis_ce --report-dir "$REPORT_DIR"; then
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+if ! "$PYBIN" -m scripts.thesis.compute_thesis_ce --report-dir "$REPORT_DIR"; then
   echo "[fatal] compute_thesis_ce failed — capital_efficiency would be missing at Step 6.4. Aborting." >&2
   exit 1
 fi
@@ -484,10 +709,15 @@ fi
 Validate the LLM-produced `investment_thesis.json` against its typed
 schema contract (`scripts/schemas/investment_thesis.py`). This runs
 BEFORE Step 6.5 reads the file for alpha discovery, so a drift
-artifact can't contaminate downstream steps.
+artifact can't contaminate downstream steps. If it fails, STOP and
+surface the SchemaError.
 
 ```bash
-if ! python3 -m scripts.schemas.investment_thesis "$REPORT_DIR/investment_thesis.json"; then
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+if ! "$PYBIN" -m scripts.schemas.investment_thesis "$REPORT_DIR/investment_thesis.json"; then
   echo "[fatal] investment_thesis.json failed contract validation — see SchemaError above. Aborting run." >&2
   exit 1
 fi
@@ -503,13 +733,14 @@ alpha" is a valid and expected output for most well-covered names.
 
 Perform divergence detection by cross-referencing `bq_analysis.json`,
 `valuation.json`, `technical.json`, `events.json`, and
-`investment_thesis.json` against the 6 patterns in
-`prompts/evaluate-alpha.md` (framework mismatch, growth expectation
-gap, dimension split, smart money divergence, technical-fundamental
-disconnect, peer valuation outlier). Write Phase 1 output to
-`$REPORT_DIR/alpha_scan.json` following the schema in the prompt's
-Scan Output section. Maximum 3 candidates, ranked by magnitude and
-novelty.
+`investment_thesis.json` (all under `<captured-abs-ROOT>/<REPORT_DIR>/`)
+against the 6 patterns in
+`<captured-abs-ROOT>/prompts/evaluate-alpha.md` (framework mismatch, growth
+expectation gap, dimension split, smart money divergence,
+technical-fundamental disconnect, peer valuation outlier). Write Phase 1
+output to `<captured-abs-ROOT>/<REPORT_DIR>/alpha_scan.json` following the
+schema in the prompt's Scan Output section. Maximum 3 candidates, ranked by
+magnitude and novelty.
 
 The `events_freshness` block in `alpha_scan.json` is mandatory — it
 derives from `events.json.meta` (fresh vs reused, days_stale) so a
@@ -521,7 +752,8 @@ the derivation inline (see .claude/rules/producer-consumer.md #3). This
 field is write-only; the delta layer does not read it.
 
 Phase 1 may run as a focused subagent OR inline by the lead — it is
-pure pattern matching with no WebSearch needed. Keep it cheap.
+pure pattern matching with no WebSearch needed. Keep it cheap. (If
+dispatched, compose the prompt with the concrete absolute paths above.)
 
 **Phase 2-4 — Interactive, user-gated:**
 
@@ -538,11 +770,11 @@ On user selection:
 - **Phase 2 — Hypothesis Articulation:** walk through the four
   questions (market consensus / variant view / necessary conditions /
   strongest evidence) via AskUserQuestion per
-  `prompts/evaluate-alpha.md` Phase 2. Synthesize into the hypothesis
-  statement and confirm with user before proceeding.
+  `<captured-abs-ROOT>/prompts/evaluate-alpha.md` Phase 2. Synthesize into
+  the hypothesis statement and confirm with user before proceeding.
 
   **Phase 2 may terminate here with NO testable hypothesis.** Per
-  `prompts/evaluate-alpha.md` Phase 2 Q2 + Critical Rule 6, if the user
+  the prompt's Phase 2 Q2 + Critical Rule 6, if the user
   cannot name a *specific non-consensus disagreement* (only a directional
   lean, or restating the consensus bull/bear case), there is no alpha to
   test — say so respectfully and STOP. Do NOT spawn Phase 3 on a
@@ -554,30 +786,31 @@ On user selection:
 - **Phase 3 — Adversarial Testing:** spawn two parallel agents that
   cannot see each other's work. The structural adversarialism is
   non-negotiable — a single "balanced" agent does not substitute.
+  Compose both dispatch prompts with concrete absolute paths:
 
   ```
   Agent Advocate:
-    Read prompts/evaluate-alpha.md (Phase 3, Agent A section)
-    Data: bq_analysis.json, valuation.json, technical.json, events.json
+    Read <captured-abs-ROOT>/prompts/evaluate-alpha.md (Phase 3, Agent A section)
+    Data: <captured-abs-ROOT>/<REPORT_DIR>/{bq_analysis,valuation,technical,events}.json
     Hypothesis: [the articulated hypothesis]
-    Output: $REPORT_DIR/alpha_advocate.json
+    Output: <captured-abs-ROOT>/<REPORT_DIR>/alpha_advocate.json
 
   Agent Prosecutor:
-    Read prompts/evaluate-alpha.md (Phase 3, Agent B section)
+    Read <captured-abs-ROOT>/prompts/evaluate-alpha.md (Phase 3, Agent B section)
     Data: same as Advocate
     Hypothesis: [the articulated hypothesis]
-    Output: $REPORT_DIR/alpha_prosecutor.json
+    Output: <captured-abs-ROOT>/<REPORT_DIR>/alpha_prosecutor.json
   ```
 
 - **Phase 4 — Verdict:** the lead reads both outputs and produces
-  `$REPORT_DIR/alpha_verdict.json` per Phase 4 of
-  `prompts/evaluate-alpha.md` — hypothesis rating, evidence balance,
-  forced pre-mortem (specific narrative with names/dates/numbers),
-  actionable kill criteria (time-bound + measurable + data source),
-  conditional valuation. Present verdict to user.
+  `<captured-abs-ROOT>/<REPORT_DIR>/alpha_verdict.json` per Phase 4 of
+  `<captured-abs-ROOT>/prompts/evaluate-alpha.md` — hypothesis rating,
+  evidence balance, forced pre-mortem (specific narrative with
+  names/dates/numbers), actionable kill criteria (time-bound + measurable +
+  data source), conditional valuation. Present verdict to user.
 
 Record alpha state for Step 7's run_meta. Write
-`$REPORT_DIR/.alpha_status.json` with shape:
+`<captured-abs-ROOT>/<REPORT_DIR>/.alpha_status.json` with shape:
 
 ```json
 {
@@ -628,57 +861,58 @@ AGENTS_RUN composition correctly omits `alpha_advocate,alpha_prosecutor`
 Each Task subagent call returns usage info with `total_tokens`. The
 orchestrator accumulates these across all calls this run (classifier,
 valuation, technical, events [if rerun], synthesis, alpha_advocate +
-alpha_prosecutor [if Phase 3 ran]) plus wall time into a per-run costs
-file with shape `{"tokens": N, "duration_s": N}`. Write it to a run-scoped
-transient dotfile under `$REPORT_DIR` — portable (native Windows has no
-/tmp) and stable across step boundaries (a separate shell loses `$$`):
-
-```bash
-COSTS_FILE="$REPORT_DIR/.delta_costs.json"
-```
-
-Pass `$COSTS_FILE` to `run_meta write --cost-json`.
+alpha_prosecutor [if Phase 3 ran]) plus wall time, and substitutes the
+totals into the heredoc below. The costs file is a run-scoped transient
+dotfile under `$REPORT_DIR` — portable (native Windows has no /tmp) and
+stable across step boundaries (a separate shell loses `$$`).
 
 Compose `$AGENTS_RUN` from what ACTUALLY ran this run, not from the
 decision kind alone:
 - The **classifier** runs only when there was a prior events doc to diff
-  against. Step 2 spawns it iff `$CANONICAL_ANCHOR` is non-empty, and skips
+  against. Step 2 spawns it iff `CANONICAL_ANCHOR` is non-empty, and skips
   it on a first run / empty anchor / pre-delta artifact — so it must NOT be
-  hardcoded into the list. Prepend it only when `$CANONICAL_ANCHOR` is
-  non-empty. Gate on the anchor (not the `.classifier_output.json` file) so
-  a classifier that was invoked but failed to write valid output (Step 2's
-  fail-open path) is still recorded — it ran and incurred cost, and
-  agents_run is a write-only cost/audit trail.
+  hardcoded into the list. Prepend it only when `canonical_anchor` (re-read
+  from `.run_state.json`) is non-empty. Gate on the anchor (not the
+  `.classifier_output.json` file) so a classifier that was invoked but
+  failed to write valid output (Step 2's fail-open path) is still
+  recorded — it ran and incurred cost, and agents_run is a write-only
+  cost/audit trail.
 - When events was **reused**, the events agent was NOT invoked, so it must
   NOT appear in the list.
 - When alpha **Phase 3** ran, append `alpha_advocate,alpha_prosecutor`
   (read `$REPORT_DIR/.alpha_status.json` written in Step 6.5 to know).
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+DECISION_KIND=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['decision_kind'])")
+# canonical_anchor = Step 2's dispatch predicate, written ONCE at Step 2 into
+# .run_state.json (structurally immune to later reassignment — the old
+# "captured at Step 3, not reassigned since" reasoning is now enforced by the
+# state file, whose canonical_anchor key has exactly one writer).
+CANONICAL_ANCHOR=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['canonical_anchor'])")
+
+COSTS_FILE="$REPORT_DIR/.delta_costs.json"
+cat > "$COSTS_FILE" <<COSTS_JSON_EOF
+{"tokens": <accumulated total_tokens>, "duration_s": <wall seconds since Step 0>}
+COSTS_JSON_EOF
+
 case "$DECISION_KIND" in
     reuse)  AGENTS_RUN="valuation,technical,synthesis" ;;
     rerun)  AGENTS_RUN="valuation,technical,events,synthesis" ;;
     *)      AGENTS_RUN="valuation,technical,events,synthesis" ;;
 esac
 
-# Prepend classifier ONLY if it was actually invoked. Step 2 spawns it iff
-# CANONICAL_ANCHOR is non-empty; a first run / empty anchor skips it. Gate on
-# CANONICAL_ANCHOR (not the .classifier_output.json file) so a classifier that
-# ran but failed to write valid output is still recorded; agents_run is a
-# write-only cost/audit trail. Safe because CANONICAL_ANCHOR is captured as a
-# string at Step 3 (= Step 2's dispatch value — both derive from the same
-# prior-events path via the pure read_prior_events_run_date helper) and is NOT
-# reassigned between Step 3 and this gate, so Step 4's prior-events mutation
-# cannot affect it; the value here equals the Step 2 dispatch predicate. (If a
-# future change reassigns CANONICAL_ANCHOR before Step 7, switch to an explicit
-# CLASSIFIER_INVOKED flag set at dispatch in Step 2.)
+# Prepend classifier ONLY if it was actually invoked (see prose above).
 if [ -n "$CANONICAL_ANCHOR" ]; then
     AGENTS_RUN="classifier,${AGENTS_RUN}"
 fi
 
 # Append alpha Phase 3 agents if they ran
 if [ -f "$REPORT_DIR/.alpha_status.json" ]; then
-    PHASE_3_RAN=$(python3 -c "
+    PHASE_3_RAN=$("$PYBIN" -c "
 import json
 s = json.load(open('$REPORT_DIR/.alpha_status.json', encoding='utf-8'))
 print('yes' if 'phase_3' in s.get('phases_completed', []) else 'no')
@@ -688,7 +922,7 @@ print('yes' if 'phase_3' in s.get('phases_completed', []) else 'no')
     fi
 fi
 
-python3 -m scripts.delta.run_meta write \
+"$PYBIN" -m scripts.delta.run_meta write \
   --run-dir "$REPORT_DIR" \
   --ticker "$TICKER" \
   --skill investment-thesis \
@@ -700,27 +934,37 @@ python3 -m scripts.delta.run_meta write \
 Write the delta section, then append changelog:
 
 ```bash
-TODAY_ET=$(python3 -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
-cat > "$REPORT_DIR/.delta_section.md" <<EOF
-## Update $TODAY_ET (thesis)
-
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill investment-thesis)
+TODAY_ET=$("$PYBIN" -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
+DELTA_FILE="$REPORT_DIR/.delta_section.md"
+printf '## Update %s (thesis)\n\n' "$TODAY_ET" > "$DELTA_FILE"
+cat >> "$DELTA_FILE" <<'THESIS_DELTA_SECTION_EOF'
 <substitute the one-paragraph delta_note the synthesis agent returned in
-Step 6; on a first run (empty \$PRIOR_THESIS_DIR) use "First thesis run —
-no prior to diff" + the headline stance>
-EOF
+Step 6; on a first run (empty PRIOR_THESIS_DIR from Step 0) use "First
+thesis run — no prior to diff" + the headline stance — QUOTED heredoc:
+the delta note is free prose that may contain $ or backticks, which an
+unquoted heredoc would silently expand>
+THESIS_DELTA_SECTION_EOF
 
-python3 -m scripts.delta.append_changelog \
+"$PYBIN" -m scripts.delta.append_changelog \
   --prior "$PRIOR_THESIS_DIR/thesis_summary.changelog.md" \
   --current "$REPORT_DIR/thesis_summary.changelog.md" \
   --ticker "$TICKER" \
-  --delta-section "$REPORT_DIR/.delta_section.md"
+  --delta-section "$DELTA_FILE"
 
-rm "$REPORT_DIR/.delta_section.md"
+rm "$DELTA_FILE"
 ```
 
 ### Step 8: Report to user
 
 Report: events reuse status, thesis conviction, ER/CE, link to
-thesis_summary.md, AND alpha scan summary — candidates found / phases
-completed / verdict rating if Phase 4 ran / path to `alpha_scan.json`
-(plus `alpha_verdict.json` if produced).
+`<captured-abs-ROOT>/<REPORT_DIR>/thesis_summary.md` (absolute — the harness
+Read tool does not follow the bash `cd`), AND alpha scan summary — candidates
+found / phases completed / verdict rating if Phase 4 ran / path to
+`<captured-abs-ROOT>/<REPORT_DIR>/alpha_scan.json` (plus `alpha_verdict.json`
+if produced).

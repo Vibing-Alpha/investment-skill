@@ -13,6 +13,26 @@ NOT analyze the company's financials (that's fundamental's job) or future cataly
 Industry.** Score durable / secular competitive advantage, not a late-cycle demand
 peak — the cyclical-peak rule applies to industry-growth durability too.
 
+## WebSearch preflight & source binding (hard gate)
+
+This dimension's methodology REQUIRES current external information
+(market share, TAM, competitive landscape).
+
+1. **Preflight — run FIRST.** Before producing any analysis content,
+   execute ONE real WebSearch tool call (e.g.
+   `"<TICKER> industry market share {CURRENT_YEAR}"`). If the WebSearch
+   tool is unavailable on this host or the call errors: STOP and report
+   exactly `cannot complete: host lacks WebSearch`. Never fall back to
+   model memory, and never emit a `[WebSearch: ...]` tag without a real
+   search result behind it.
+2. **Bound tag form.** Every WebSearch-sourced claim must bind
+   outlet + url + access-date:
+   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — the url is the
+   actual page consulted (http/https, no whitespace; percent-encode any
+   comma in it), the access date is today's run date. Multiple sources →
+   multiple tags. Bare `[WebSearch: outlet]` tags fail the runtime
+   validator and abort the run.
+
 ## Industry Scoping
 
 Before scoring, explicitly define WHICH industry you are analyzing.
@@ -72,7 +92,8 @@ Analyze:
   - Efficient scale (market too small for another entrant)
 - **Moat trend**: Is the moat widening, stable, or narrowing?
   Specific evidence matters — "losing 3pp share to competitor X in segment Y
-  over 2 years [WebSearch: source]" is useful; "faces competition" is not.
+  over 2 years [WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]" is useful;
+  "faces competition" is not.
 - **Competitive dynamics**: Any recent moves by competitors that change the picture?
 
 Scoring anchors:
@@ -177,7 +198,7 @@ Write a JSON file with this structure:
       "data_points": [],
       "interpretation": "",
       "s_curve_stage": "growth_maturity",   // emerging | acceleration | growth_maturity | mature
-      "penetration_rate": "~45% globally [WebSearch: Statista {CURRENT_YEAR}]",
+      "penetration_rate": "~45% globally [WebSearch: Statista {CURRENT_YEAR}, https://www.statista.com/<page>, accessed <YYYY-MM-DD>]",
       "dominant_force": "Switching costs — iOS ecosystem lock-in drives 90%+ retention"
     },
     "competitive_moat": {

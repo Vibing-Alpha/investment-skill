@@ -38,8 +38,10 @@ are fresh; you derive all synthesis outputs from scratch). EXCEPT
 `scores/forward.json`'s `catalyst_density.calendar`), preserving each
 item's `source` and `date_precision` verbatim. Synthesis does NOT
 WebSearch or read raw API files, so never re-tag a carried date — keep
-the forward earnings date's upstream `[WebSearch: ...]` source; never
-relabel it `[API: 07_earnings]`.
+the forward earnings date's upstream `[WebSearch: ...]` source verbatim,
+including its url + access-date binding
+(`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`); never strip the
+binding and never relabel it `[API: 07_earnings]`.
 
 **On `partial` tier**: one or two dims were copied from the prior run.
 Reconsider `watchlist_recommendation`, `conviction`, and the `thesis`
@@ -207,7 +209,7 @@ silently discarded if present here (see `assemble.py:391` —
     "Description of any cross-dimension contradictions found"
   ],
   "catalyst_calendar": [
-    {"event": "Next earnings", "date": "YYYY-MM-DD", "date_precision": "confirmed", "impact": "high", "direction": "uncertain", "source": "[WebSearch: earnings-calendar / company IR release date] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
+    {"event": "Next earnings", "date": "YYYY-MM-DD", "date_precision": "confirmed", "impact": "high", "direction": "uncertain", "source": "[WebSearch: company IR earnings calendar, https://ir.example.com/events, accessed <YYYY-MM-DD>] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
     {"event": "Contract / partnership / product catalyst", "date": "YYYY-MM-DD", "date_precision": "estimated", "impact": "medium", "direction": "positive", "source": "[API: 03_company_news, Reuters product-launch headline]"}
   ],
   "key_metrics": {

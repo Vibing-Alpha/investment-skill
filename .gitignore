@@ -39,3 +39,6 @@ htmlcov/
 # Generated per-agent skill adapters — derived from .claude/skills + CLAUDE.md
 # + .claude/rules (like strategy.compiled.yaml). Regenerate with
 # `python3 -m scripts.distribute sync`; never hand-edit.
+
+# Derived plugin skills (materialized by `distribute sync`, like .agents/) —
+# only the skills/ subdir is derived; plugin.json is TRACKED source.

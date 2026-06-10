@@ -13,6 +13,26 @@ Industry.** Its cyclical-peak rule is load-bearing here: distinguish a secular
 trajectory from a late-cycle tailwind before scoring forward direction — a demand
 inflection that is really a cycle peak is not a durable catalyst.
 
+## WebSearch preflight & source binding (hard gate)
+
+This dimension's methodology REQUIRES current external information
+(catalyst dates, guidance, analyst actions).
+
+1. **Preflight — run FIRST.** Before producing any analysis content,
+   execute ONE real WebSearch tool call (e.g.
+   `"<TICKER> stock news {CURRENT_YEAR}"`). If the WebSearch tool is
+   unavailable on this host or the call errors: STOP and report exactly
+   `cannot complete: host lacks WebSearch`. Never fall back to model
+   memory, and never emit a `[WebSearch: ...]` tag without a real search
+   result behind it.
+2. **Bound tag form.** Every WebSearch-sourced claim must bind
+   outlet + url + access-date:
+   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — the url is the
+   actual page consulted (http/https, no whitespace; percent-encode any
+   comma in it), the access date is today's run date. Multiple sources →
+   multiple tags. Bare `[WebSearch: outlet]` tags fail the runtime
+   validator and abort the run.
+
 ## Dimensions
 
 ### 1. EPS Expectations (weight: 20)
@@ -195,7 +215,7 @@ Write a JSON file with this structure:
       "data_points": [],
       "interpretation": "",
       "calendar": [
-        {"event": "Next earnings", "date": "YYYY-MM-DD", "date_precision": "confirmed", "impact": "high", "direction": "uncertain", "source": "[WebSearch: earnings-calendar / company IR release date] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
+        {"event": "Next earnings", "date": "YYYY-MM-DD", "date_precision": "confirmed", "impact": "high", "direction": "uncertain", "source": "[WebSearch: company IR earnings calendar, https://ir.example.com/events, accessed <YYYY-MM-DD>] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
         {"event": "Contract / partnership / product catalyst", "date": "YYYY-MM-DD", "date_precision": "estimated", "impact": "medium", "direction": "positive", "source": "[API: 03_company_news, Reuters product-launch headline]"}
       ]
     }

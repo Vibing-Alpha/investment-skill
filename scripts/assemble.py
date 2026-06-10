@@ -28,6 +28,17 @@ STRIP_KEYS = {"dimension", "ticker", "data_freshness", "scoring_calculation"}
 DEFAULT_WEIGHTS = {"fundamental": 0.35, "forward": 0.35, "industry": 0.30}
 DIMENSIONS = list(DEFAULT_WEIGHTS.keys())
 
+# Which dimension score files are FRESH (agent-rerun) per delta tier —
+# mirrors the orchestrator's AGENTS_RUN map in
+# .claude/skills/score-business/SKILL.md (full: fundamental,forward,
+# industry; partial: forward,industry; no_op: none). Fresh dims are
+# strict-gated for WebSearch source binding; reused dims stay lenient.
+WEBSEARCH_FRESH_DIMS_BY_TIER = {
+    "full": ("fundamental", "forward", "industry"),
+    "partial": ("forward", "industry"),
+    "no_op": (),
+}
+
 # DL3c §3.7.4: scoped set of DL3c-gated artifacts whose `dl3c_mode` must be
 # consistent across an assemble run. `peer_multiples.json` is NOT in this
 # scope — it's always USD (yfinance, USD-normalized; not a cert consumer
@@ -659,6 +670,36 @@ def main():
         )
         sys.exit(1)
 
+    # WebSearch source-binding gate (Plan B Task 6). The dims FRESH this
+    # run were produced by agents under the post-binding prompt contract:
+    # every WebSearch citation must bind outlet + url + access-date
+    # ([WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]). Reused
+    # (prior-run, possibly legacy) dims are NOT gated — incremental
+    # partial/no_op runs over pre-binding priors keep working. The
+    # fresh-dim set per tier mirrors the orchestrator's AGENTS_RUN map
+    # (full: 3 dims; partial: forward+industry; no_op: none).
+    from scripts.schemas import SchemaError as _SchemaError
+    from scripts.schemas.source_tag import validate_source_tags
+    for dim_name in WEBSEARCH_FRESH_DIMS_BY_TIER.get(ctier, ()):
+        if dim_name not in score_files:
+            continue
+        try:
+            validate_source_tags(
+                score_files[dim_name],
+                artifact=f"scores/{dim_name}",
+                strict_websearch=True,
+            )
+        except _SchemaError as exc:
+            print(
+                f"{PREFIX}: FATAL — WebSearch source-binding violation in "
+                f"scores/{dim_name}.json (fresh this run, tier={ctier}): "
+                f"{exc}. Every [WebSearch:] citation in a fresh dimension "
+                f"must be [WebSearch: <outlet>, <url>, accessed "
+                f"<YYYY-MM-DD>] backed by a real search.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     # Determine ticker (from validation or first score file)
     ticker = validation.get("ticker")
     if not ticker:
@@ -725,6 +766,16 @@ def main():
         result["meta"]["freshness_note"] = (
             f"{existing}. {note}" if existing else note
         )
+
+    # WebSearch binding marker — FULL-tier only: all three dims (and the
+    # synthesis derived from them) are fresh under the post-binding
+    # contract, so the artifact as a whole is strict-validatable at every
+    # future load. Partial/no_op artifacts embed reused (possibly
+    # pre-binding) dims and stay unmarked → legacy-lenient. The staging
+    # load below therefore strict-validates full-tier output fail-closed.
+    if ctier == "full":
+        from scripts.schemas.source_tag import stamp_websearch_binding
+        result = stamp_websearch_binding(result)
 
     # DL3c marker — emit on EVERY assemble run (post-DL3c). Idempotent;
     # places `_dl3c_version: 1` as the FIRST root key per PEP 468.

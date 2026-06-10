@@ -25,6 +25,69 @@ survives between runs — it's the audit trail, the follow-up calendar,
 and the reflection anchor. Treat it as the real output of this skill,
 not the conversation.
 
+## Repo-root prelude (fresh-shell — run first)
+
+Every Bash block in this skill may run in a **fresh shell with an ephemeral cwd**
+(Cowork): variables `export`ed in one block do NOT survive into the next, and the
+harness Read tool does NOT follow a bash `cd`. So the repo root is resolved exactly
+ONCE, here.
+
+Run this block first and **CAPTURE the `STOCK_V7_ROOT=...` value it prints**. Substitute
+that absolute path for the literal `<captured-abs-ROOT>` in every later Bash block, every
+harness Read path (including `portfolio-state.yaml` / `strategy.yaml`), and every
+subagent-dispatch path in this skill. If this block exits non-zero (multiple candidate
+roots, or no repo found), show its stderr to the user and **STOP** — run nothing else.
+
+If it prints a `stock-v7: WARNING — version skew` line, relay that warning to the user verbatim and continue — it is advisory only (the installed plugin and the clone are at different versions; it tells the user which half to update), never a stop.
+
+```bash
+# --- resolver-core ---   (byte-identical to scripts/templates/root_resolver.sh — Task 5 enforces)
+# cwd-or-ancestor: if cwd (or ANY parent) is the repo, USE IT — CC-CLI/Codex/Cursor/OpenCode run from the
+# repo (or a subdir), so this is a TRUE no-op (covers subdir runs + multi-worktree dev: always the clone
+# you're in). Composite marker = scripts/ + prompts/ + strategy.example.yaml (the last is the
+# stock-v7-specific tracked file; tighter than CLAUDE.md/VERSION alone).
+ROOT=""; d="$PWD"
+while [ "$d" != "/" ]; do                # cwd-or-ancestor; marker = scripts/ + prompts/ + strategy.example.yaml
+  if [ -d "$d/scripts" ] && [ -d "$d/prompts" ] && [ -f "$d/strategy.example.yaml" ]; then ROOT="$d"; break; fi
+  d=$(dirname "$d")
+done
+case "${STOCK_V7_HOME:-}" in /*) [ -z "$ROOT" ] && ROOT="$STOCK_V7_HOME";; esac   # env override seam — ABSOLUTE only (relative/~ is ignored, mirroring resolve_root's fail-closed; nothing can set it persistently in Cowork)
+if [ -z "$ROOT" ]; then
+  # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
+  # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
+  # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
+  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+    | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
+        && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
+  if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
+    echo "stock-v7: multiple stock-v7 roots in mounts — keep ONE:" >&2; printf '%s\n' "$HITS" >&2; exit 1
+  fi
+  ROOT=$(printf '%s\n' "$HITS" | head -1)   # the sole hit, or EMPTY — the consumer tail handles empty
+fi
+# --- end resolver-core ---
+# BUSINESS tail (the setup skill replaces everything below the end-marker with its clone/pull tail):
+if [ -z "$ROOT" ]; then                                   # CC-CLI marker fallback (rare: not-in-repo + no env)
+  ROOT=$(cat "$HOME/.stock-v7-home" 2>/dev/null | tr -d '\r')   # strip CRLF if the marker was hand-edited on Windows
+  ROOT="${ROOT:-$HOME/Claude/stock-v7}"
+fi
+cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
+printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+```
+
+## Preflight: Money-path config
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.config_gate check --portfolio
+```
+
+If it exits non-zero, STOP and show its stderr to the user (config not confirmed / API
+key missing / portfolio-state malformed) — do NOT run any analysis or produce numbers.
+Then continue below.
+
 ## Step 0: Review Prior Run (Cross-Check Follow-ups)
 
 Before assembling today's context, look at what the last run flagged.
@@ -32,7 +95,9 @@ This closes the loop between "what I said I'd watch" and "what I'm
 deciding now".
 
 ```bash
-python3 -m scripts.portfolio_log review
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.portfolio_log review
 ```
 
 The script prints the most recent prior `decisions.json` (excluding
@@ -55,7 +120,7 @@ normally.
 
 ## Step 1: Read Portfolio State
 
-Read `portfolio-state.yaml` from the project root.
+Read `<captured-abs-ROOT>/portfolio-state.yaml` (the project root).
 
 If the file does not exist, ask the user for their current holdings,
 cash balance, and watchlist tickers. Create the file from their response.
@@ -68,13 +133,15 @@ Extract:
 
 ## Step 2: Compile Principles
 
-Read `strategy.yaml` from the project root. Extract the `principles:` field.
+Read `<captured-abs-ROOT>/strategy.yaml`. Extract the `principles:` field.
 
 **If `strategy.yaml` exists and has `principles:`:**
 1. Compute hash of the current principles list (pipe via stdin to
    avoid shell-quoting issues with special characters):
    ```bash
-   python3 -c "
+   cd "<captured-abs-ROOT>"
+   PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+   "$PYBIN" -c "
    import hashlib, json, sys, yaml
    sys.stdin.reconfigure(encoding='utf-8')  # Windows cp936: strategy.yaml principles are UTF-8 (e.g. zh-CN) — must match portfolio_log._verify_source_hash's open(encoding='utf-8') or the source_hash diverges
    data = yaml.safe_load(sys.stdin)
@@ -171,8 +238,10 @@ Classify all portfolio tickers in one batch call to amortize Python
 startup across N tickers (avoids ~200ms × N subprocess fork cost):
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKERS="AAPL,MU,NVDA,..."  # comma-separated holdings + watchlist
-STATUSES_JSON=$(python3 -m scripts.delta.portfolio_classify --tickers "$TICKERS")
+"$PYBIN" -m scripts.delta.portfolio_classify --tickers "$TICKERS"
 # → {"AAPL": "fresh", "MU": "stale_bq", "NVDA": "bq_only", ...}
 ```
 
@@ -228,8 +297,10 @@ No timeout — wait for explicit user choice.
 
 For every ticker (fresh, bq_only, AND stale when `[s]` was chosen),
 resolve the latest artifacts via the delta resolver and read them as
-below. Tickers classified `none` that weren't cascaded should be
-flagged in decisions.md as "no analysis available".
+below (read each artifact at its absolute
+`<captured-abs-ROOT>/reports/...` path). Tickers classified `none` that
+weren't cascaded should be flagged in decisions.md as "no analysis
+available".
 
 For tickers with `bq_analysis.json`, read the **summary only**:
 - `scores` (overall, fundamental, forward, industry)
@@ -245,13 +316,16 @@ For tickers with `investment_thesis.json`, read the **full file** (~10KB).
 ## Step 4: Fetch Macro Data
 
 ```bash
-python3 -m scripts.macro \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.macro \
   --tickers {ALL_TICKERS_SPACE_SEPARATED} \
   --output reports/portfolio/{YYYYMMDD}/macro.json
 ```
 
 Where `{ALL_TICKERS}` = all tickers from holdings + watchlist,
-and `{YYYYMMDD}` = today's date.
+and `{YYYYMMDD}` = today's date — both substituted by you per block
+(never carried as shell variables across blocks; a fresh shell loses them).
 
 Read the output JSON. This provides:
 - Broad market trend data (SPY, QQQ, ^DJI with MAs)
@@ -266,10 +340,10 @@ Read the output JSON. This provides:
 
 ## Step 5: Make Decisions
 
-Read `prompts/portfolio-decide.md`.
+Read `<captured-abs-ROOT>/prompts/portfolio-decide.md`.
 
-Read `strategy.yaml` for `output_language` (default: `zh-CN`). Present all
-human-facing output (decisions, rationale, order recommendations) in this
+Read `<captured-abs-ROOT>/strategy.yaml` for `output_language` (default: `zh-CN`).
+Present all human-facing output (decisions, rationale, order recommendations) in this
 language. JSON field names and source tags remain in English.
 
 Assemble the full context and reason through the decision framework:
@@ -321,7 +395,9 @@ Produce per-ticker decisions with specific order recommendations.
 Structure the proposed orders as a JSON array and write to a temp file:
 
 ```bash
-python3 -c "
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -c "
 import json, tempfile, os, sys
 orders = json.loads(sys.stdin.read())
 fd, path = tempfile.mkstemp(suffix='.json')
@@ -340,12 +416,15 @@ the same path so Step 8 reads the latest. A `$$`/PID temp name is lost
 across that boundary, and `portfolio_log --stress-test` silently SKIPS a
 missing path (`if ... .exists()`), dropping the stress test from the log
 with no error. The fixed path is reconstructable per-call, exactly like
-`macro.json`:
+`macro.json`. (`{TEMP_ORDERS_JSON}` below = the path the previous block
+printed — substitute the literal; it is not a shell variable.)
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 VALIDATOR_OUTPUT=reports/portfolio/{YYYYMMDD}/.validator_output.json
 
-python3 -m scripts.validate \
+"$PYBIN" -m scripts.validate \
   --state portfolio-state.yaml \
   --prices reports/portfolio/{YYYYMMDD}/macro.json \
   --orders {TEMP_ORDERS_JSON} \
@@ -373,9 +452,22 @@ in the conversation. Follow the output format from `portfolio-decide.md`.
 The user may:
 - Ask "why" about a specific decision → explain the reasoning
 - Request adjustments ("change MU price to $84") → update and re-validate
-- Confirm ("looks good") → optionally update `portfolio-state.yaml`
-  if positions changed (ask before writing)
+- Confirm ("looks good") → the orders are RECOMMENDATIONS only; the user executes
+  them manually at their broker. You NEVER submit/place orders and NEVER describe
+  them as submitted/placed/executed (advisory-only — `rules/portfolio-safety.md`).
+- Report fills + ask you to update holdings → follow the **holdings-update protocol** below
 - Ask to analyze missing tickers → run the appropriate skill
+
+**Holdings-update protocol (the ONLY mutation of `portfolio-state.yaml`).** Only when the
+user reports actual fills and asks to update positions — never on your own initiative:
+1. Show a **before/after diff** of the exact fields changing (e.g. `MU shares: 50 → 100`,
+   `cash: 12000 → 3000`) and have the user confirm **that diff** — not a vague "looks good".
+2. Keep the prior file (e.g. copy to `portfolio-state.yaml.bak`) so a wrong edit is reversible.
+3. Write the update, then re-run the Preflight block above
+   (`"$PYBIN" -m scripts.config_gate check --portfolio`, with its `cd`/`PYBIN`
+   prelude) — if it fails, STOP and show stderr (a malformed write must not stand).
+`config_gate` validates STRUCTURE, not correctness (a mistyped `1000`-for-`100` is
+structurally valid) — the user confirming the diff is the control that catches wrong numbers.
 
 This is a conversation, not a pipeline. Stay responsive to the user's
 questions and adjustments.
@@ -391,18 +483,19 @@ LLM-authored judgment fields. The script will fill in the deterministic
 parts (portfolio snapshot, macro, thesis metadata, stress test, etc.).
 See `prompts/portfolio-decide.md` §"Decision Log Output" for the blob
 schema. Write it to a run-scoped dotfile in the portfolio run dir
-(`reports/portfolio/{YYYYMMDD}/.decisions_blob.json`, matching the
-`.validator_output.json` convention above) — portable (native Windows has no
+(`<captured-abs-ROOT>/reports/portfolio/{YYYYMMDD}/.decisions_blob.json`, matching
+the `.validator_output.json` convention above) — portable (native Windows has no
 `/tmp`) and stable across step boundaries.
 
 **Use the Write tool** to create this `.json` file — do NOT write it with a
 Bash heredoc. You are the orchestrator (the main loop), not a subagent, so the
 Write tool works for you on a `.json` path; the `cat <<'EOF'` heredoc rule in
 `.claude/rules/skill-architecture.md` #8 exists ONLY for *subagents* (whose
-Write tool is blocked for `.md`). The blob carries CJK `notes`, apostrophes,
-and nested JSON — a heredoc quotes/escapes those fragilely (and a stray
-delimiter line truncates it silently); the Write tool sidesteps all of it.
-Content shape:
+Write tool is blocked for `.md`). Give the Write tool the ABSOLUTE
+`<captured-abs-ROOT>/...` path (the Write tool does not follow the bash `cd`).
+The blob carries CJK `notes`, apostrophes, and nested JSON — a heredoc
+quotes/escapes those fragilely (and a stray delimiter line truncates it
+silently); the Write tool sidesteps all of it. Content shape:
 
 ```json
 {
@@ -420,7 +513,9 @@ zero-order discipline.)
 Then call the logger:
 
 ```bash
-python3 -m scripts.portfolio_log write \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.portfolio_log write \
   --decisions-blob reports/portfolio/{YYYYMMDD}/.decisions_blob.json \
   --state portfolio-state.yaml \
   --macro reports/portfolio/{YYYYMMDD}/macro.json \
