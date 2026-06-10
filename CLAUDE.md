@@ -82,6 +82,16 @@ python3 -m scripts.update apply     # fast-forward to it + show the changelog
 Updating is opt-in and never overwrites your local edits. See `CHANGELOG.md` for
 what each release changed.
 
+**Cowork (plugin install) — an update has TWO halves**, and the skills warn you
+when they drift apart (version-skew warning):
+1. **The clone** (scripts + prompts in your project folder): `update apply` as
+   above, or just ask the agent to update it.
+2. **The plugin** (the skill bodies Cowork runs): plugin UI → the marketplace
+   entry → enable **auto-update** (first time it prompts you to install the
+   **Claude GitHub App** — install it) → refresh the marketplace → press the
+   plugin's **Update** button. The button stays greyed out until the
+   marketplace itself has refreshed.
+
 ## Dependencies
 
 - Python 3.10+, `yfinance` + `PyYAML` (`requirements.txt`). HTTP via stdlib.

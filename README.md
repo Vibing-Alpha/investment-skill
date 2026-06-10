@@ -31,6 +31,33 @@ repo in your agent and try `/score-business AAPL`.
 > automatically (`.claude/skills/` for Claude Code / Cowork; `.agents/skills/` +
 > `AGENTS.md` for Codex / Cursor / OpenCode) — no extra setup.
 
+### Cowork (plugin install)
+
+Cowork installs through a GUI, but **expect MORE setup steps than the CLI
+path above, not fewer** — a plugin install, a one-time GitHub App for
+updates, and a slow first run. If you are comfortable with a terminal, the
+Quickstart above is the simpler route. On Cowork:
+
+1. **Select a project folder** for the session — this is the ONLY storage
+   that persists across Cowork sessions; the code will live there.
+2. Plugin UI → add marketplace **`Vibing-Alpha/investment-skill`** → install
+   **`stock-v7-skills`**.
+3. Run **`/stock-v7-setup`** — it clones this repo into your project folder,
+   creates a private `.venv` there, and seeds your three config files.
+   **The first run takes several minutes** (clone + dependency install) —
+   that is normal.
+4. Fill in `.env` (the two API keys), `strategy.yaml`, and
+   `portfolio-state.yaml` (edit them in your local folder, or ask the
+   agent), then run `/stock-v7-setup` again to confirm.
+5. Use the skills as on any other agent.
+
+**Updating on Cowork has TWO halves** (the skills warn you when they drift
+apart): the **clone** (`python3 -m scripts.update apply`, or ask the agent)
+AND the **plugin** — marketplace entry → enable **auto-update** (the first
+time it prompts you to install the **Claude GitHub App**; install it) →
+refresh the marketplace → press the plugin's **Update** button. The button
+stays greyed out until the marketplace has refreshed.
+
 ### Skills
 
 | Command | What it does |
@@ -85,6 +112,28 @@ make setup                                       # 引导式首次设置
 > **务必在仓库根目录启动 agent** —— skill 用的是仓库相对路径,全局安装无法工作。每种
 > agent 会自动读取各自的 skill 布局(Claude Code / Cowork 读 `.claude/skills/`;
 > Codex / Cursor / OpenCode 读 `.agents/skills/` + `AGENTS.md`)—— 无需额外设置。
+
+### Cowork(插件安装)
+
+Cowork 走图形界面安装,但**设置步骤比上面的 CLI 路径更多,不是更少**——要装插件、
+首次更新还要装一个 GitHub App、首次 setup 也比较慢。会用终端的话,上面的快速开始
+反而更省事。Cowork 上的步骤:
+
+1. **为会话选择一个项目文件夹**——这是 Cowork 唯一跨会话持久的存储,代码会装在
+   这里。
+2. 插件界面 → 添加 marketplace **`Vibing-Alpha/investment-skill`** → 安装
+   **`stock-v7-skills`**。
+3. 运行 **`/stock-v7-setup`** —— 它会把本仓库 clone 进你的项目文件夹、在里面建
+   专属 `.venv`、并生成三个配置文件的模板。**首次运行需要几分钟**(clone + 装依
+   赖),属正常现象。
+4. 填好 `.env`(两个 API key)、`strategy.yaml`、`portfolio-state.yaml`(直接在
+   本地文件夹里编辑,或让 agent 代填),然后再跑一次 `/stock-v7-setup` 确认。
+5. 之后与其他 agent 一样使用各 skill。
+
+**Cowork 上的更新分两半**(两边版本不一致时 skill 会主动警告):**clone 侧**
+(`python3 -m scripts.update apply`,或让 agent 更新)和**插件侧**——marketplace
+条目 → 开启**自动更新**(首次会提示安装 **Claude GitHub App**,装上)→ 刷新
+marketplace → 点插件的 **Update** 按钮。marketplace 没刷新前,按钮是灰色的。
 
 ### Skills(技能)
 
