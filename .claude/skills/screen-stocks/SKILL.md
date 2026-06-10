@@ -30,6 +30,69 @@ question: **"What's moving, and what are the candidates worth a closer look?"**
 Downstream skills answer the rest: `/score-business` ("is this a good business?"),
 `/investment-thesis` ("is the thesis clean?"), `/portfolio` ("should I size it?").
 
+## Repo-root prelude (fresh-shell — run first)
+
+Every Bash block in this skill may run in a **fresh shell with an ephemeral cwd**
+(Cowork): variables `export`ed in one block do NOT survive into the next, and the
+harness Read tool does NOT follow a bash `cd`. So the repo root is resolved exactly
+ONCE, here.
+
+Run this block first and **CAPTURE the `STOCK_V7_ROOT=...` value it prints**. Substitute
+that absolute path for the literal `<captured-abs-ROOT>` in every later Bash block, every
+harness Read path, and every subagent-dispatch path in this skill. If this block exits
+non-zero (multiple candidate roots, or no repo found), show its stderr to the user and
+**STOP** — run nothing else.
+
+If it prints a `stock-v7: WARNING — version skew` line, relay that warning to the user verbatim and continue — it is advisory only (the installed plugin and the clone are at different versions; it tells the user which half to update), never a stop.
+
+```bash
+# --- resolver-core ---   (byte-identical to scripts/templates/root_resolver.sh — Task 5 enforces)
+# cwd-or-ancestor: if cwd (or ANY parent) is the repo, USE IT — CC-CLI/Codex/Cursor/OpenCode run from the
+# repo (or a subdir), so this is a TRUE no-op (covers subdir runs + multi-worktree dev: always the clone
+# you're in). Composite marker = scripts/ + prompts/ + strategy.example.yaml (the last is the
+# stock-v7-specific tracked file; tighter than CLAUDE.md/VERSION alone).
+ROOT=""; d="$PWD"
+while [ "$d" != "/" ]; do                # cwd-or-ancestor; marker = scripts/ + prompts/ + strategy.example.yaml
+  if [ -d "$d/scripts" ] && [ -d "$d/prompts" ] && [ -f "$d/strategy.example.yaml" ]; then ROOT="$d"; break; fi
+  d=$(dirname "$d")
+done
+case "${STOCK_V7_HOME:-}" in /*) [ -z "$ROOT" ] && ROOT="$STOCK_V7_HOME";; esac   # env override seam — ABSOLUTE only (relative/~ is ignored, mirroring resolve_root's fail-closed; nothing can set it persistently in Cowork)
+if [ -z "$ROOT" ]; then
+  # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
+  # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
+  # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
+  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+    | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
+        && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
+  if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
+    echo "stock-v7: multiple stock-v7 roots in mounts — keep ONE:" >&2; printf '%s\n' "$HITS" >&2; exit 1
+  fi
+  ROOT=$(printf '%s\n' "$HITS" | head -1)   # the sole hit, or EMPTY — the consumer tail handles empty
+fi
+# --- end resolver-core ---
+# BUSINESS tail (the setup skill replaces everything below the end-marker with its clone/pull tail):
+if [ -z "$ROOT" ]; then                                   # CC-CLI marker fallback (rare: not-in-repo + no env)
+  ROOT=$(cat "$HOME/.stock-v7-home" 2>/dev/null | tr -d '\r')   # strip CRLF if the marker was hand-edited on Windows
+  ROOT="${ROOT:-$HOME/Claude/stock-v7}"
+fi
+cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
+printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+```
+
+## Preflight: Money-path config
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.config_gate check
+```
+
+If it exits non-zero, STOP and show its stderr to the user (config not confirmed /
+required API key missing) — do NOT run any analysis or produce numbers. Then continue
+below.
+
 ## Output
 
 - `reports/screen/{YYYYMMDD}/{scope_tag}.json` — machine-readable ranked results
@@ -57,12 +120,13 @@ Both sections also render in the markdown for human eyes.
 
 ## Script
 
-Single entry point. Read `scripts/screen.py --help` for the full CLI surface
+Single entry point. Run `"$PYBIN" -m scripts.screen --help` for the full CLI surface
 and the rationale behind each default threshold. The docstring at the top of
-the file documents the data flow and computation pipeline.
+`<captured-abs-ROOT>/scripts/screen.py` documents the data flow and computation
+pipeline.
 
-```bash
-python3 -m scripts.screen \
+```
+"$PYBIN" -m scripts.screen \
   --scope {market | sector:NAME | watchlist:PATH} \
   --window {1d | 5d | 1m | 3m} \
   [--direction up|down] [--top N] \
@@ -103,8 +167,8 @@ chase-risk, overbought/oversold, RSI, MACD, or volume anomalies — i.e.
 most of the time. Skip it only for a fast change-%-only scan.
 
 **Watchlist path**: if the user says "观察池" without a path, check
-`portfolio-state.yaml` for holdings (each top-level key is a ticker). If
-present, use it. If not, ask the user.
+`<captured-abs-ROOT>/portfolio-state.yaml` for holdings (each top-level key is
+a ticker). If present, use it. If not, ask the user.
 
 **Theme with no GICS sector** (e.g. "铝电容/被动元件", "固态电池", "GLP-1
 CDMO" — a narrow industry that isn't one of the GICS-11 sectors, with no
@@ -159,20 +223,24 @@ them rather than duplicating here.
 ### Step 3: Invoke + read + present
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 # ET session date — matches the convention used by the rest of the delta
 # layer (scripts/delta/calendar.session_et). Using `date +%Y%m%d` (local
 # system time) would misplace after-hours runs into the next UTC day and
 # silently break day-over-day diffs.
-DATE=$(python3 -c 'from scripts.delta.calendar import session_et; print(session_et().strftime("%Y%m%d"))')
+DATE=$("$PYBIN" -c 'from scripts.delta.calendar import session_et; print(session_et().strftime("%Y%m%d"))')
 SCOPE_TAG="<snake_case_summary_of_scope_and_window>"
-mkdir -p reports/screen/$DATE
-python3 -m scripts.screen --scope ... --window ... [...] \
+mkdir -p "reports/screen/$DATE"
+"$PYBIN" -m scripts.screen --scope ... --window ... [...] \
   --output-prefix "reports/screen/$DATE/$SCOPE_TAG"
 ```
 
-Then read `<prefix>.json` and present in `output_language` (default zh-CN
-per `strategy.yaml`). The presentation should surface signal, not just
-dump rows. In priority order:
+Then read the output JSON at
+`<captured-abs-ROOT>/reports/screen/{DATE}/{SCOPE_TAG}.json` (absolute path —
+the harness Read tool does not follow the bash `cd`) and present in
+`output_language` (default zh-CN per `strategy.yaml`). The presentation should
+surface signal, not just dump rows. In priority order:
 
 1. **Lead with the `attention` list** if present. These are the 1-5
    tickers where the screen intersects the user's actual portfolio /

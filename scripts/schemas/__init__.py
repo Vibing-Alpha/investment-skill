@@ -15,7 +15,13 @@ from scripts.schemas.errors import SchemaError, DataQualityError
 from scripts.schemas.source_tag import (
     SOURCE_TAG_RE,
     PLACEHOLDER_DESCRIPTORS,
+    WEBSEARCH_BINDING_MARKER,
+    WEBSEARCH_BINDING_VERSION,
+    WEBSEARCH_BOUND_RE,
+    check_websearch_binding,
+    stamp_websearch_binding,
     validate_source_tags,
+    websearch_binding_active,
 )
 from scripts.schemas.bq_analysis import (
     BqAnalysis,
@@ -49,7 +55,13 @@ __all__ = [
     "DataQualityError",
     "SOURCE_TAG_RE",
     "PLACEHOLDER_DESCRIPTORS",
+    "WEBSEARCH_BINDING_MARKER",
+    "WEBSEARCH_BINDING_VERSION",
+    "WEBSEARCH_BOUND_RE",
+    "check_websearch_binding",
+    "stamp_websearch_binding",
     "validate_source_tags",
+    "websearch_binding_active",
     "BqAnalysis",
     "BqMeta",
     "BqScores",

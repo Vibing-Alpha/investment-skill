@@ -115,6 +115,47 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         stamp_meta(thesis, ticker=ticker, analysis_date=analysis_date)
+        # WebSearch binding marker (Plan B Task 6): stamp iff the sibling
+        # events.json is itself binding-marked. The thesis is always
+        # freshly LLM-authored, but it quotes catalysts from events.json —
+        # which on the REUSE path may be a pre-binding legacy artifact
+        # whose [WebSearch: outlet] tags legitimately lack url/access-date.
+        # Marking only when the events input is post-binding keeps such
+        # runs loadable while making fully-post-binding runs strict at
+        # Step 6.4 (load_investment_thesis dispatches on the marker).
+        from scripts.schemas import SchemaError
+        from scripts.schemas.source_tag import (
+            WEBSEARCH_BINDING_MARKER,
+            WEBSEARCH_BINDING_VERSION,
+            websearch_binding_active,
+        )
+        events_path = report_dir / "events.json"
+        events_marked = False
+        if events_path.is_file():
+            try:
+                events = json.loads(events_path.read_text(encoding="utf-8"))
+                events_marked = websearch_binding_active(
+                    events, artifact="events")
+            except SchemaError as e:
+                # ILLEGAL marker (e.g. 2 / "1" / true) — fail-CLOSED, matching
+                # websearch_binding_active's own contract. Swallowing it here
+                # would write the thesis UNMARKED and make it load
+                # legacy-lenient forever (codex post-impl Fix 1).
+                print(
+                    f"FATAL: stamp_thesis_meta: illegal WebSearch binding "
+                    f"marker in {events_path}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                # missing/unreadable/unparseable file → lenient.
+                # UnicodeDecodeError is listed explicitly: it is a ValueError
+                # subclass that read_text(encoding="utf-8") can raise, and the
+                # SchemaError fail-closed branch above must NOT absorb it
+                # (codex post-impl regression check R1).
+                events_marked = False
+        if events_marked:
+            thesis[WEBSEARCH_BINDING_MARKER] = WEBSEARCH_BINDING_VERSION
         # Atomic write (temp + os.replace) so a crash mid-write can't leave a
         # partial artifact for Step 6.4 to ingest — mirrors reuse_events.py.
         from scripts.cli_utils import write_output as _atomic_write

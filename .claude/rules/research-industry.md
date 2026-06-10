@@ -13,7 +13,8 @@ visible from turn 1.
 |---|---|---|
 | Ticker universe | US common stock / US-listed ADR / **active** OTC ADR only | Agent judgment + WebSearch verify |
 | Excluded states | Delisted, acquired, ADR-terminating, pre-IPO, foreign-only | Agent must verify via current-year WebSearch |
-| Source tags | `[KIND: specific descriptor]` — no placeholder theater | `scripts/schemas/source_tag.py` runtime validator |
+| Source tags | `[KIND: specific descriptor]` — no placeholder theater; WebSearch tags bound `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` on fresh runs | `scripts/schemas/source_tag.py` (strict via `_websearch_binding_version` marker) |
+| WebSearch preflight | One real WebSearch call before any research; host lacks tool → `cannot complete: host lacks WebSearch` + STOP | Prompt §preflight + SKILL dispatch note (fail-closed prose layer) |
 | Slug | `^[a-z0-9]+(-[a-z0-9]+)*$` | `scripts/industry/normalize_slug.py` |
 | TAM dispersion | >2x span across sources → surface as risk | Agent rule (prompt §Quality checks) |
 | CAGR dispersion | >3pp span across sources → surface as risk | Agent rule (prompt §Quality checks) |

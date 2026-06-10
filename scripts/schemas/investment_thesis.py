@@ -30,7 +30,11 @@ from typing import Any, Mapping
 from scripts.schemas.currency_conversion import CurrencyConversion
 from scripts.schemas.dl3c_dispatch import Dl3cMode, dispatch_dl3c_mode
 from scripts.schemas.errors import SchemaError
-from scripts.schemas.source_tag import check_source_tag, validate_source_tags
+from scripts.schemas.source_tag import (
+    check_source_tag,
+    validate_source_tags,
+    websearch_binding_active,
+)
 
 
 _ARTIFACT = "investment_thesis"
@@ -299,7 +303,15 @@ def validate_investment_thesis(data: Mapping[str, Any]) -> InvestmentThesis:
     payload_for_source_tags = {
         k: v for k, v in data.items() if k != "currency_conversion"
     }
-    validate_source_tags(payload_for_source_tags, artifact=_ARTIFACT)
+    # WebSearch binding (Plan B Task 6): marker stamped by
+    # scripts.thesis.stamp_thesis_meta (iff the sibling events.json is
+    # itself binding-marked). Marked → every WebSearch citation must bind
+    # outlet + url + access-date. Legacy artifacts: old rule exactly.
+    strict_ws = websearch_binding_active(data, artifact=_ARTIFACT)
+    validate_source_tags(
+        payload_for_source_tags, artifact=_ARTIFACT,
+        strict_websearch=strict_ws,
+    )
 
     # Additionally: calculation_audit uses *_source suffix convention for
     # structured provenance fields (er_source, md_source, etc.). Walk
@@ -321,7 +333,8 @@ def validate_investment_thesis(data: Mapping[str, Any]) -> InvestmentThesis:
                     _ARTIFACT, path,
                     f"source-tag value must be str, got {type(v).__name__}",
                 )
-            check_source_tag(v, artifact=_ARTIFACT, path=path)
+            check_source_tag(v, artifact=_ARTIFACT, path=path,
+                             strict_websearch=strict_ws)
 
     # Dispatch DL3c mode + validate cert (mirrors bq_analysis loader).
     # Errors from dispatch_dl3c_mode (illegal _dl3c_version, cert without

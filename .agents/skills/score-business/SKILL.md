@@ -22,6 +22,74 @@ This skill answers ONE question: **Is this business worth watching?**
 It does NOT answer: "Should I buy now?" or "What price to pay?" — those
 belong to the timing/portfolio layer.
 
+## Repo-root prelude (fresh-shell — run first)
+
+Every Bash block in this skill may run in a **fresh shell with an ephemeral cwd**
+(Cowork): variables `export`ed in one block do NOT survive into the next, and the
+harness Read tool does NOT follow a bash `cd`. So the repo root is resolved exactly
+ONCE, here. `<TICKER>` below is likewise substituted by you into EACH block (never
+carried as a shell variable across blocks); each block re-runs the idempotent
+`allocate-bq-run` (current run dir) / `find-latest-prior` (prior run dir) to
+re-derive its dirs; and the one piece of COMPUTED cross-step state — the tier —
+lives in the run-scoped state file `$REPORT_DIR/.run_state.json`, written once in
+Step 2 and re-read by every later block.
+
+Run this block first and **CAPTURE the `STOCK_V7_ROOT=...` value it prints**. Substitute
+that absolute path for the literal `<captured-abs-ROOT>` in every later Bash block, every
+harness Read path, and every subagent-dispatch path in this skill. If this block exits
+non-zero (multiple candidate roots, or no repo found), show its stderr to the user and
+**STOP** — run nothing else.
+
+If it prints a `stock-v7: WARNING — version skew` line, relay that warning to the user verbatim and continue — it is advisory only (the installed plugin and the clone are at different versions; it tells the user which half to update), never a stop.
+
+```bash
+# --- resolver-core ---   (byte-identical to scripts/templates/root_resolver.sh — Task 5 enforces)
+# cwd-or-ancestor: if cwd (or ANY parent) is the repo, USE IT — CC-CLI/Codex/Cursor/OpenCode run from the
+# repo (or a subdir), so this is a TRUE no-op (covers subdir runs + multi-worktree dev: always the clone
+# you're in). Composite marker = scripts/ + prompts/ + strategy.example.yaml (the last is the
+# stock-v7-specific tracked file; tighter than CLAUDE.md/VERSION alone).
+ROOT=""; d="$PWD"
+while [ "$d" != "/" ]; do                # cwd-or-ancestor; marker = scripts/ + prompts/ + strategy.example.yaml
+  if [ -d "$d/scripts" ] && [ -d "$d/prompts" ] && [ -f "$d/strategy.example.yaml" ]; then ROOT="$d"; break; fi
+  d=$(dirname "$d")
+done
+case "${STOCK_V7_HOME:-}" in /*) [ -z "$ROOT" ] && ROOT="$STOCK_V7_HOME";; esac   # env override seam — ABSOLUTE only (relative/~ is ignored, mirroring resolve_root's fail-closed; nothing can set it persistently in Cowork)
+if [ -z "$ROOT" ]; then
+  # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
+  # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
+  # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
+  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+    | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
+        && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
+  if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
+    echo "stock-v7: multiple stock-v7 roots in mounts — keep ONE:" >&2; printf '%s\n' "$HITS" >&2; exit 1
+  fi
+  ROOT=$(printf '%s\n' "$HITS" | head -1)   # the sole hit, or EMPTY — the consumer tail handles empty
+fi
+# --- end resolver-core ---
+# BUSINESS tail (the setup skill replaces everything below the end-marker with its clone/pull tail):
+if [ -z "$ROOT" ]; then                                   # CC-CLI marker fallback (rare: not-in-repo + no env)
+  ROOT=$(cat "$HOME/.stock-v7-home" 2>/dev/null | tr -d '\r')   # strip CRLF if the marker was hand-edited on Windows
+  ROOT="${ROOT:-$HOME/Claude/stock-v7}"
+fi
+cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
+printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+```
+
+## Preflight: Money-path config
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.config_gate check
+```
+
+If it exits non-zero, STOP and show its stderr to the user (config not confirmed /
+required API key missing) — do NOT run any analysis or produce numbers. Then continue
+below.
+
 ## Output
 
 - `bq_analysis.json` — Complete BQ analysis with all dimension scores,
@@ -32,7 +100,8 @@ Intermediate files (in `scores/`) are working artifacts kept for traceability.
 
 ## Scripts Available
 
-All scripts run from the project root using `python3 -m scripts.<module>`.
+Every Bash block below first `cd`s to the captured root and runs scripts via
+`"$PYBIN" -m scripts.<module>` (venv-or-python3 indirection).
 
 | Script | Purpose | CLI |
 |--------|---------|-----|
@@ -52,32 +121,40 @@ Data sources (called internally by fetch):
 
 ## Execution (delta-era)
 
-### Step 0: Resolve prior, allocate today's run dir, decide tier
+### Step 0: Resolve prior, allocate today's run dir
 
 **Validate the ticker symbol before anything else.** `$TICKER` and
 values derived from it ($REPORT_DIR, $PRIOR_DIR) are interpolated into
-`python3 -c '...'` heredocs in later steps. An unsanitized ticker
+`"$PYBIN" -c '...'` snippets in later steps. An unsanitized ticker
 containing quotes / path separators / shell metacharacters could
-escape the single-quoted heredoc and execute arbitrary Python/shell.
-Restrict to the actual US ticker vocabulary (letters + dot, 1-10 chars):
+escape the single-quoted snippet and execute arbitrary Python/shell.
+Restrict to the actual US ticker vocabulary (letters + dot, 1-10 chars).
+If this block exits non-zero (invalid ticker), STOP and tell the user.
 
 ```bash
-TICKER="AAPL"
-if ! [[ "$TICKER" =~ ^[A-Z][A-Z.]{0,9}$ ]]; then
-    echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2
-    exit 1
-fi
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"   # agent-substituted (e.g. AAPL) — substituted into every block, never exported across them
+echo "$TICKER" | grep -Eq '^[A-Z][A-Z.]{0,9}$' \
+  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2; exit 1; }
 
-REPORT_DIR=$(python3 -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 # find-latest-prior excludes today's ET dir by default (safe-by-construction
 # guard against same-day self-comparison). No extra flags needed.
-PRIOR_DIR=$(python3 -m scripts.delta.resolver find-latest-prior \
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
+printf 'REPORT_DIR=%s\nPRIOR_DIR=%s\n' "$REPORT_DIR" "$PRIOR_DIR"
 ```
 
-Read `strategy.yaml` for user preferences (output_language, scoring weights).
-If `strategy.yaml` does not exist, use defaults: output_language=zh-CN,
-weights fundamental=0.35/forward=0.35/industry=0.30.
+Note the printed `REPORT_DIR` (relative to the repo root) and `PRIOR_DIR`
+(possibly empty = first-time run). Later blocks RE-RUN the same idempotent
+commands rather than relying on these variables; you use the printed values
+for (1) the first-time-run branch in Step 2 and (2) composing absolute
+subagent-dispatch paths as `<captured-abs-ROOT>/<REPORT_DIR>/...`.
+
+Read `<captured-abs-ROOT>/strategy.yaml` for user preferences (output_language,
+scoring weights). If `strategy.yaml` does not exist, use defaults:
+output_language=zh-CN, weights fundamental=0.35/forward=0.35/industry=0.30.
 
 ### Step 1: Probe fetch (subset)
 
@@ -87,7 +164,11 @@ values with a warning) which is enough articles for the materiality
 classifier to judge.
 
 ```bash
-python3 -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+"$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 01_price_data,02_financial_data,03_company_news,04_insider_data,06_analyst_estimates,07_earnings,09_macro_rates \
   --news-limit 10 \
   --tier-decided probe
@@ -95,20 +176,48 @@ python3 -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
 
 ### Step 2: Classifier + tier decision
 
-If `PRIOR_DIR` is empty (first-time run), skip classifier and force tier=full.
+The decided tier is the run's ONE piece of computed cross-step state: this step
+persists it to `$REPORT_DIR/.run_state.json`, and Steps 4/4.5/5/6 re-read it
+from there (fresh shells lose variables). If either block below exits non-zero,
+STOP and surface the error.
 
-Otherwise, spawn a subagent with `prompts/delta/classify-news.md` passing
-articles from `$REPORT_DIR/data/03_company_news.json` with
-`since_date = <prior run's et_trading_day>`. The rubric is at
-`.claude/rules/delta-materiality.md`.
-
-Decide the BQ tier via the dedicated CLI subcommand. The script
-internally calls `build_bq_tier_inputs` (centralizes fail-open reads +
-3-condition classifier health check) then `decide_bq_tier`. Wrap in
-`TIER=$(...)` so downstream steps see the decision.
+**If `PRIOR_DIR` is empty (first-time run):** skip the classifier and force
+tier=full — record it:
 
 ```bash
-TIER=$(python3 -m scripts.delta.probe decide-bq-tier \
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+"$PYBIN" -c "
+import json, pathlib
+pathlib.Path('$REPORT_DIR/.run_state.json').write_text(
+    json.dumps({'tier': 'full'}, indent=2), encoding='utf-8')
+print('TIER=full')
+"
+```
+
+**Otherwise**, spawn a subagent with `<captured-abs-ROOT>/prompts/delta/classify-news.md`
+as its instructions, passing articles from
+`<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json` with
+`since_date = <prior run's et_trading_day>`. The rubric is at
+`<captured-abs-ROOT>/.claude/rules/delta-materiality.md`. Instruct it to WRITE its
+output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.json` — substitute
+the concrete absolute path into the dispatch prompt (the subagent inherits neither
+this shell's variables nor its cwd; `.json` writes are allowed for subagents).
+
+Then decide the BQ tier via the dedicated CLI subcommand. The script
+internally calls `build_bq_tier_inputs` (centralizes fail-open reads +
+3-condition classifier health check) then `decide_bq_tier`:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+TIER=$("$PYBIN" -m scripts.delta.probe decide-bq-tier \
   --report-dir "$REPORT_DIR" \
   --prior-dir "$PRIOR_DIR" \
   --classifier-output "$REPORT_DIR/.classifier_output.json")
@@ -118,14 +227,28 @@ case "$TIER" in
     full|partial|no_op) ;;
     *) echo "FATAL: decide_bq_tier returned unexpected value: '$TIER'" >&2; exit 1 ;;
 esac
+
+# Persist the tier into the run-scoped state file for later fresh-shell blocks.
+"$PYBIN" -c "
+import json, pathlib
+pathlib.Path('$REPORT_DIR/.run_state.json').write_text(
+    json.dumps({'tier': '$TIER'}, indent=2), encoding='utf-8')
+"
+printf 'TIER=%s\n' "$TIER"
 ```
 
 ### Step 3: Tier-specific fetch + agents
 
-**If `no_op`:** copy remaining categories + prior scores + prior dimensions from `$PRIOR_DIR`. Skip dim agents.
+**If `no_op`:** copy remaining categories + prior scores + prior dimensions from the prior run. Skip dim agents.
 
 ```bash
-python3 -c "
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+"$PYBIN" -c "
 from scripts.delta.copy_data import copy_data_categories, copy_dimension_scores
 from pathlib import Path
 # Copy data files that weren't fetched in probe
@@ -145,18 +268,25 @@ copy_dimension_scores(
 **If `partial`:** fetch `05_filing_summary`; copy `fundamental` dim; spawn forward + industry score agents.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+
 # Save phase 1's validation before phase 2 fetch (merge in Step 4.5).
 # Use a run-scoped transient dotfile in $REPORT_DIR, NOT /tmp/...$$ — the
 # Step 3 save and the Step 4.5 merge run in SEPARATE shells (agent dispatch
 # happens between them), so a $$ (PID) name would not match across calls.
 cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
-python3 -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
+"$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided partial
 
 # Copy fundamental dim from prior
-python3 -c "
+"$PYBIN" -c "
 from scripts.delta.copy_data import copy_dimension_scores
 from pathlib import Path
 copy_dimension_scores(
@@ -171,13 +301,18 @@ copy_dimension_scores(
 **If `full`:** fetch all remaining categories; run indicators; spawn fundamental + forward + industry agents.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+
 cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
-python3 -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
+"$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided full
 
-python3 -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
+"$PYBIN" -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
   --output "$REPORT_DIR/data/indicators.json"
 
 # Spawn all three agents (see below)
@@ -188,19 +323,43 @@ python3 -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json"
 Spawn agents in parallel:
 
 ```
-Agent A (full only): prompts/score-fundamental.md → $REPORT_DIR/scores/fundamental.json
-Agent B: prompts/score-forward.md → $REPORT_DIR/scores/forward.json
-Agent C: prompts/score-industry.md → $REPORT_DIR/scores/industry.json
+Agent A (full only): <captured-abs-ROOT>/prompts/score-fundamental.md → <captured-abs-ROOT>/<REPORT_DIR>/scores/fundamental.json
+Agent B: <captured-abs-ROOT>/prompts/score-forward.md → <captured-abs-ROOT>/<REPORT_DIR>/scores/forward.json
+Agent C: <captured-abs-ROOT>/prompts/score-industry.md → <captured-abs-ROOT>/<REPORT_DIR>/scores/industry.json
 ```
 
-Agent inputs as in pre-delta (02_financial for fundamental; 06+03+05+07 for forward; 02+03 + WebSearch for industry).
+Compose each dispatch prompt with **concrete absolute paths** (substitute the
+captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
+shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
+Agent inputs as in pre-delta (02_financial for fundamental; 06+03+05+07 for
+forward; 02+03 + WebSearch for industry), read from
+`<captured-abs-ROOT>/<REPORT_DIR>/data/`. Follow this input list verbatim — do
+NOT add `00_validation.json` (between phase 2 and the Step 4.5 merge it is
+phase-2-SKIPPED-stubbed and would mislead the agents).
+
+The forward + industry agents MUST have WebSearch access — their prompts
+carry a fail-closed preflight (one real WebSearch call before any
+analysis; host lacks the tool → the agent reports
+`cannot complete: host lacks WebSearch`). If either agent reports that,
+STOP the run — never let a dim be scored from model memory. All agents
+must emit WebSearch citations in the bound form
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`; `scripts.assemble`
+strict-validates the fresh dims and fail-closes on unbound tags.
 
 ### Step 4: Synthesis (with tier_context)
 
-Write tier_context.yaml and spawn synthesis agent:
+Write tier_context.yaml:
 
 ```bash
-cat > "$REPORT_DIR/.tier_context.yaml" <<EOF
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
+TIER_CONTEXT_YAML="$REPORT_DIR/.tier_context.yaml"
+cat > "$TIER_CONTEXT_YAML" <<TIER_CONTEXT_YAML_EOF
 tier_context:
   tier: $TIER
   prior_synthesis_path: $PRIOR_DIR/synthesis.json
@@ -208,30 +367,39 @@ tier_context:
   low_signal_news_count: <from classifier>
   low_signal_headlines: <from classifier>
   dimensions_copied: <list of dims copied this run>
-EOF
+TIER_CONTEXT_YAML_EOF
 ```
 
-Spawn synthesis agent with `prompts/score-synthesize.md`. On no_op, the
-agent reads `prior_synthesis_path` and copies most fields verbatim, emitting
-only a `delta_note`. Output: `$REPORT_DIR/synthesis.json` +
-`$REPORT_DIR/summary.md`.
+Spawn the synthesis agent with `<captured-abs-ROOT>/prompts/score-synthesize.md`.
+On no_op, the agent reads `prior_synthesis_path` and copies most fields verbatim,
+emitting only a `delta_note`. Output:
+`<captured-abs-ROOT>/<REPORT_DIR>/synthesis.json` +
+`<captured-abs-ROOT>/<REPORT_DIR>/summary.md`.
 
 > **Dispatch note (`.claude/rules/skill-architecture.md` #8):** the harness
 > blocks subagent `.md` writes via the Write tool. Instruct the synthesis
 > agent to write `summary.md` via a Bash heredoc with a content-unique quoted
-> delimiter (`cat > "reports/<TICKER>/<DATE>/summary.md" <<'SUMMARY_MD_EOF' … SUMMARY_MD_EOF`,
+> delimiter
+> (`cat > "<captured-abs-ROOT>/reports/<TICKER>/<DATE>/summary.md" <<'SUMMARY_MD_EOF' … SUMMARY_MD_EOF`,
 > UTF-8; NOT a bare `EOF`/`MD` — collision truncates) — `synthesis.json` writes
-> fine via the Write tool. Substitute the ACTUAL `reports/…` path into the
-> dispatch prompt — the subagent's Bash shell has no `$REPORT_DIR`.
+> fine via the Write tool. Substitute the ACTUAL ABSOLUTE path into the
+> dispatch prompt — the subagent's Bash shell has no `$REPORT_DIR` and its cwd
+> is ephemeral, so a relative `reports/…` path would land in the wrong place.
 
-Hard-gate the synthesis `.md` deliverable before proceeding (mirrors
+Hard-gate the synthesis deliverables before proceeding (mirrors
 investment-thesis Step 6): a Bash-heredoc write can leave the file
 missing/empty (wrong path, heredoc not run), and `summary.md` is what Step 8
 links + the changelog distils, so it must fail-closed here, not surface later.
 (The gate catches missing/empty only; a mid-file delimiter collision is
-prevented by the content-unique sentinel above, not by this gate.)
+prevented by the content-unique sentinel above, not by this gate.) If the gate
+exits non-zero, re-dispatch the synthesis agent ONCE; if it fails again, STOP
+and surface the failure.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 [ -s "$REPORT_DIR/summary.md" ] \
   || { echo "FATAL: synthesis produced no summary.md — re-dispatch synthesis agent" >&2; exit 1; }
 [ -s "$REPORT_DIR/synthesis.json" ] \
@@ -245,8 +413,13 @@ category_statuses. Merge phase 1's entries back so assembler's
 `build_meta` can read `categories.financials.latest_period`:
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
 if [ "$TIER" != "no_op" ]; then
-python3 -m scripts.score_business.validation_merge \
+"$PYBIN" -m scripts.score_business.validation_merge \
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
     --phase2 "$REPORT_DIR/data/00_validation.json"
 # In-place merge: phase 2's SKIPPED stubs that would have clobbered
@@ -261,11 +434,18 @@ fi
 
 Rewrite 00_validation.tier_decided from "probe" to the terminal TIER
 (needed on no_op, where no phase 2 ran). Write transient tier_context.json
-and invoke assembler:
+and invoke assembler. If the assembler or the schema gate exits non-zero,
+STOP and surface the error — do not proceed with a partial artifact.
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
+
 # 1) Rewrite 00_validation.tier_decided to terminal tier
-python3 -c "
+"$PYBIN" -c "
 import json, pathlib
 p = pathlib.Path('$REPORT_DIR/data/00_validation.json')
 v = json.loads(p.read_text(encoding='utf-8'))
@@ -274,7 +454,8 @@ p.write_text(json.dumps(v, indent=2, ensure_ascii=False), encoding='utf-8')
 "
 
 # 2) Write tier-context-json (transient)
-cat > "$REPORT_DIR/.tier_context.json" <<EOF
+TIER_CONTEXT_JSON="$REPORT_DIR/.tier_context.json"
+cat > "$TIER_CONTEXT_JSON" <<TIER_CONTEXT_JSON_EOF
 {
   "tier_this_run": "$TIER",
   "component_provenance": {
@@ -283,20 +464,20 @@ cat > "$REPORT_DIR/.tier_context.json" <<EOF
     "dimensions.industry":    {"source_date": "...", "reason": "..."}
   }
 }
-EOF
+TIER_CONTEXT_JSON_EOF
 
 # 3) Run assembler (cross-checks both sources, aborts on mismatch)
-python3 -m scripts.assemble \
+"$PYBIN" -m scripts.assemble \
   --report-dir "$REPORT_DIR" \
-  --tier-context-json "$REPORT_DIR/.tier_context.json"
+  --tier-context-json "$TIER_CONTEXT_JSON"
 
-rm "$REPORT_DIR/.tier_context.json"
+rm "$TIER_CONTEXT_JSON"
 
 # 4) Explicit fail-close schema validation. Mirrors investment-thesis
 # Step 6.4 — bq_analysis.json must load through the typed loader before
 # we declare success. Catches assemble bugs that produce malformed JSON
 # (would silently propagate to downstream /investment-thesis and /portfolio).
-python3 -c "
+"$PYBIN" -c "
 from scripts.schemas.bq_analysis import load_bq_analysis
 import sys
 try:
@@ -324,20 +505,9 @@ re-run the skill; do not attempt to patch around the missing dimension.
 #### Cost accumulation
 
 Each Task subagent call returns a usage block with `total_tokens`.
-Accumulate these across all agent invocations for this run into a
-single cost dict, then pass to `run_meta write`:
-
-```bash
-# Pseudocode — orchestrator accumulates per-call token counts + wall time
-# into $COSTS_FILE with shape {"tokens": N, "duration_s": N}.
-# Every LLM call this run contributes its usage.total_tokens to "tokens".
-# Start timer at Step 0, close it here.
-#
-# Run-scoped transient dotfile under $REPORT_DIR (NOT /tmp/...$$): portable
-# across OSes (native Windows has no /tmp) and stable across step boundaries
-# (a separate shell loses $$). $REPORT_DIR already isolates by ticker+date.
-COSTS_FILE="$REPORT_DIR/.delta_costs.json"
-```
+Accumulate these across all agent invocations for this run (every LLM call
+contributes its `usage.total_tokens`; wall time runs from Step 0 to here) and
+substitute the totals into the heredoc below.
 
 Compose `$AGENTS_RUN` from what ACTUALLY ran this run, not from the
 tier alone. The **classifier** runs only when there was a prior run to
@@ -348,6 +518,22 @@ non-empty. (no_op + partial tiers always have a prior, so classifier is
 always recorded there; only `full` can occur on a first-time run.)
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
+
+# Run-scoped transient dotfile under $REPORT_DIR (NOT /tmp/...$$): portable
+# across OSes (native Windows has no /tmp) and stable across step boundaries
+# (a separate shell loses $$). $REPORT_DIR already isolates by ticker+date.
+COSTS_FILE="$REPORT_DIR/.delta_costs.json"
+cat > "$COSTS_FILE" <<COSTS_JSON_EOF
+{"tokens": <accumulated total_tokens>, "duration_s": <wall seconds since Step 0>}
+COSTS_JSON_EOF
+
 case "$TIER" in
     no_op)   AGENTS_RUN="synthesis_light" ;;
     partial) AGENTS_RUN="forward,industry,synthesis" ;;
@@ -363,7 +549,7 @@ if [ -n "$PRIOR_DIR" ]; then
     AGENTS_RUN="classifier,${AGENTS_RUN}"
 fi
 
-python3 -m scripts.delta.run_meta write \
+"$PYBIN" -m scripts.delta.run_meta write \
   --run-dir "$REPORT_DIR" \
   --ticker "$TICKER" \
   --skill score-business \
@@ -383,24 +569,34 @@ python3 -m scripts.delta.run_meta write \
 # is write-only audit — no consumer reads it — but keep it accurate.)
 ```
 
-Write the delta section to a file, then append. Use an unquoted heredoc
-so `$TIER` and today's date interpolate:
+Write the delta section to a file, then append. The header line is built
+via `printf` (so `$TIER` and today's date interpolate); the free-prose
+body uses a QUOTED heredoc — the delta note is agent-substituted prose
+that may contain `$` («$4.2B», «$NVDA») or backticks, which an unquoted
+heredoc would silently expand / command-substitute:
 
 ```bash
-TODAY_ET=$(python3 -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
-cat > "$REPORT_DIR/.delta_section.md" <<EOF
-## Update $TODAY_ET (tier: $TIER)
-
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business)
+TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
+TODAY_ET=$("$PYBIN" -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
+DELTA_FILE="$REPORT_DIR/.delta_section.md"
+printf '## Update %s (tier: %s)\n\n' "$TODAY_ET" "$TIER" > "$DELTA_FILE"
+cat >> "$DELTA_FILE" <<'DELTA_SECTION_EOF'
 <one or two sentences from synthesis.delta_note>
-EOF
+DELTA_SECTION_EOF
 
-python3 -m scripts.delta.append_changelog \
+"$PYBIN" -m scripts.delta.append_changelog \
   --prior "$PRIOR_DIR/summary.changelog.md" \
   --current "$REPORT_DIR/summary.changelog.md" \
   --ticker "$TICKER" \
-  --delta-section "$REPORT_DIR/.delta_section.md"
+  --delta-section "$DELTA_FILE"
 
-rm "$REPORT_DIR/.delta_section.md"
+rm "$DELTA_FILE"
 ```
 
 ### Step 7: Validation (soft-fail word budget)
@@ -416,14 +612,18 @@ Use `cli_utils.count_word_equivalents`, NOT `wc -w`: the default
 helper counts non-CJK tokens (== `wc -w` for English) + CJK chars/2:
 
 ```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 # Existence-guard the gate (mirrors investment-thesis): a missing summary.md
-# would make the `python3 -c` fail, leave WORDS empty, and turn the numeric
-# test into a bash "integer expression expected" error. summary.md is a
-# guaranteed Step 4 deliverable, so this is belt-and-suspenders.
+# would make the inline interpreter call fail, leave WORDS empty, and turn the
+# numeric test into a bash "integer expression expected" error. summary.md is
+# a guaranteed Step 4 deliverable, so this is belt-and-suspenders.
 if [ -s "$REPORT_DIR/summary.md" ]; then
-    WORDS=$(python3 -c 'import sys; from scripts.cli_utils import count_word_equivalents; print(count_word_equivalents(open(sys.argv[1], encoding="utf-8").read()))' "$REPORT_DIR/summary.md")
+    WORDS=$("$PYBIN" -c 'import sys; from scripts.cli_utils import count_word_equivalents; print(count_word_equivalents(open(sys.argv[1], encoding="utf-8").read()))' "$REPORT_DIR/summary.md")
     if [ "$WORDS" -gt 800 ]; then
-        python3 -m scripts.delta.run_meta warn \
+        "$PYBIN" -m scripts.delta.run_meta warn \
           --run-dir "$REPORT_DIR" \
           --ticker "$TICKER" \
           --warning "summary.md exceeded 800 words"
@@ -435,14 +635,18 @@ Do NOT abort — the word budget is a soft-fail per spec.
 
 ### Step 8: Report to user
 
-Report: tier decided, what changed, link to summary.md. Mention
-`/investment-thesis TICKER` for next-step analysis.
+Report: tier decided, what changed, link to
+`<captured-abs-ROOT>/<REPORT_DIR>/summary.md` (absolute — the harness Read tool
+does not follow the bash `cd`). Mention `/investment-thesis TICKER` for
+next-step analysis.
 
 ### Gotchas
 
-Read `score-business/gotchas.md` for known failure patterns. Key ones:
+Read `<captured-abs-ROOT>/.claude/skills/score-business/gotchas.md` for known
+failure patterns. Key ones:
 - ADR stocks have unreliable per-share metrics — check `adr_correction.json`
-- Pre-profit companies need adapted scoring (read growth-stock-analysis.md)
+- Pre-profit companies need adapted scoring (read
+  `<captured-abs-ROOT>/prompts/references/growth-stock-analysis.md`)
 - Multi-industry companies need explicit industry scoping
 - API array order is per-TYPE, not per-source (see gotchas.md): price bars
   (`historical.daily`/`weekly`) are OLDEST-first → `[-N:]` for recent; but

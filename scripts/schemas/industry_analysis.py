@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from scripts.schemas.errors import SchemaError
-from scripts.schemas.source_tag import SOURCE_TAG_RE
+from scripts.schemas.source_tag import (
+    SOURCE_TAG_RE,
+    validate_source_tags,
+    websearch_binding_active,
+)
 
 
 _ARTIFACT = "industry_analysis"
@@ -347,6 +351,18 @@ def validate_industry_analysis(data: Mapping[str, Any]) -> IndustryAnalysis:
              "source tags",
              f"missing in: {', '.join(untagged)} "
              "(every claim needs [API:...] / [WebSearch:...] / [Calc:...] / [Filing:...])")
+
+    # WebSearch binding (Plan B Task 6): artifacts carrying the root
+    # marker `_websearch_binding_version: 1` (stamped by the
+    # research-industry SKILL on fresh full/partial runs) require every
+    # WebSearch citation — in *_source fields AND claim strings — to bind
+    # outlet + url + access-date. The strict walker scans every string
+    # leaf; the artifact has no literal "source" keys, so the lenient
+    # walker branch is a no-op here. Legacy artifacts: old rule exactly.
+    if websearch_binding_active(data, artifact="industry_analysis"):
+        validate_source_tags(
+            data, artifact="industry_analysis", strict_websearch=True,
+        )
 
     return IndustryAnalysis(
         meta=meta, framing=framing,

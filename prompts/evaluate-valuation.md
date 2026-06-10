@@ -44,7 +44,8 @@ non-USD reporting currency. Three rules apply:
    that spot-rate volatility is an extra risk vector.
 3. **Add a row to your reasoning section** noting the conversion: "Per-share
    metrics converted from `<source_currency>` at FX window `<window dates>`
-   [WebSearch: <fx source>]. Multiples comparable to USD peers."
+   [WebSearch: <fx source>, <url>, accessed <YYYY-MM-DD>]. Multiples
+   comparable to USD peers."
 
 If `basis == "usd_native"` or no `currency_conversion` block (legacy
 pre-DL3c artifact): proceed without modification.
@@ -345,7 +346,9 @@ This is NOT a license to justify any price. A premium you cannot tie to
 quantified, current evidence defaults to compression. State explicitly which case
 applies and cite the evidence; the multiple assumption carries a source basis like
 any other number — `[API: peer_multiples]` / `[Calc: ...]` / `[Filing: ...]` /
-`[WebSearch: ...]` — and never invent a "deserved" multiple (anti-hallucination
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` (WebSearch tags must be
+bound; a real search behind every one) — and never invent a "deserved" multiple
+(anti-hallucination
 still binds). When the self-historical lens is unavailable (DL4 fail-close
 cohort), an earned premium must be carried by a peer-median premium with
 *quantified* superiority, not asserted — and only when that peer median passes the

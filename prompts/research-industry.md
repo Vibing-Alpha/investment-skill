@@ -36,6 +36,27 @@ to maximize the encyclopedic accuracy of the industry description. That means:
 
 ---
 
+## WebSearch preflight & source binding (hard gate)
+
+This research REQUIRES current external information (TAM, CAGR, player
+landscape, ticker-status verification).
+
+1. **Preflight — run FIRST.** Before producing any research content,
+   execute ONE real WebSearch tool call (e.g.
+   `"<industry> market size {CURRENT_YEAR}"`). If the WebSearch tool is
+   unavailable on this host or the call errors: STOP and report exactly
+   `cannot complete: host lacks WebSearch`. Never fall back to model
+   memory, and never emit a `[WebSearch: ...]` tag without a real search
+   result behind it.
+2. **Bound tag form.** Every WebSearch-sourced claim must bind
+   outlet + url + access-date:
+   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — the url is the
+   actual page consulted (http/https, no whitespace; percent-encode any
+   comma in it), the access date is today's run date. Multiple sources →
+   multiple tags. Bare `[WebSearch: outlet]` tags fail the runtime
+   validator and abort the run. Descriptor content (vendor, report name,
+   publication vintage) goes in the `<outlet>` slot.
+
 ## Phases
 
 You execute phases in order. Phases 1-2 require WebSearch; Phase 3 reads scripted
@@ -61,7 +82,8 @@ When you find multiple TAM or CAGR estimates and they disagree:
 - **TAM**: if highest/lowest span is **>2×** across Tier-1/Tier-2 sources →
   pick the median as `tam_usd_b`, and add a risk entry explicitly naming the
   dispersion range (e.g., "TAM estimates span $13B-$32B across primary
-  research vendors [WebSearch: <vendor A {YYYY}> vs <vendor B {YYYY}>],
+  research vendors [WebSearch: <vendor A {YYYY}>, <url>, accessed <YYYY-MM-DD>]
+  [WebSearch: <vendor B {YYYY}>, <url>, accessed <YYYY-MM-DD>],
   indicating scope-definition uncertainty"). Do NOT silently pick the highest
   number — that's the mistake the MLCC first-run made when one vendor's high
   number was reported without flagging another vendor's much lower estimate.
@@ -82,7 +104,7 @@ Japanese vendors like Yano Keizai in JPY; etc.), you MUST:
 1. Convert at the **annual average** FX rate of the reported year (not
    spot — TAM is a year-aggregate)
 2. Tag the conversion explicitly in `tam_source`:
-   `"[WebSearch: <vendor>] + [Calc: <CCY> <amount> → USD <amount>B @ <rate> annual avg <year>]"`
+   `"[WebSearch: <vendor>, <url>, accessed <YYYY-MM-DD>] + [Calc: <CCY> <amount> → USD <amount>B @ <rate> annual avg <year>]"`
 3. Never pass a non-USD figure through `tam_usd_b` silently.
 
 Same principle applies to any other USD-denominated numeric field — see
@@ -97,7 +119,9 @@ surfaces a forecast published 2-3 years ago. Each framing number carries a
 searched. Treat vintage as a first-class part of the source tag:
 
 - Record the data's as-of period in the tag, e.g.
-  `[WebSearch: IDC AI-Semi TAM, published {YYYY}-Q2]` — the date names the DATA, not the search.
+  `[WebSearch: IDC AI-Semi TAM published {YYYY}-Q2, <url>, accessed <YYYY-MM-DD>]`
+  — the publication date names the DATA (keep it inside the outlet slot, no
+  comma); the access date names the search.
   If the source does not disclose a publication / as-of date, tag it
   `as-of not disclosed` and flag the uncertainty — never infer or invent a date
   (anti-hallucination: an unseen date does not exist).
@@ -116,7 +140,7 @@ through `tam_usd_b` looks authoritative but mis-frames the thesis and the
 downstream CE / sizing that keys off it.
 
 Every numeric field needs a companion `_source` field carrying the canonical
-source tag (e.g., `tam_source = "[WebSearch: IDC AI Semi {CURRENT_YEAR} Q1 Report]"`).
+source tag (e.g., `tam_source = "[WebSearch: IDC AI Semi {CURRENT_YEAR} Q1 Report, <url>, accessed <YYYY-MM-DD>]"`).
 
 WebSearch queries should use the **current year** at invocation time (use
 `{CURRENT_YEAR}` / `{PREV_YEAR}` placeholders, not hardcoded literals). Look
@@ -204,7 +228,7 @@ Assign each candidate a `priority`:
 Each candidate gets a one-line `rationale` (≤200 chars) explaining WHY it's a
 stock-picking candidate, not just describing what the company does. Bad rationale:
 "NVIDIA designs GPUs". Good rationale: "Defacto AI compute monopoly with CUDA
-software moat extending [WebSearch: Q4 {PREV_YEAR} earnings call]".
+software moat extending [WebSearch: Q4 {PREV_YEAR} earnings call, <url>, accessed <YYYY-MM-DD>]".
 
 #### OTC ADR liquidity risk escalation (hard rule)
 
@@ -362,7 +386,8 @@ Run through this checklist mentally before producing output:
    `null` numeric ↔ `null` source. Otherwise the schema validator raises.
 2. **Every claim string contains a source tag** matching `[(API|WebSearch|Filing|Calc):\s*<descriptor>]`.
    This applies to `one_line_thesis`, every `key_drivers` entry, every `rationale`,
-   every `risks` and `catalysts` entry.
+   every `risks` and `catalysts` entry. Every WebSearch tag must additionally be
+   bound: `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`.
 3. **Candidate tickers are US-listed and currently trading**. If you are uncertain,
    omit the candidate rather than guess.
 4. **No duplicate tickers** in `candidate_tickers`.
@@ -394,8 +419,11 @@ Run through this checklist mentally before producing output:
   flag — emerging industries don't have stable leaders yet. If you find yourself
   writing this, re-examine your lifecycle classification.
 - **Source tag laziness**: `[WebSearch: report]` is not a valid descriptor. Be
-  specific: `[WebSearch: IDC AI Semi Forecast Q1 {CURRENT_YEAR}]`. The audit
-  linter rejects placeholder-theater descriptors.
+  specific AND bound:
+  `[WebSearch: IDC AI Semi Forecast Q1 {CURRENT_YEAR}, <url>, accessed <YYYY-MM-DD>]`.
+  The audit linter rejects placeholder-theater descriptors; the runtime
+  validator rejects unbound WebSearch tags.
 - **Forecasting in catalysts**: catalysts are scheduled, knowable events.
   "Maybe NVDA will announce something" is not a catalyst. "NVDA GTC keynote
-  March 18, {CURRENT_YEAR} [WebSearch: NVDA IR calendar]" is a catalyst.
+  March 18, {CURRENT_YEAR} [WebSearch: NVDA IR calendar, <url>, accessed
+  <YYYY-MM-DD>]" is a catalyst.

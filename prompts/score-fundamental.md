@@ -291,17 +291,17 @@ Write a JSON file with this structure:
       "segments": [
         {"name": "iPhone", "pct": 52, "trend": "stable", "source": "[API: income_statements]"}
       ],
-      "end_markets": "Consumer 70%, Enterprise 30% [WebSearch: source]",
+      "end_markets": "Consumer 70%, Enterprise 30% [WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]",
       "geography": "Americas 43%, Europe 25%, China 18%, Rest 14% [API: segmented_revenues]",
       "concentration_risk": "No single customer >10% of revenue"
     },
     "profitability": {
       "data_points": [
         "Gross margin 46.2%, up from 43.3% YoY [API: income_statements]",
-        "Operating margin 31.5% vs industry median 22% [WebSearch: S&P Capital IQ]"
+        "Operating margin 31.5% vs industry median 22% [WebSearch: S&P Capital IQ, https://<url>, accessed <YYYY-MM-DD>]"
       ],
       "interpretation": "Best-in-class margins driven by services mix shift...",
-      "comparison_anchor": "Industry median gross margin 38% [WebSearch: source]"
+      "comparison_anchor": "Industry median gross margin 38% [WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]"
     },
     "growth_quality": { "data_points": [], "interpretation": "", "comparison_anchor": "" },
     "balance_sheet": { "data_points": [], "interpretation": "", "comparison_anchor": "" },
@@ -319,6 +319,11 @@ Source tagging and data handling rules are enforced by `.claude/rules/anti-hallu
 
 - Compute `overall` as weighted average: `sum(score × weight) / 100`
 - Each sub-score must include at least one comparison anchor (historical, peer, or industry)
-- Use API data as primary source; WebSearch only when API is insufficient
+- Use API data as primary source; WebSearch only when API is insufficient. Any
+  WebSearch-sourced claim must use the bound tag form
+  `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` (real search behind it —
+  the runtime validator rejects bare `[WebSearch: outlet]` tags on fresh runs).
+  If the host offers no WebSearch tool, OMIT the claim or use a Filing source —
+  never fabricate a WebSearch citation from memory.
 - Do not reference or depend on the stock's current price for any scoring
 - Revenue Structure has no score — it is context, not a graded dimension

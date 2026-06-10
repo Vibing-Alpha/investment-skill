@@ -23,7 +23,10 @@ from typing import Any, Mapping
 from scripts.schemas.currency_conversion import CurrencyConversion
 from scripts.schemas.dl3c_dispatch import Dl3cMode, dispatch_dl3c_mode
 from scripts.schemas.errors import SchemaError
-from scripts.schemas.source_tag import validate_source_tags
+from scripts.schemas.source_tag import (
+    validate_source_tags,
+    websearch_binding_active,
+)
 
 
 _ARTIFACT = "bq_analysis"
@@ -254,7 +257,15 @@ def validate_bq_analysis(data: Mapping[str, Any]) -> BqAnalysis:
     payload_for_source_tags = {
         k: v for k, v in data.items() if k != "currency_conversion"
     }
-    validate_source_tags(payload_for_source_tags, artifact=_ARTIFACT)
+    # WebSearch binding (Plan B Task 6): artifacts carrying the root
+    # marker `_websearch_binding_version: 1` (stamped by assemble.py on
+    # full-tier runs) require every WebSearch citation to bind
+    # outlet + url + access-date. Legacy artifacts: old rule exactly.
+    strict_ws = websearch_binding_active(data, artifact=_ARTIFACT)
+    validate_source_tags(
+        payload_for_source_tags, artifact=_ARTIFACT,
+        strict_websearch=strict_ws,
+    )
 
     # post-impl loop-1 H5: dispatch DL3c mode + validate cert. Errors from
     # dispatch_dl3c_mode (illegal _dl3c_version, cert without version,

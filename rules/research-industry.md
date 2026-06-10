@@ -31,7 +31,8 @@ A candidate ticker is acceptable iff ONE of:
 Before including any ticker, the agent must satisfy at least ONE source:
 
 - **WebSearch** confirming current-year (≤ today) trade activity, with
-  the source attached as `[WebSearch: <specific descriptor>]` on the
+  the source attached as the bound tag
+  `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` on the
   candidate's `rationale` OR adjacent risk note.
 - **Filing reference** to a recent (≤2 years) SEC filing.
 
@@ -77,14 +78,39 @@ source**. Placeholder descriptors fail the validation linter:
 
 | Form | Verdict | Rationale |
 |---|---|---|
-| `[WebSearch: IDC AI Semi Forecast Q1 {CURRENT_YEAR}]` | ✅ | Vendor + topic + period |
-| `[WebSearch: Bloomberg Q1 capex tracker]` | ✅ | Outlet + topic |
+| `[WebSearch: IDC AI Semi Forecast Q1 {CURRENT_YEAR}, <url>, accessed <YYYY-MM-DD>]` | ✅ | Vendor + topic + period, bound |
+| `[WebSearch: Bloomberg Q1 capex tracker, <url>, accessed <YYYY-MM-DD>]` | ✅ | Outlet + topic, bound |
+| `[WebSearch: Bloomberg Q1 capex tracker]` | ❌ on fresh runs | Unbound — no url / access-date |
 | `[WebSearch: report]` | ❌ | Placeholder theater |
 | `[WebSearch: news]` | ❌ | Placeholder theater |
 | `[WebSearch: source]` | ❌ | Placeholder theater |
 
 The validator at `scripts/schemas/source_tag.py:PLACEHOLDER_DESCRIPTORS`
 maintains the rejection list.
+
+### WebSearch binding + host preflight (hard requirement, fresh runs)
+
+WebSearch tags carry an additional **binding** requirement — the canonical
+bound form (see `.claude/rules/anti-hallucination.md`):
+
+```
+[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]
+```
+
+- `<url>` = the actual page consulted (http/https, no whitespace;
+  percent-encode any comma); access date = the run date. One tag per
+  source; multiple sources → multiple tags. Keep publication vintage
+  inside the `<outlet>` slot (no comma).
+- Enforced deterministically: the research-industry SKILL stamps
+  `_websearch_binding_version: 1` onto freshly authored
+  `industry_analysis.json` and `load_industry_analysis` strict-validates
+  every WebSearch tag (`scripts/schemas/source_tag.py:
+  check_websearch_binding`). Legacy artifacts (no marker) keep the old
+  rule.
+- **Host preflight (prompt §preflight)**: the agent must execute one real
+  WebSearch call before any research content; if the host lacks the tool
+  or the call errors it reports `cannot complete: host lacks WebSearch`
+  and the run STOPS — model memory is never an acceptable fallback.
 
 ### Source quality tiers (informational, not enforced)
 
@@ -152,7 +178,9 @@ carry a **vintage** — the period the underlying research is as-of — distinct
 when the agent searched.
 
 - The source tag MUST name the data's as-of period, not just the search year:
-  `"[WebSearch: IDC AI-Semi TAM, published <YYYY>-Q2]"`. The date names the DATA.
+  `"[WebSearch: IDC AI-Semi TAM published <YYYY>-Q2, <url>, accessed <YYYY-MM-DD>]"`
+  — the publication date names the DATA and lives in the outlet slot (no comma);
+  the access date names the search.
   If the source does not disclose a publication / as-of date, tag it
   `as-of not disclosed` and flag the uncertainty — never infer or invent one
   (anti-hallucination: an unseen date does not exist).
@@ -216,9 +244,9 @@ working artifact that may be cleaned up.
   estimate). Note the conversion in `framing.tam_source` using the
   `[Calc: ...]` tag pattern:
 
-  Good: `"tam_source": "[WebSearch: CCID China Semi 2026 Report] + [Calc: CNY 2.8T → USD 386B @ 7.25 annual avg 2025]"`
+  Good: `"tam_source": "[WebSearch: CCID China Semi 2026 Report, <url>, accessed <YYYY-MM-DD>] + [Calc: CNY 2.8T → USD 386B @ 7.25 annual avg 2025]"`
 
-  Bad: `"tam_source": "[WebSearch: CCID China Semi 2026 Report]"` (silently passes a CNY number as USD billions)
+  Bad: `"tam_source": "[WebSearch: CCID China Semi 2026 Report, <url>, accessed <YYYY-MM-DD>]"` (silently passes a CNY number as USD billions)
 
 - **`framing.cagr_5y_pct`**: dimensionless percent. No conversion needed,
   but if forecasts differ between USD-denominated and local-currency

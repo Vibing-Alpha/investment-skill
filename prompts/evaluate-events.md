@@ -22,6 +22,28 @@ and whether the weight of evidence leans positive or negative.
 - `data/09_macro_rates.json` — interest rate environment
 - WebSearch: 1-2 targeted queries (see Macro Context below)
 
+## WebSearch preflight & source binding (hard gate)
+
+This analysis's methodology REQUIRES current external information
+(catalyst dates, macro backdrop, analyst actions).
+
+1. **Preflight — run FIRST.** Before producing any analysis content,
+   execute ONE real WebSearch tool call (e.g.
+   `"[TICKER] stock news {CURRENT_YEAR}"`). If the WebSearch tool is
+   unavailable on this host or the call errors: STOP and report exactly
+   `cannot complete: host lacks WebSearch`. Never fall back to model
+   memory, and never emit a `[WebSearch: ...]` tag without a real search
+   result behind it.
+2. **Bound tag form.** Every WebSearch-sourced claim must bind
+   outlet + url + access-date:
+   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — the url is the
+   actual page consulted (http/https, no whitespace; percent-encode any
+   comma in it), the access date is today's run date. Multiple sources →
+   multiple tags. Bare `[WebSearch: outlet]` tags fail the runtime
+   validator and abort the run. A `[WebSearch: ...]` tag carried forward
+   from the BQ layer keeps its original binding — never strip the
+   url/access-date when copying.
+
 ## Process
 
 ### 1. Macro Context (thin signal aggregator)
@@ -240,7 +262,7 @@ fresh-generation date across a chain of reuses.
   },
   "macro_context": {
     "headline_factors": [
-      {"factor": "Fed rate cuts", "impact_on_stock": "tailwind", "magnitude": "moderate", "source": "[WebSearch: Fed minutes]"}
+      {"factor": "Fed rate cuts", "impact_on_stock": "tailwind", "magnitude": "moderate", "source": "[WebSearch: Fed minutes, https://www.federalreserve.gov/<page>, accessed <YYYY-MM-DD>]"}
     ],
     "net_macro_bias": "mixed"
   },
@@ -248,7 +270,7 @@ fresh-generation date across a chain of reuses.
     {"event": "Next quarterly earnings", "date": "<YYYY-MM-DD>", "date_precision": "confirmed",
      "impact": "high", "direction": "uncertain",
      "context": "Consensus EPS $X.XX; segment guidance is the key variable",
-     "source": "[WebSearch: earnings-calendar / company IR release date] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
+     "source": "[WebSearch: company IR earnings calendar, https://ir.example.com/events, accessed <YYYY-MM-DD>] [API: 06_analyst_estimates, fiscal_period quarter-end]"},
     {"event": "Contract / partnership / product catalyst", "date": "<YYYY-MM-DD>", "date_precision": "estimated",
      "impact": "medium", "direction": "positive",
      "context": "Backlog / revenue recognition begins; ramp over coming quarters",
@@ -272,7 +294,7 @@ fresh-generation date across a chain of reuses.
         {"firm": "Morgan Stanley", "action": "upgrade", "target": 195, "date": "<YYYY-MM-DD>"}
       ],
       "target_range": {"low": 150, "median": 180, "high": 210},
-      "source": "[WebSearch: analyst_consensus]"
+      "source": "[WebSearch: analyst consensus roundup, https://<url>, accessed <YYYY-MM-DD>]"
     }
   },
   "event_density": {"next_30d": 2, "next_90d": 4, "assessment": "catalyst_rich"},

@@ -91,3 +91,80 @@ under 5 scenarios:
 4. **Extreme-down** — all buys fill + all stops trigger (uses crashed
    account value as denominator for position-% checks)
 5. **Defensive** — all stops trigger, no buys fill
+
+## Single-root guard — dual standard (setup HARD, runtime GRADED)
+
+Failure mode guarded: **a money-path run reading the WRONG clone's portfolio**
+(two clones with divergent `portfolio-state.yaml` — e.g. a CC-CLI clone plus a
+Cowork-default clone, or a copied directory).
+
+Two enforcement points with DIFFERENT strictness — this asymmetry is deliberate:
+
+1. **Setup-time (HARD invariant, unchanged).** `confirm_setup` →
+   `root_resolve.find_conflicts`: if MORE THAN ONE candidate root holds a real
+   fund-state (repo marker + `portfolio-state.yaml`), setup REFUSES to stamp or
+   write `~/.stock-v7-home`. A real-money tool must never *confirm* a world with
+   two divergent portfolio-states.
+
+2. **Runtime (GRADED, Plan B Task 4c).** `config_gate.main`'s pre-check guard
+   (`_single_root_guard`, keyed on `root_resolve.root_source()`) grades by
+   surface instead of always blocking:
+
+   | Condition (no `--root` override) | base check (single-ticker / discovery) | `check --portfolio` |
+   |---|---|---|
+   | marker absent, running root is a Cowork mount (`/sessions/*/mnt/*`) | proceed (prelude's single-mount fail-closed established the root; Cowork has no persistent `$HOME` marker) | proceed |
+   | marker absent, non-Cowork (CC-CLI / persistent) | WARN + proceed | **BLOCK** — "no confirmed single-root — run /stock-v7-setup" |
+   | marker == running root | proceed | proceed |
+   | marker is a DIFFERENT fund-state | WARN (both absolute paths + "portfolio-level skills still block") + proceed | **BLOCK** |
+   | marker elsewhere but NOT a fund-state | proceed (nothing to protect) | proceed |
+   | corrupt/relative marker or env (`resolve_root` raises) | WARN + proceed | **BLOCK** |
+
+   Rationale for the downgrade (risk-tier policy): the wrong-clone blast radius
+   differs by surface. A portfolio-level read from the wrong clone feeds a real
+   trade → fail-closed. A single-ticker analysis/discovery run from the wrong
+   clone produces at worst a misplaced per-ticker report → warn loudly, don't
+   strand the user. An EMPTY marker behaves as absent (not a phantom block).
+   Comparison hardening: `os.path.samefile` when both roots exist, else a
+   `os.path.normcase`-folded `resolve()` compare (Windows case-insensitivity /
+   git-bash path forms). Cowork detection is a path-shape heuristic by design —
+   do NOT add a sentinel-file alternative (anti-ratchet).
+
+   The BASE gate (`assert_money_path_ready` — personalization + keys +
+   portfolio-state floor) stays fail-closed on EVERY surface; only the
+   cross-clone guard is graded, and a warn never bypasses the base gate.
+
+## Advisory-only execution boundary
+
+This system is **advisory-only**. `/portfolio` produces order *recommendations*; a
+human executes them at their broker; the human (with the agent's help) updates
+`portfolio-state.yaml`. There is **no code path that submits orders**, and the bundled
+IBKR MCP exposes only authentication — no order tool. Two invariants follow:
+
+**1. No false execution attestation.** Orders are RECOMMENDATIONS / proposed orders.
+The agent MUST NOT describe a proposed order as submitted, placed, filled, or executed,
+and MUST NOT fill `execution_outcomes` / `user_confirmation.status` — those are written
+by the user AFTER they act. (Guarded by `prompts/portfolio-decide.md`'s "Advisory-only"
+statement + `tests/test_prompt_lint.py::test_portfolio_orders_are_advisory_only`.) Why:
+a recommendation mis-reported as "done" makes the user think they hold a position they
+don't (or vice-versa) — corrupting cash, weights, and every later decision.
+
+**2. Manual holdings-update protocol.** Editing `portfolio-state.yaml` is the only
+holdings mutation, and it is user-confirmed. Before writing it the agent MUST: (a) show
+a before/after **diff** of the specific fields changing; (b) get the user to confirm
+**that diff** (not a vague "looks good"); (c) keep the prior version (so a wrong edit is
+reversible); (d) re-run `python3 -m scripts.config_gate check --portfolio` after writing.
+Why: `config_gate` validates portfolio-state *structure* (shares > 0, cash ≥ 0, shapes)
+but NOT *correctness* — `100` mistyped as `1000` is structurally valid and would silently
+feed every future decision; the diff-confirm + reversibility is the control that fits.
+
+**Future-execution gateway contract (NOT built — spec only, YAGNI).** IF automated broker
+execution is ever wired, it MUST NOT be prose in a SKILL — it must be a deterministic
+gateway that: reads the broker MCP's **machine-verifiable** `account_type` (paper|live) +
+account id + authenticated principal + trading permission; requires the user's LATEST
+message to carry an explicit `CONFIRM LIVE <account-id> <draft-hash>` token (not a free-text
+"yes" the agent can satisfy on its own); any field missing/unverifiable → **draft only**;
+emits `execution_result.json`; the draft is always named `order_draft` and can NEVER be
+reported as submitted. At that point — and only then — add a static audit that no order
+reaches the broker except through the gateway. Until execution is actually wanted, do NOT
+build the gateway, a single-writer module, a holdings-path classifier, or that audit
+(anti-ratchet — they would guard failure modes that cannot occur in the advisory system).
