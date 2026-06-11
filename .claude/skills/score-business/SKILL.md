@@ -572,7 +572,7 @@ fi
 Write the delta section to a file, then append. The header line is built
 via `printf` (so `$TIER` and today's date interpolate); the free-prose
 body uses a QUOTED heredoc — the delta note is agent-substituted prose
-that may contain `$` («$4.2B», «$NVDA») or backticks, which an unquoted
+that may contain `$` («$NVDA», «$X.XB» — any digit after $ would be arg-substituted, so even this example avoids it) or backticks, which an unquoted
 heredoc would silently expand / command-substitute:
 
 ```bash

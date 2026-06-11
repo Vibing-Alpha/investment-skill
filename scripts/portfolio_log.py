@@ -6,9 +6,10 @@ Two subcommands:
            (portfolio, macro, thesis metadata, stress test) and write
            decisions.json + decisions.md to the output directory.
 
-  review   Scan the most recent prior run's decisions.json and print
-           follow-up items whose date has arrived. Used by the portfolio
-           skill at Step 0 to cross-check prior flagged catalysts.
+  review   Scan the most recent prior run's decisions.json (including a
+           same-day earlier run) and print follow-up items whose date has
+           arrived. Used by the portfolio skill at Step 0 to cross-check
+           prior flagged catalysts.
 
 The decision log is the durable artifact behind /portfolio — it is the
 only file that survives between runs and supports audit/reflection.
@@ -45,6 +46,9 @@ ORDER_ACTIONS = frozenset({"sell", "buy"})
 # a "has a technical term → suppress" discriminator would silently miss the
 # exact case this guards (post-impl review). A regex can't tell gate from
 # context; the real prevention is the prompt rule, this is the visible tripwire.
+# Feedback 2026-06-11 #7: an AUTHOR-DECLARED `[context-only]` marker in the
+# rationale downgrades the WARN to INFO — suppression stays auditable (the
+# marker is in the logged rationale) without re-attempting clause parsing.
 _VALUATION_GATE_RE = re.compile(
     r"(overvalued|valuation|expected\s+return|\bER\b|\bCE\b)", re.IGNORECASE
 )
@@ -326,22 +330,47 @@ def _classify_regime(macro: Dict[str, Any]) -> tuple[str, str]:
     `vix and vix_ma20 and ...` treated None as subdued, which let a
     macro.json with empty `volatility` classify as risk_on (ignoring
     the raise-cash-on-deterioration signal entirely).
+
+    Clock-anchored inputs (feedback 2026-06-11 #2): when macro.json
+    carries `regime_inputs` (post-fix macro.py), classification uses
+    ONLY that block — every value anchored to the last completed ET
+    session, so a live pre-market VIX can never be compared against
+    prior-close indices (the mix that flipped risk_off to risk_on on
+    2026-06-11). Legacy macro.json (no block) keeps the old path
+    byte-identical for historical artifacts and replay.
     """
-    market = macro.get("market", {})
-    vol = macro.get("volatility", {})
     indices = ("SPY", "QQQ", "^DJI")
     above_ma50 = 0
     missing_indices: List[str] = []
-    for idx in indices:
-        m = market.get(idx, {})
-        p, ma50 = m.get("price"), m.get("ma50")
-        if p is None or ma50 is None:
-            missing_indices.append(idx)
-            continue
-        if p > ma50:
-            above_ma50 += 1
-    vix = vol.get("vix")
-    vix_ma20 = vol.get("vix_ma20")
+    anchor_note = ""
+    ri = macro.get("regime_inputs")
+    if isinstance(ri, dict):
+        ri_indices = ri.get("indices") or {}
+        for idx in indices:
+            m = ri_indices.get(idx) or {}
+            p, ma50 = m.get("close"), m.get("ma50")
+            if p is None or ma50 is None:
+                missing_indices.append(idx)
+                continue
+            if p > ma50:
+                above_ma50 += 1
+        ri_vix = ri.get("vix") or {}
+        vix, vix_ma20 = ri_vix.get("close"), ri_vix.get("ma20")
+        if ri.get("anchor_session"):
+            anchor_note = f" (inputs anchored to {ri['anchor_session']} close)"
+    else:
+        market = macro.get("market", {})
+        vol = macro.get("volatility", {})
+        for idx in indices:
+            m = market.get(idx, {})
+            p, ma50 = m.get("price"), m.get("ma50")
+            if p is None or ma50 is None:
+                missing_indices.append(idx)
+                continue
+            if p > ma50:
+                above_ma50 += 1
+        vix = vol.get("vix")
+        vix_ma20 = vol.get("vix_ma20")
     vix_unknown = vix is None or vix_ma20 is None
     vix_elevated = (not vix_unknown) and vix > vix_ma20 * 1.2
 
@@ -361,7 +390,7 @@ def _classify_regime(macro: Dict[str, Any]) -> tuple[str, str]:
     else:
         regime = "mixed"
         note = "Market signals are mixed — heightened attention to individual invalidation triggers warranted."
-    return regime, note
+    return regime, note + anchor_note
 
 
 def _compute_portfolio_before(
@@ -465,7 +494,7 @@ def _compact_macro(macro: Dict[str, Any]) -> Dict[str, Any]:
             (vix_obj["vix"] - vix_obj["vix_ma20"]) / vix_obj["vix_ma20"] * 100, 2
         )
 
-    return {
+    out = {
         "spy": _mk("SPY"),
         "qqq": _mk("QQQ"),
         "dji": _mk("^DJI"),
@@ -474,6 +503,11 @@ def _compact_macro(macro: Dict[str, Any]) -> Dict[str, Any]:
         "regime": regime,
         "regime_interpretation": note,
     }
+    # Pass the anchored regime inputs through so decisions.json explains
+    # its own regime classification (feedback 2026-06-11 #2).
+    if isinstance(macro.get("regime_inputs"), dict):
+        out["regime_inputs"] = macro["regime_inputs"]
+    return out
 
 
 def _principle_tags(cited_strings: List[str]) -> List[str]:
@@ -637,14 +671,29 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
                     f"decisions[{i}] ({d.get('ticker', '?')}): {key!r} must be a "
                     f"string, got {type(v).__name__}"
                 )
-        if d.get("action") in ("skip", "buy") and _VALUATION_GATE_RE.search(d.get("rationale") or ""):
-            print(
-                f"[WARN] portfolio_log: {d.get('ticker', '?')} {d['action']} rationale "
-                f"carries a valuation/ER term — per portfolio-decide.md the entry gate is "
-                f"technical/principle, not valuation. Confirm the disqualifier is a run-day "
-                f"technical condition (RSI/pct_b/volume), not richness.",
-                file=sys.stderr,
-            )
+        rationale_text = d.get("rationale") if isinstance(d.get("rationale"), str) else ""
+        if d.get("action") in ("skip", "buy") and _VALUATION_GATE_RE.search(rationale_text):
+            if "[context-only]" in rationale_text.lower():
+                # Feedback 2026-06-11 #7: author-declared context citation
+                # (decide.md documents the marker). Keep it VISIBLE but stop
+                # crying wolf — the marker sits in the logged rationale, so
+                # every suppression is auditable. NOT a regex clause-
+                # discriminator (tried and removed as unsound — see above).
+                print(
+                    f"[INFO] portfolio_log: {d.get('ticker', '?')} {d['action']} "
+                    f"rationale carries a valuation/ER term marked [context-only] — "
+                    f"lint suppressed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[WARN] portfolio_log: {d.get('ticker', '?')} {d['action']} rationale "
+                    f"carries a valuation/ER term — per portfolio-decide.md the entry gate is "
+                    f"technical/principle, not valuation. Confirm the disqualifier is a run-day "
+                    f"technical condition (RSI/pct_b/volume), not richness; if the ER mention "
+                    f"is background context only, append [context-only] to that clause.",
+                    file=sys.stderr,
+                )
     for i, o in enumerate(_as_list("orders_proposed")):
         if not isinstance(o, dict):
             errors.append(f"orders_proposed[{i}]: not a dict ({type(o).__name__})")
@@ -891,7 +940,15 @@ def _render_md(log: Dict[str, Any]) -> str:
         if d:
             lines.append(f"| {name} | {d.get('price')} | {d.get('ma50')} | {d.get('vs_ma50_pct')}% |")
     if m.get("vix"):
-        lines.append(f"| VIX | {m['vix']} | MA20 {m.get('vix_ma20')} | {m.get('vix_vs_ma20_pct')}% |")
+        ri_vix = (m.get("regime_inputs") or {}).get("vix") or {}
+        anchor = (m.get("regime_inputs") or {}).get("anchor_session")
+        if ri_vix.get("close") is not None and anchor:
+            vix_cell = f"{m['vix']} (anchored {ri_vix['close']} @ {anchor})"
+            ma20_cell = f"MA20 {ri_vix.get('ma20', m.get('vix_ma20'))}"
+        else:
+            vix_cell = f"{m['vix']}"
+            ma20_cell = f"MA20 {m.get('vix_ma20')}"
+        lines.append(f"| VIX | {vix_cell} | {ma20_cell} | {m.get('vix_vs_ma20_pct')}% |")
     lines.append("")
     # Constraints
     c = log.get("constraints_active") or {}
@@ -935,6 +992,14 @@ def _render_md(log: Dict[str, Any]) -> str:
             lines.append(f"- 关注优先级: {d['watch_priority']}")
         if d.get("data_freshness_warning"):
             lines.append(f"- ⚠ {d['data_freshness_warning']}")
+        # Feedback 2026-06-11 #3b: a human reviewing the MD must see the
+        # broker-side in-flight orders next to the decision they may
+        # contradict (the JSON snapshot alone was reviewer-invisible).
+        for oo in d.get("open_orders_snapshot") or []:
+            lines.append(
+                f"- ⚠ 在途单: {oo.get('type', '?')} {oo.get('shares', '?')}股 "
+                f"@ {oo.get('price', '?')} ({oo.get('duration', 'GTC')})"
+            )
         if d.get("report_refs"):
             refs = ", ".join(f"`{r}`" for r in d["report_refs"])
             lines.append(f"- 报告: {refs}")
@@ -1025,6 +1090,12 @@ def _render_md(log: Dict[str, Any]) -> str:
         if st.get("hard_constraint_violations") is not None:
             lines.append("")
             lines.append(f"硬约束违规: **{st['hard_constraint_violations']}**")
+        # Cold review 2026-06-11 R2 MED-7: the coverage caveat (e.g.
+        # degenerate scenarios on empty open_orders) must be visible to a
+        # human reading PASS rows, not only in the JSON.
+        for w in st.get("validator_warnings") or []:
+            lines.append("")
+            lines.append(f"- ⚠ {w}")
         lines.append("")
     # Follow-ups
     fus = log.get("follow_ups") or []
@@ -1253,10 +1324,46 @@ def cmd_write(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
 
-    blob = _read_json(pathlib.Path(args.decisions_blob))
-    state = _read_yaml(pathlib.Path(args.state))
-    macro = _read_json(pathlib.Path(args.macro))
+    # Clean diagnostics on malformed/missing inputs (cold review 2026-06-11
+    # R2 HIGH-6): a raw traceback mid-persistence invites improvised
+    # workarounds; the cmd_* contract is a non-zero RETURN with a named file.
+    try:
+        blob = _read_json(pathlib.Path(args.decisions_blob))
+    except (OSError, ValueError) as exc:
+        print(f"portfolio_log: cannot read decisions_blob "
+              f"{args.decisions_blob}: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 2
+    try:
+        state = _read_yaml(pathlib.Path(args.state))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"portfolio_log: cannot read state {args.state}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        macro = _read_json(pathlib.Path(args.macro))
+    except (OSError, ValueError) as exc:
+        print(f"portfolio_log: cannot read macro {args.macro}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     prices = macro.get("ticker_prices") or {}
+
+    # Cold review 2026-06-11 R6 HIGH-1: an ABSENT open_orders key is
+    # indistinguishable from "no working orders" — which is exactly how the
+    # field failure happened (broker held a full-clear GTC sell; the state
+    # sync updated holdings/cash and never thought about orders; the engine
+    # proposed `hold` against an unseen liquidation). Key present (even as
+    # an empty list) = the user explicitly attested; key absent = never
+    # considered → refuse.
+    if "open_orders" not in (state or {}):
+        print(
+            "portfolio_log: REFUSED — portfolio-state.yaml has no "
+            "`open_orders` key. Sync the broker's working orders into it, "
+            "or write `open_orders: []` to explicitly attest there are none "
+            "(an absent key is how a working GTC order goes unseen).",
+            file=sys.stderr,
+        )
+        return 2
 
     # Shape-validate the blob before any enrichment — replaces the old
     # `d["ticker"]` KeyError path with a structured diagnostic + exit 2.
@@ -1343,12 +1450,96 @@ def cmd_write(args: argparse.Namespace) -> int:
     decisions = _enrich_decisions(blob.get("decisions", []), portfolio_before)
     orders = _enrich_orders(blob.get("orders_proposed", []) or [], prices)
 
+    # Feedback 2026-06-11 #3b: decisions were blind to in-flight broker
+    # orders (field run: MRAAY `hold` beside a full-size open GTC sell).
+    # Attach the state's open orders per ticker (evidence, not verdict —
+    # the decide prompt owns the reconciliation reasoning) + WARN on
+    # direction conflict.
+    open_orders_state = state.get("open_orders") or []
+    open_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+    for o in open_orders_state:
+        if isinstance(o, dict) and o.get("ticker"):
+            open_by_ticker.setdefault(str(o["ticker"]), []).append(o)
+    for d in decisions:
+        oo = open_by_ticker.get(d.get("ticker"))
+        if not oo:
+            continue
+        d["open_orders_snapshot"] = oo
+        action = d.get("action")
+        # Both open-order shapes (mirrors validate._is_buy/_is_sell):
+        # {"type": "limit_sell"} AND {"action": "sell", "type": "limit"}.
+        def _order_is(o, side):
+            return (side in str(o.get("type", "")).lower()
+                    or str(o.get("action", "")).lower() == side)
+        has_sell = any(_order_is(o, "sell") for o in oo)
+        has_buy = any(_order_is(o, "buy") for o in oo)
+        if (action in ("hold", "add", "buy") and has_sell) or \
+           (action in ("exit", "reduce") and has_buy):
+            print(
+                f"[WARN] portfolio_log: {d['ticker']} decision '{action}' may "
+                f"contradict an in-flight open order "
+                f"({[o.get('type') for o in oo]}) — reconcile explicitly "
+                f"(keep/cancel/supersede) in the rationale.",
+                file=sys.stderr,
+            )
+
     stress = None
-    if args.stress_test and pathlib.Path(args.stress_test).exists():
-        v = _read_json(pathlib.Path(args.stress_test))
-        stress = v.get("stress_test")
+    if args.stress_test:
+        stress_path = pathlib.Path(args.stress_test)
+        if not stress_path.exists():
+            # Cold review 2026-06-11 R3 HIGH-2: a supplied-but-missing path
+            # is an orchestration bug (lost step-boundary variable, wrong
+            # run dir) — silently skipping it dropped the stress section
+            # from the log with no error.
+            print(f"portfolio_log: --stress-test path does not exist: "
+                  f"{stress_path} — run scripts.validate with --output to "
+                  f"that path first (or omit the flag for a no-orders run).",
+                  file=sys.stderr)
+            return 2
+        try:
+            v = _read_json(stress_path)
+        except (OSError, ValueError) as exc:
+            print(f"portfolio_log: cannot read stress-test "
+                  f"{args.stress_test}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 2
+        # Cold review 2026-06-11 R4 HIGH-2: a validator artifact that says
+        # passed:false must not be persisted as the durable "proposed"
+        # record — Step 6's adjust-and-revalidate loop exists to resolve it
+        # BEFORE the log write. Recording failing orders would let the user
+        # execute from the log without ever seeing the (ephemeral) stderr.
+        if isinstance(v, dict) and v.get("passed") is not True:
+            print(
+                f"portfolio_log: REFUSED — stress-test artifact "
+                f"{args.stress_test} records a FAILED validation "
+                f"({len(v.get('violations') or [])} violation(s)). Adjust "
+                f"the orders and re-run scripts.validate; do not log a "
+                f"proposed set that failed its own safety check.",
+                file=sys.stderr,
+            )
+            return 2
+        stress = v.get("stress_test") if isinstance(v, dict) else None
         if stress:
+            # Canonical scenario completeness (cold review 2026-06-11 R2
+            # HIGH-4): a partial artifact would read as "fully
+            # stress-checked" in the log. WARN-only — the validator in this
+            # repo always emits all five; absence means producer drift.
+            _CANON_SCENARIOS = ("base", "all_buy", "all_sell",
+                                "extreme_down", "defensive")
+            missing_scen = [s for s in _CANON_SCENARIOS if s not in stress]
+            if missing_scen:
+                print(
+                    f"portfolio_log: WARNING — stress_test artifact is "
+                    f"missing canonical scenario(s): {missing_scen}; the "
+                    f"log's stress section is PARTIAL.",
+                    file=sys.stderr,
+                )
             stress["hard_constraint_violations"] = len(v.get("violations", []))
+            # Carry validator warnings (e.g. degenerate stress scenarios on
+            # empty open_orders — feedback 2026-06-11 #3c) into the log so
+            # the audit record shows the stress coverage caveat.
+            if v.get("warnings"):
+                stress["validator_warnings"] = v["warnings"]
 
     # Normalize empty/invalid stress ({}, [], "") to None so it is treated
     # uniformly as "absent" by both the warning below and the MD renderer
@@ -1361,14 +1552,21 @@ def cmd_write(args: argparse.Namespace) -> int:
     # This fires when --stress-test was omitted (e.g. a Step-7 re-run forgot
     # the flag) or the validator output was missing/empty/invalid. Producer-
     # consumer rule #4 — missing safety data is a warning, never a silent skip.
-    if orders and stress is None:
+    if (orders or open_orders_state) and stress is None:
+        # Cold review 2026-06-11 R3 HIGH-2, escalated by R4 HIGH-3: proposed
+        # orders AND working broker orders are both stress inputs; a log
+        # without cash-survivability coverage for either is not an audit
+        # record, it is a liability — and stderr does not survive the
+        # session, the log does. /portfolio Step 6 always produces the
+        # artifact, so reaching here means the orchestration skipped it.
         print(
-            f"portfolio_log: WARNING — wrote decision log with {len(orders)} "
-            "proposed order(s) but NO stress_test. Orders were NOT "
-            "stress-checked in this record; re-run with "
-            "--stress-test <validate.py --output>.",
+            f"portfolio_log: REFUSED — {len(orders)} proposed order(s) and "
+            f"{len(open_orders_state)} open order(s) but NO stress_test. "
+            "Run scripts.validate --output <path> and pass --stress-test "
+            "<path> (an all-hold run with no open orders may omit it).",
             file=sys.stderr,
         )
+        return 2
 
     # principle audit
     cited_strings = [d.get("principle_cited") for d in decisions if d.get("principle_cited")]
@@ -1387,9 +1585,24 @@ def cmd_write(args: argparse.Namespace) -> int:
     # Date: ET-day to match reports/portfolio/{YYYYMMDD}/ dir naming
     # (spec §11). UTC date can drift by one calendar day.
     today = today_et()
+    # Cold review 2026-06-11 R5 MED-1: the dir name and the log's `date`
+    # must agree on the SAME (ET) calendar — an Asia-local "today" lands the
+    # run under tomorrow's dir while date says the ET day, misfiling
+    # review/archive chronology (both order by directory glob).
+    if out_dir.name != today.strftime("%Y%m%d"):
+        print(
+            f"portfolio_log: --output-dir day {out_dir.name!r} != ET day "
+            f"{today.strftime('%Y%m%d')} — the reports/portfolio/{{YYYYMMDD}} "
+            f"convention is the ET calendar day (spec §11); use the ET date.",
+            file=sys.stderr,
+        )
+        return 2
     now_utc = dt.datetime.now(dt.timezone.utc)
     date = today.isoformat()
-    run_id = now_utc.strftime("%Y%m%dT%H%M%SZ")
+    # Microsecond precision: same-day reruns archive the prior pair under
+    # its run_id (feedback 2026-06-11 #4) — second-precision ids could
+    # collide on a fast rerun and corrupt the archive naming.
+    run_id = now_utc.strftime("%Y%m%dT%H%M%S%fZ")
 
     follow_ups_in = blob.get("follow_ups", []) or []
     kept_fus, dropped_fus = _sanitize_follow_ups(follow_ups_in, date)
@@ -1438,9 +1651,46 @@ def cmd_write(args: argparse.Namespace) -> int:
     # through cli_utils helpers (matches run_meta.save convention).
     md_text = _render_md(log)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Feedback 2026-06-11 #6: fail visible with remediation — never let
+        # a caller improvise an out-of-root location (/tmp is ephemeral in
+        # Cowork; a silently relocated decision log is worse than no log).
+        print(
+            f"portfolio_log: FATAL — cannot create {out_dir}: "
+            f"{type(exc).__name__}: {exc}. Fix the directory/mount and "
+            f"re-run; do NOT write the log anywhere else.",
+            file=sys.stderr,
+        )
+        return 2
     json_path = out_dir / "decisions.json"
     md_path = out_dir / "decisions.md"
+
+    # Feedback 2026-06-11 #4: a same-day rerun used to clobber the earlier
+    # run's decisions.json/md (losing its user_confirmation audit). Archive
+    # the existing pair under its run_id before writing the new canonical.
+    if json_path.exists():
+        try:
+            prior_run_id = (_read_json(json_path) or {}).get("run_id")
+        except (OSError, ValueError):
+            prior_run_id = None
+        # Sanitize: the id becomes a FILENAME — a corrupt artifact must not
+        # path-traverse; ':' (legal in the loader's run_id charset) is
+        # invalid on Windows.
+        if not (isinstance(prior_run_id, str)
+                and re.fullmatch(r"[A-Za-z0-9TZ._\-]{4,64}", prior_run_id)):
+            prior_run_id = f"unknown-{int(json_path.stat().st_mtime)}"
+        archive_json = out_dir / f"decisions.{prior_run_id}.json"
+        n = 2
+        while archive_json.exists():   # duplicate id → never overwrite an archive
+            archive_json = out_dir / f"decisions.{prior_run_id}-{n}.json"
+            n += 1
+        json_path.replace(archive_json)
+        if md_path.exists():
+            md_path.replace(archive_json.with_suffix(".md"))
+        print(f"portfolio_log: archived prior same-day run -> {archive_json.name}")
+
     # Pair write: stages both tmps first, replaces JSON (canonical) then
     # MD. Per-file atomic; pair is not strictly atomic across an external
     # observer between the two replaces — see write_pair_atomic docstring.
@@ -1462,12 +1712,13 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(f"portfolio_log: no reports dir {reports_dir}", file=sys.stderr)
         return 0
 
-    # find most recent prior-day decisions.json (exclude today)
-    today_flat = today.replace("-", "")
-    candidates = sorted(
-        [p for p in reports_dir.glob("*/decisions.json") if p.parent.name != today_flat],
-        reverse=True,
-    )
+    # Most recent decisions.json INCLUDING today (feedback 2026-06-11 #4):
+    # Step 0 runs before today's write, so whatever exists IS the prior run
+    # — excluding today made a same-day earlier run invisible exactly when
+    # a re-evaluation needed it. Archived pairs (decisions.<run_id>.json)
+    # don't match this glob, so only canonical latest-per-day candidates
+    # appear. `today` remains in use for follow-up due-date comparison.
+    candidates = sorted(reports_dir.glob("*/decisions.json"), reverse=True)
     if not candidates:
         print("portfolio_log: no prior decisions.json found — first run.")
         return 0
@@ -1536,7 +1787,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     outcomes = log.get("execution_outcomes") or {}
     if outcomes.get("reflection") is None and confirm in ("accepted", "modified"):
         print(f"\n  ⚠ Prior run has no reflection recorded. Consider filling")
-        print(f"    {prior}:execution_outcomes.reflection before overwriting today.")
+        print(f"    {prior}:execution_outcomes.reflection before today's rerun archives it.")
     return 0
 
 

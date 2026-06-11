@@ -78,7 +78,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.1.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.2.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -207,7 +207,7 @@ analyzing, not penny-stock pumps that sneak through FMP's /gainers.
 For `watchlist:X` scope, go the OTHER way: **relax** the floors (usually
 `--min-price 0 --min-volume 0 --min-mcap-usd 0`). The watchlist is the
 user's explicit, curated input, but `_filter` is scope-blind — it applies
-the same market-tuned defaults (price ≥ $5, volume ≥ 500k, mcap ≥ $300M)
+the same market-tuned defaults (price ≥ USD 5, volume ≥ 500k, mcap ≥ USD 300M)
 and silently drops anything below them, with NO record of the drop (only
 fetch failures land in `warnings.ohlcv_missing`). Left at defaults, a
 watchlist screen will quietly delete hand-picked thin tickers — most often

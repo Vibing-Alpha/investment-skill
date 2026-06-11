@@ -15,9 +15,24 @@ watchlist:
   # - MRVL
   # - LITE
 
-# Optional: existing open GTC orders (for stress test completeness)
-# open_orders:
+# REQUIRED key (the decision log refuses to write without it): your broker's
+# working orders. An EMPTY list explicitly attests "no working orders" — an
+# absent key is how a working GTC order goes unseen by the decision engine.
+# Whenever you sync holdings/cash from the broker, sync the broker's open
+# GTC orders here in the same edit; /portfolio reads them into the decision
+# context and the validator's stress scenarios depend on them.
+open_orders: []
 #   - ticker: MU
-#     type: limit_buy
+#     type: limit_buy        # limit_buy / limit_sell / stop_sell / stop_buy
 #     shares: 50
 #     price: 82.00
+#     duration: GTC
+
+# Optional: map your canonical ticker key to differing vendor/broker symbols
+# (e.g. an ADR depositary-bank change renamed the broker symbol while
+# Yahoo/FMP still quote the old one). Price feeds fetch `vendor`; `broker`
+# documents the broker-side symbol for sync. Malformed entries fail loudly.
+# symbol_aliases:
+#   KYOAY:
+#     vendor: KYOCY
+#     broker: KYOAY

@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.1.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.2.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -100,8 +100,10 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.portfolio_log review
 ```
 
-The script prints the most recent prior `decisions.json` (excluding
-today), along with:
+The script prints the most recent prior `decisions.json` (**including an
+earlier run today** — a same-day rerun archives the prior pair as
+`decisions.{run_id}.json/.md` in the same dir, so nothing is clobbered),
+along with:
 - Prior run's confirmation status (pending/accepted/modified/declined)
 - Follow-up events whose date has arrived (`date <= today`)
 - A warning if prior run has no reflection recorded yet
@@ -118,6 +120,12 @@ Read those due follow-ups into your reasoning. For each one:
 If no prior run exists (first time), the script says so and you proceed
 normally.
 
+If the command exits non-zero (typically: the prior `decisions.json` fails
+schema validation after a schema change), **STOP**, show its stderr to the
+user, and follow the remediation it prints (hand-fix the prior log, or
+move/rename it so an older compatible run resolves) — do not proceed with
+an unresolved prior log; it is the audit chain today's run builds on.
+
 ## Step 1: Read Portfolio State
 
 Read `<captured-abs-ROOT>/portfolio-state.yaml` (the project root).
@@ -129,7 +137,16 @@ Extract:
 - `holdings`: dict of ticker → {shares, cost_basis}
 - `cash`: number
 - `watchlist`: list of tickers
-- `open_orders`: list of existing GTC orders (optional)
+- `open_orders`: the broker's working GTC orders. **The key itself is
+  REQUIRED** — if it is ABSENT, stop at this step and ask the user to sync
+  their broker's working orders (or confirm there are none, then write
+  `open_orders: []`). An absent key is exactly how a working full-clear GTC
+  sell goes unseen by the decision engine; Step 8 hard-refuses to write the
+  log without the key. Whenever holdings/cash are synced from the broker,
+  the broker's working orders are part of the SAME sync.
+- `symbol_aliases`: optional `{KEY: {vendor: SYM, broker: SYM}}` map when
+  the broker and the data vendor disagree on a symbol (ADR depositary
+  changes); Step 4 feeds the vendor side to the price fetch
 
 ## Step 2: Compile Principles
 
@@ -318,14 +335,32 @@ For tickers with `investment_thesis.json`, read the **full file** (~10KB).
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+# Vendor aliases (symbol_aliases in portfolio-state.yaml): built by the SAME
+# tested helper /monitor uses — no hand-assembled JSON. "{}" is a valid
+# no-op, so the flag is passed unconditionally. A malformed symbol_aliases
+# raises -> STOP (fetching the wrong symbol is the failure this closes).
+VENDOR_ALIASES=$("$PYBIN" -c "
+import json, pathlib
+from scripts.monitor import load_vendor_aliases
+print(json.dumps(load_vendor_aliases(pathlib.Path('portfolio-state.yaml'))))
+") || { echo "FATAL: symbol_aliases in portfolio-state.yaml is malformed — fix it before fetching prices" >&2; exit 1; }
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 "$PYBIN" -m scripts.macro \
   --tickers {ALL_TICKERS_SPACE_SEPARATED} \
-  --output reports/portfolio/{YYYYMMDD}/macro.json
+  --vendor-aliases "$VENDOR_ALIASES" \
+  --output "reports/portfolio/$ETDAY/macro.json"
 ```
 
-Where `{ALL_TICKERS}` = all tickers from holdings + watchlist,
-and `{YYYYMMDD}` = today's date — both substituted by you per block
-(never carried as shell variables across blocks; a fresh shell loses them).
+Where `{ALL_TICKERS}` = all tickers from holdings + watchlist, substituted
+by you per block. The run-day directory is the **ET calendar day**, derived
+in-shell as `$ETDAY` inside EVERY block that touches `reports/portfolio/`
+(never substituted by you, never carried across blocks — a local-timezone
+"today" lands the run in the wrong dir and Step 8 hard-rejects a non-ET
+dir; this derives it correctly everywhere).
+
+If the block exits non-zero (malformed `symbol_aliases` FATAL, or the macro
+fetch itself fails), **STOP** and show the stderr to the user — do not
+proceed to decisions on a partial/unaliased price set.
 
 Read the output JSON. This provides:
 - Broad market trend data (SPY, QQQ, ^DJI with MAs)
@@ -337,6 +372,14 @@ Read the output JSON. This provides:
   run. Authoritative for #2 entry timing and #3/#4 momentum reads (the thesis
   `entry_favorability` is a possibly-stale cross-reference). `null`, or a leg
   reading `insufficient_data`, means that read is unavailable — treat as unknown.
+- `chart_statuses.ticker_prices[T].price_as_of` / `stale_meta_quote` —
+  per-ticker price vintage. **Relay any `stale_meta_quote: true`, or a
+  `price_as_of` older than `regime_inputs.anchor_session`, to the user
+  together with the limit prices it affects** (thin OTC ADRs lag — a limit
+  set off a stale quote does not fill).
+- `regime_inputs` — clock-anchored regime block (anchor_session + per-index
+  close/ma50 + VIX close/ma20, all at the last completed ET session). The
+  decision log's regime classification consumes THIS, not the live values.
 
 ## Step 5: Make Decisions
 
@@ -349,7 +392,11 @@ language. JSON field names and source tags remain in English.
 Assemble the full context and reason through the decision framework:
 
 **Context provided to the decision:**
-1. Portfolio state (holdings + cash + watchlist + open orders)
+1. Portfolio state (holdings + cash + watchlist + open orders). **Every
+   decision on a ticker with an in-flight open order must explicitly
+   reconcile it (keep / cancel / supersede) in its rationale** — the log
+   writer attaches the order snapshot to the decision and warns on
+   direction conflicts (e.g. `hold` beside a full-size open sell).
 2. Hard constraints (from compiled principles)
 3. Soft principles (numbered #1–#N, from compiled `soft_principles` — injected verbatim)
 4. Principle notes (from compiled `principle_notes` — injected verbatim):
@@ -413,20 +460,21 @@ the decision log. Use a deterministic run-scoped path (NOT /tmp/...$$):
 Step 8 runs in a LATER shell — the conversational Step 7 sits between
 validate and the log write, and a re-validation in Step 7 must overwrite
 the same path so Step 8 reads the latest. A `$$`/PID temp name is lost
-across that boundary, and `portfolio_log --stress-test` silently SKIPS a
-missing path (`if ... .exists()`), dropping the stress test from the log
-with no error. The fixed path is reconstructable per-call, exactly like
+across that boundary, and `portfolio_log --stress-test` FAILS (exit 2)
+on a missing path — fix the path, do not drop the flag to silence it.
+The fixed path is reconstructable per-call, exactly like
 `macro.json`. (`{TEMP_ORDERS_JSON}` below = the path the previous block
 printed — substitute the literal; it is not a shell variable.)
 
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-VALIDATOR_OUTPUT=reports/portfolio/{YYYYMMDD}/.validator_output.json
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 
 "$PYBIN" -m scripts.validate \
   --state portfolio-state.yaml \
-  --prices reports/portfolio/{YYYYMMDD}/macro.json \
+  --prices "reports/portfolio/$ETDAY/macro.json" \
   --orders {TEMP_ORDERS_JSON} \
   --constraints strategy.compiled.yaml \
   --output "$VALIDATOR_OUTPUT"
@@ -435,14 +483,17 @@ VALIDATOR_OUTPUT=reports/portfolio/{YYYYMMDD}/.validator_output.json
 Without `--output`, scripts.validate writes to stdout and the JSON is
 lost before Step 8 needs it (codex review 2026-05-22 F7).
 
-**If validation passes:** Include stress test results in the output.
+**If validation passes** (exit 0): Include stress test results in the output.
 
-**If validation fails:**
+**If validation fails** (the script exits 1 on `passed: false` — an expected
+iteration signal here, NOT a stop-everything error):
 - Read the violations from the output.
 - Adjust the order set to resolve violations.
 - Re-run validation.
 - Max 3 attempts. If still failing, present the unresolved violations
-  to the user and ask how to proceed.
+  to the user and ask how to proceed. Note: Step 8 will REFUSE to write
+  the log while the validator artifact records `passed: false` — drop or
+  fix the failing orders before logging.
 
 ## Step 7: Present and Iterate
 
@@ -451,7 +502,7 @@ in the conversation. Follow the output format from `portfolio-decide.md`.
 
 The user may:
 - Ask "why" about a specific decision → explain the reasoning
-- Request adjustments ("change MU price to $84") → update and re-validate
+- Request adjustments ("change MU price to 84") → update and re-validate
 - Confirm ("looks good") → the orders are RECOMMENDATIONS only; the user executes
   them manually at their broker. You NEVER submit/place orders and NEVER describe
   them as submitted/placed/executed (advisory-only — `rules/portfolio-safety.md`).
@@ -461,7 +512,9 @@ The user may:
 **Holdings-update protocol (the ONLY mutation of `portfolio-state.yaml`).** Only when the
 user reports actual fills and asks to update positions — never on your own initiative:
 1. Show a **before/after diff** of the exact fields changing (e.g. `MU shares: 50 → 100`,
-   `cash: 12000 → 3000`) and have the user confirm **that diff** — not a vague "looks good".
+   `cash: 12000 → 3000`, **including `open_orders` — the broker's working GTC
+   orders are part of the position sync, not an optional extra**) and have the
+   user confirm **that diff** — not a vague "looks good".
 2. Keep the prior file (e.g. copy to `portfolio-state.yaml.bak`) so a wrong edit is reversible.
 3. Write the update, then re-run the Preflight block above
    (`"$PYBIN" -m scripts.config_gate check --portfolio`, with its `cd`/`PYBIN`
@@ -483,9 +536,10 @@ LLM-authored judgment fields. The script will fill in the deterministic
 parts (portfolio snapshot, macro, thesis metadata, stress test, etc.).
 See `prompts/portfolio-decide.md` §"Decision Log Output" for the blob
 schema. Write it to a run-scoped dotfile in the portfolio run dir
-(`<captured-abs-ROOT>/reports/portfolio/{YYYYMMDD}/.decisions_blob.json`, matching
-the `.validator_output.json` convention above) — portable (native Windows has no
-`/tmp`) and stable across step boundaries.
+(`<captured-abs-ROOT>/reports/portfolio/<ETDAY>/.decisions_blob.json`, where
+`<ETDAY>` is the ET day the earlier blocks derived — reuse the exact dir the
+Step 4 macro output landed in; the write step hard-rejects a non-ET dir) —
+portable (native Windows has no `/tmp`) and stable across step boundaries.
 
 **Use the Write tool** to create this `.json` file — do NOT write it with a
 Bash heredoc. You are the orchestrator (the main loop), not a subagent, so the
@@ -515,19 +569,25 @@ Then call the logger:
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 "$PYBIN" -m scripts.portfolio_log write \
-  --decisions-blob reports/portfolio/{YYYYMMDD}/.decisions_blob.json \
+  --decisions-blob "reports/portfolio/$ETDAY/.decisions_blob.json" \
   --state portfolio-state.yaml \
-  --macro reports/portfolio/{YYYYMMDD}/macro.json \
+  --macro "reports/portfolio/$ETDAY/macro.json" \
   --constraints strategy.compiled.yaml \
-  --stress-test reports/portfolio/{YYYYMMDD}/.validator_output.json \
-  --output-dir reports/portfolio/{YYYYMMDD}
+  --stress-test "reports/portfolio/$ETDAY/.validator_output.json" \
+  --output-dir "reports/portfolio/$ETDAY"
 
 # Clean up the validator output (its content is now in decisions.json).
-# Use the literal run-scoped path, not $VALIDATOR_OUTPUT — that variable
-# was set in Step 6's shell and does not survive into this later call.
-rm -f reports/portfolio/{YYYYMMDD}/.validator_output.json
+# $ETDAY is re-derived in THIS block (Step 6's shell variables do not
+# survive into this later call).
+rm -f "reports/portfolio/$ETDAY/.validator_output.json"
 ```
+
+The script REFUSES (exit 2) when proposed orders or open broker orders
+exist but `--stress-test` is absent/missing, and when the artifact records
+`passed: false` — run Step 6 first; only an all-hold run with no open
+orders may omit the flag.
 
 The script writes `decisions.json` (canonical machine-readable) +
 `decisions.md` (hybrid table/narrative for humans). It fills in for

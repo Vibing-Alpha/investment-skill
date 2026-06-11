@@ -17,7 +17,12 @@ and concrete order recommendations.
 You will receive:
 
 1. **Portfolio state** — current holdings (ticker, shares, cost_basis),
-   cash balance, watchlist tickers, and any open orders
+   cash balance, watchlist tickers, and any open orders. Open orders are
+   LIVE broker state, not background: a `hold` beside a full-position open
+   sell is a contradiction — every decision on a ticker with an in-flight
+   order must state what it means for that order (keep / cancel /
+   supersede); silence is not an option. The decision log attaches the
+   order snapshot to your decision and warns on direction conflicts.
 2. **Per-ticker analysis** — for each holding and watchlist candidate:
    - `investment_thesis.json` (full): ER, CE, conviction, entry/exit
      conditions, signal assessment, key uncertainties
@@ -104,6 +109,13 @@ For each holding and watchlist candidate with analysis data:
    number looks attractive in the abstract.
 4. **Principle application** — Apply the user's principles to this
    ticker's situation. Which principles are relevant? Do any conflict?
+5. **In-flight order reconciliation** — If the ticker has entries in
+   `open_orders`, the decision must explicitly say what happens to them:
+   keep (and why the standing order still matches today's view), cancel
+   (the view changed), or supersede (today's proposed order replaces it).
+   A decision that contradicts a working order without addressing it —
+   e.g. `hold` while a full-position GTC sell is working at the broker —
+   is incomplete; the log writer flags such conflicts.
 
 **Apply the injected principles faithfully — the recurring failure is
 flattening them, not ignoring them.** The numbered soft principles AND the
@@ -255,7 +267,9 @@ After per-ticker analysis:
 
 For key decision-driving numbers in your output:
 - Numbers from thesis/BQ data: preserve original source tags
-- Numbers from macro snapshot: tag as `[Script: macro.py]`
+- Numbers from macro snapshot: tag as `[API: macro.json <section.field>]`
+  (the snapshot is fetched API data — Yahoo chart + rates; `[Script:]` is
+  NOT a canonical tag KIND per `.claude/rules/anti-hallucination.md`)
 - Calculated numbers (position %, cash projections): tag as `[Calc: formula]`
 
 You do not need to tag every repeated reference — tag each number on
@@ -315,7 +329,7 @@ Schema (write as JSON):
       "ticker": "NOK",
       "action": "exit | reduce | hold | add | buy | skip",
       "target_weight_pct": 0,
-      "rationale": "Why this action. One or two sentences citing the specific data point.",
+      "rationale": "Why this action. One or two sentences citing the specific data point. If a skip/buy rationale mentions ER/valuation as POSITIVE BACKGROUND (not the gate), append [context-only] to that clause — the log linter treats unmarked valuation terms in skip/buy rationales as gate-suspects and WARNs. Never mark an actual valuation-based veto [context-only]: that is exactly the regression the linter catches.",
       "principle_cited": "#4 dynamic churn of winners and losers",
       "invalidation_trigger": "Concrete condition that would flip today's decision (optional).",
       "entry_trigger": "For 'skip' on watchlist: what would change your mind (optional).",
@@ -328,7 +342,7 @@ Schema (write as JSON):
       "sequence": 1,
       "ticker": "NOK",
       "action": "sell | buy",
-      "type": "market | limit | stop",
+      "type": "market | limit | stop | stop_limit | stop_market | moc | loc | gtc",
       "shares": 1000,
       "limit_price": null,
       "duration": "gtc | day",

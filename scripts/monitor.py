@@ -59,6 +59,60 @@ def load_universe(state_path: Path):
     return rows, _f(cash)
 
 
+def load_vendor_aliases(state_path: Path) -> dict:
+    """{state_key: vendor_symbol} projection of portfolio-state symbol_aliases.
+
+    ABSENT is soft (missing file / no symbol_aliases key → {} — alias-less
+    fetch is the pre-feature behavior). PRESENT-BUT-MALFORMED is HARD
+    (raise ValueError naming the entry): a user who configured an alias and
+    typoed it must not silently fetch the state key instead — that recreates
+    the exact silent wrong-symbol failure this feature closes
+    (producer-consumer rule #4; feedback 2026-06-11 #5).
+    Any non-missing-file OSError and yaml.YAMLError PROPAGATE — "can't read
+    the state" must stop the fetch, not silently fetch unaliased.
+    """
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    aliases = state.get("symbol_aliases")
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict):
+        raise ValueError(
+            f"symbol_aliases must be a mapping, got {type(aliases).__name__}")
+    out = {}
+    for k, v in aliases.items():
+        # Keys must be non-empty STRINGS too: a YAML numeric/bool key (123:,
+        # NO:) can never match a state ticker, so the intended ticker would
+        # silently fetch unaliased — same failure class as a malformed value.
+        if not (isinstance(k, str) and k.strip()):
+            raise ValueError(
+                f"symbol_aliases key {k!r} malformed — must be a non-empty "
+                f"string ticker (quote it in YAML if needed)")
+        if not (isinstance(v, dict) and isinstance(v.get("vendor"), str)
+                and v["vendor"].strip()):
+            raise ValueError(
+                f"symbol_aliases[{k!r}] malformed — need "
+                f"{{vendor: <non-empty str>}}, got {v!r}")
+        out[k] = v["vendor"].strip()
+    # WARN (not raise) on alias keys matching no holding/watchlist ticker:
+    # probably a typo (the intended ticker then fetches unaliased), but a
+    # dormant alias for a recently-sold ticker is legitimate state — hard
+    # failing would block every run until the user prunes it.
+    universe = set(state.get("holdings") or {}) | set(state.get("watchlist") or [])
+    unknown = sorted(k for k in out if k not in universe)
+    if unknown:
+        print(
+            f"[WARN] symbol_aliases keys match no holding/watchlist ticker: "
+            f"{unknown} — if this is a typo, the intended ticker is being "
+            f"fetched UNALIASED.",
+            file=sys.stderr,
+        )
+    return out
+
+
 def _days_since_full_bq(ticker, reports_root=None):
     # _days_since_last_full_bq requires a real Path root (it does reports_root / ticker);
     # never pass None — fall back to the canonical reports root. ET date matches classify().
@@ -393,8 +447,8 @@ from scripts.macro import fetch_macro_snapshot
 from scripts.sources.financial_datasets import fetch_news_data
 
 
-def _macro_snapshot(tickers):                       # thin wrapper (mocked in tests)
-    return fetch_macro_snapshot(tickers=tickers)
+def _macro_snapshot(tickers, vendor_aliases=None):  # thin wrapper (mocked in tests)
+    return fetch_macro_snapshot(tickers=tickers, vendor_aliases=vendor_aliases)
 
 
 def _fetch_articles(ticker):                        # thin wrapper (mocked in tests)
@@ -445,9 +499,9 @@ def _output_language(strategy_path="strategy.yaml"):
         return "zh-CN"
 
 
-def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN"):
+def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN", vendor_aliases=None):
     tickers = [u["ticker"] for u in universe]
-    snap = _macro_snapshot(tickers) if tickers else {"ticker_prices": {}, "ticker_indicators": {}, "chart_statuses": {"ticker_prices": {}}}
+    snap = _macro_snapshot(tickers, vendor_aliases=vendor_aliases) if tickers else {"ticker_prices": {}, "ticker_indicators": {}, "chart_statuses": {"ticker_prices": {}}}
     today = datetime.datetime.strptime(run_date, "%Y-%m-%d").date()
     per_ticker, warnings = [], []
     for u in universe:
@@ -510,6 +564,12 @@ def _atomic_write(path: Path, text: str):
 
 def _cmd_probe(args):
     uni, cash = load_universe(Path(args.state))
+    try:
+        aliases = load_vendor_aliases(Path(args.state))
+    except (ValueError, yaml.YAMLError, OSError) as exc:
+        print(f"FATAL: symbol_aliases in {args.state} unreadable/malformed — "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     if not uni:
         # Empty universe = no holdings AND no watchlist (or missing portfolio-state.yaml) =
         # nothing to monitor. Fail-closed with a non-zero exit so the orchestrator stops on the
@@ -521,7 +581,8 @@ def _cmd_probe(args):
     out.parent.mkdir(parents=True, exist_ok=True)          # reports/monitor/YYYYMMDD/ may not exist yet
     out_dir = out.parent
     probe = build_probe(uni, cash, monitor_root=out_dir.parent, current_dirname=out_dir.name,
-                        run_date=args.run_date, output_language=_output_language())
+                        run_date=args.run_date, output_language=_output_language(),
+                        vendor_aliases=aliases)
     _atomic_write(out, json.dumps(probe, indent=2, ensure_ascii=False))   # probe = router's sole input; never torn
     return 0
 

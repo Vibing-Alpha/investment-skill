@@ -15,9 +15,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from scripts.sources.yahoo_finance import fetch_yahoo_quote_result
 from scripts.sources.adapter_result import ErrorCode
+from scripts.delta.calendar import last_closed_trading_day
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -25,6 +27,28 @@ from scripts.sources.adapter_result import ErrorCode
 
 MARKET_INDICES = ["SPY", "QQQ", "^DJI"]
 VIX_TICKER = "^VIX"
+_ET = ZoneInfo("America/New_York")
+
+# Price provenance defaults for every failure-path status dict — keys are
+# ALWAYS present so consumers never need .get() ambiguity (feedback
+# 2026-06-11 #1; plan-review LOW-12/r2 MED-5).
+_NO_PRICE_PROVENANCE = {
+    "price_source": None,
+    "price_as_of": None,
+    "stale_meta_quote": False,
+    "price_conflict_same_ts": False,
+}
+
+
+def _et_date_iso(epoch):
+    """ET calendar date (ISO) for an epoch-seconds timestamp, else None."""
+    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
+        return None
+    try:
+        return (datetime.fromtimestamp(epoch, tz=timezone.utc)
+                .astimezone(_ET).date().isoformat())
+    except (OverflowError, OSError, ValueError):
+        return None
 TREASURY_10Y = "^TNX"
 # ^FVX is the 5-Year Treasury yield (Yahoo Finance lacks a 2Y ticker).
 # Historically this was emitted as ``us_2y`` with ``spread_10y_2y`` — a
@@ -140,8 +164,51 @@ def _bench_3m(raw, idx):
     """3-month % return for a market index from its fetched 1y closes;
     None when the index fetch is missing/insufficient (rs falls back to null)."""
     triple = raw.get(("index", idx))
-    closes = triple[1] if triple else []
+    # isinstance guard: index slots hold the OHLCV dict post-#2 refactor, but
+    # the future-exception fallback still stores (None, [], status) — a LIST.
+    ohlcv = triple[1] if triple and isinstance(triple[1], dict) else {}
+    # Adjusted-close basis, same merge as _compute_ticker_indicators: RS
+    # facts compare ticker returns (adjclose-based) to this benchmark — a
+    # raw-close benchmark understates SPY/QQQ by every distribution in the
+    # window, biasing rs_vs_*_3m (cold review 2026-06-11 R1 HIGH-4).
+    raw_close = list(ohlcv.get("close") or [])
+    adj = list(ohlcv.get("adjclose") or [])
+    closes = []
+    for i, c in enumerate(raw_close):
+        a = adj[i] if i < len(adj) else None
+        merged = a if a is not None else c
+        if merged is not None:
+            closes.append(merged)
     return _pct_return(closes, 63)
+
+
+def _anchored_series(ohlcv, anchor_iso):
+    """(close_at_anchor, closes_through_anchor) from ts-aligned OHLCV.
+
+    Anchors regime inputs to the last COMPLETED ET session (feedback
+    2026-06-11 #2): ^VIX quotes nearly 24h on Cboe, so pre-market its meta
+    quote AND its current-day partial bar are live while index quotes still
+    show the prior close — a clock mix that flipped risk_off to risk_on.
+    Everything dated after the anchor (the live partial bar) is excluded
+    from both the anchored close and the MA window.
+
+    Known limitation (deliberate, anti-ratchet): last_closed_trading_day()
+    counts today only after 16:00 ET, so on the ~3 US early-close days/year
+    the anchor lags one session between ~13:00-16:00 ET. That is a
+    CONSISTENT lag across all inputs — not the clock mix this fixes — and
+    an early-close calendar is machinery without a named real failure.
+    """
+    closes_thru, close_at = [], None
+    for ts_i, c in zip(ohlcv.get("timestamp") or [], ohlcv.get("close") or []):
+        if c is None:
+            continue
+        d = _et_date_iso(ts_i)
+        if d is None or d > anchor_iso:
+            continue
+        closes_thru.append(c)
+        if d == anchor_iso:
+            close_at = c
+    return close_at, closes_thru
 
 
 def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
@@ -166,7 +233,7 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
        "error_detail": str|None}
     """
     status = {"status": "PASSED", "error_code": None, "error_detail": None}
-    empty = {"close": [], "high": [], "low": [], "volume": [], "adjclose": []}
+    empty = {"close": [], "high": [], "low": [], "volume": [], "adjclose": [], "timestamp": []}
     try:
         chart_result = fetch_yahoo_quote_result(
             ticker, range_param=range_param, interval=interval,
@@ -182,6 +249,7 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
                 "status": chart_result.status,
                 "error_code": getattr(err, "code", None) and err.code.value,
                 "error_detail": getattr(err, "detail", None),
+                **_NO_PRICE_PROVENANCE,
             }
             print(
                 f"[WARN] _fetch_chart_ohlcv({ticker}) envelope failed: "
@@ -203,10 +271,66 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
             "volume": list(quotes.get("volume", [])),
             "adjclose": list(adjclose),
         }
-        closes_nonnull = [c for c in ohlcv["close"] if c is not None]
-        price = meta.get("regularMarketPrice")
-        if price is None and closes_nonnull:
-            price = closes_nonnull[-1]
+        timestamps = list(chart.get("timestamp", []))
+        ohlcv["timestamp"] = timestamps
+        rmp = meta.get("regularMarketPrice")
+        rmt = meta.get("regularMarketTime")
+        # Last bar with a non-null close, positionally aligned with timestamp.
+        last_bar_ts, last_bar_close = None, None
+        for ts_i, close_i in zip(timestamps, ohlcv["close"]):
+            if close_i is not None:
+                last_bar_ts, last_bar_close = ts_i, close_i
+
+        # Timestamp-aware pick (feedback 2026-06-11 #1): Yahoo's meta quote
+        # for thin OTC ADRs can lag the SAME response's chart bars by a full
+        # session (live-reproduced: MRAAY rmp 29.73@06-09 vs bar 27.09@06-10,
+        # +9.7% — the stale quote priced a real reduce order unfillable).
+        # Never trust rmp unconditionally — use whichever source is stamped
+        # later; surface provenance so consumers can see price vintage.
+        price = rmp
+        price_source = "meta" if rmp is not None else None
+        price_as_of = _et_date_iso(rmt) if rmp is not None else None
+        stale_meta = False
+        if rmp is not None and rmt is None:
+            price_source = "meta_unverified"  # clocks can't be compared — flag
+            price_as_of = None
+        if last_bar_close is not None:
+            if rmp is None or (rmt is None and last_bar_ts is not None):
+                # No meta price — or an UNDATED meta vs a DATED bar: the
+                # source with verifiable provenance wins (cold review
+                # 2026-06-11 R2 HIGH-5 — an unverifiable quote must not
+                # outrank a dated close on the money path).
+                price = last_bar_close
+                price_source = "chart_bar"
+                price_as_of = _et_date_iso(last_bar_ts)
+            elif rmt is not None and last_bar_ts is not None and last_bar_ts > rmt:
+                stale_meta = True
+                price = last_bar_close
+                price_source = "chart_bar"
+                price_as_of = _et_date_iso(last_bar_ts)
+                print(
+                    f"[WARN] _fetch_chart_ohlcv({ticker}): meta quote {rmp} "
+                    f"({_et_date_iso(rmt)}) is STALER than last chart bar "
+                    f"{last_bar_close} ({_et_date_iso(last_bar_ts)}) — using the bar.",
+                    file=sys.stderr,
+                )
+        # Pathological: same timestamp, materially different price → keep
+        # meta, flag loud (plan-review MED-5).
+        conflict_same_ts = (
+            rmp is not None and rmt is not None and last_bar_ts is not None
+            and rmt == last_bar_ts and last_bar_close is not None
+            and abs(rmp - last_bar_close) > max(abs(rmp), 1e-9) * 0.001
+        )
+        if conflict_same_ts:
+            print(
+                f"[WARN] _fetch_chart_ohlcv({ticker}): meta {rmp} and bar "
+                f"{last_bar_close} share timestamp but diverge — keeping meta, flagged.",
+                file=sys.stderr,
+            )
+        status["price_source"] = price_source
+        status["price_as_of"] = price_as_of
+        status["stale_meta_quote"] = stale_meta
+        status["price_conflict_same_ts"] = conflict_same_ts
 
         # ISS-220 4.18 (Loop34 cycle 1): downgrade status when price
         # is None despite envelope PASSED. Pre-fix Yahoo could return
@@ -221,6 +345,7 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
                 "status": "FAILED",
                 "error_code": ErrorCode.NOT_FOUND.value,
                 "error_detail": "Yahoo returned no usable price (regularMarketPrice + closes all None)",
+                **_NO_PRICE_PROVENANCE,
             }
         return price, ohlcv, status
     except Exception as exc:  # pragma: no cover - defensive
@@ -236,13 +361,15 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
             "status": "FAILED",
             "error_code": "internal_error",
             "error_detail": f"{type(exc).__name__}: {exc}",
+            **_NO_PRICE_PROVENANCE,
         }
 
 
 def _fetch_chart(ticker, range_param="1y", interval="1d"):
-    """Back-compat wrapper: (price, filtered_closes, status) for index/VIX/treasury."""
+    """Back-compat wrapper: (price, filtered_closes, status) for treasury callers."""
     price, ohlcv, status = _fetch_chart_ohlcv(ticker, range_param, interval)
-    closes = [c for c in ohlcv["close"] if c is not None]
+    closes_src = ohlcv.get("close") if isinstance(ohlcv, dict) else []
+    closes = [c for c in (closes_src or []) if c is not None]
     return price, closes, status
 
 
@@ -345,37 +472,48 @@ def _fetch_rates_live():
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports"):
+def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports",
+                         vendor_aliases=None):
     """Fetch macro market snapshot.
 
     Args:
         tickers: Portfolio ticker symbols (current prices only).
         rates_fallback: Pre-loaded rates dict (``{"fed_funds": ...}``).
         reports_dir: Root reports directory for disk rate fallback.
+        vendor_aliases: optional ``{state_key: vendor_symbol}`` map (feedback
+            2026-06-11 #5 — broker renamed the symbol while the data vendor
+            still quotes the old one). The VENDOR symbol is fetched; ALL
+            output stays keyed by the state key, with ``vendor_symbol``
+            recorded in that ticker's chart status.
 
     Returns:
-        dict with keys: market, volatility, rates, ticker_prices, as_of
+        dict with keys: market, volatility, regime_inputs, rates,
+        ticker_prices, ticker_indicators, as_of
     """
     tickers = tickers or []
+    vendor_aliases = vendor_aliases or {}
 
     # ------------------------------------------------------------------
     # Build job list — all fetches run in parallel
     # ------------------------------------------------------------------
     futures = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        # Market indices (1y for MA200)
+        # Market indices (1y for MA200). OHLCV variant: regime anchoring
+        # needs the timestamp array (feedback 2026-06-11 #2).
         for idx in MARKET_INDICES:
-            futures[pool.submit(_fetch_chart, idx, "1y", "1d")] = ("index", idx)
+            futures[pool.submit(_fetch_chart_ohlcv, idx, "1y", "1d")] = ("index", idx)
 
-        # VIX (3mo for MA20)
-        futures[pool.submit(_fetch_chart, VIX_TICKER, "3mo", "1d")] = ("vix", VIX_TICKER)
+        # VIX (3mo for MA20) — OHLCV variant, same reason.
+        futures[pool.submit(_fetch_chart_ohlcv, VIX_TICKER, "3mo", "1d")] = ("vix", VIX_TICKER)
 
         # Portfolio tickers (6mo for run-day technical indicators: RSI/MACD/
         # Bollinger/volume + RSI-divergence lookback 60 need >=74 bars; 5d only
         # carried current price and dropped volume — plan
         # 2026-05-27-portfolio-runday-technicals).
         for t in tickers:
-            futures[pool.submit(_fetch_chart_ohlcv, t, "6mo", "1d")] = ("ticker", t)
+            futures[pool.submit(
+                _fetch_chart_ohlcv, vendor_aliases.get(t, t), "6mo", "1d",
+            )] = ("ticker", t)
 
         # Treasury yields (5d)
         futures[pool.submit(_fetch_chart, TREASURY_10Y, "5d", "1d")] = ("treasury", "10y")
@@ -414,9 +552,14 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     for idx in MARKET_INDICES:
         triple = raw.get(("index", idx))
         if triple is None:
-            price, closes, status = None, [], _missing_status
+            price, ohlcv_i, status = None, {}, _missing_status
         else:
-            price, closes, status = triple
+            price, ohlcv_i, status = triple
+        # isinstance guard: the future-exception fallback stores (None, [],
+        # status) — the middle slot can be a LIST, not the OHLCV dict.
+        if not isinstance(ohlcv_i, dict):
+            ohlcv_i = {}
+        closes = [c for c in (ohlcv_i.get("close") or []) if c is not None]
         market[idx] = {
             "price": price,
             "ma20": _sma_rounded(closes, 20),
@@ -434,9 +577,12 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # ------------------------------------------------------------------
     vix_triple = raw.get(("vix", VIX_TICKER))
     if vix_triple is None:
-        vix_price, vix_closes, vix_status = None, [], _missing_status
+        vix_price, vix_ohlcv, vix_status = None, {}, _missing_status
     else:
-        vix_price, vix_closes, vix_status = vix_triple
+        vix_price, vix_ohlcv, vix_status = vix_triple
+    if not isinstance(vix_ohlcv, dict):  # future-exception fallback shape
+        vix_ohlcv = {}
+    vix_closes = [c for c in (vix_ohlcv.get("close") or []) if c is not None]
     volatility = {
         "vix": vix_price,
         "vix_ma20": _sma_rounded(vix_closes, 20),
@@ -448,6 +594,30 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # `status` / `error_code` keys for symbols. Now uniformly
     # `chart_statuses[section][symbol] -> status_dict`.
     volatility_statuses = {VIX_TICKER: vix_status}
+
+    # ------------------------------------------------------------------
+    # Clock-anchored regime inputs (feedback 2026-06-11 #2)
+    # ------------------------------------------------------------------
+    # All values anchored to the last COMPLETED ET session so the regime
+    # classifier never mixes a live VIX with prior-close indices. The
+    # live values stay in market/volatility above (display semantics);
+    # _classify_regime consumes ONLY this block when present.
+    anchor = last_closed_trading_day().isoformat()
+    regime_indices = {}
+    for idx in MARKET_INDICES:
+        triple = raw.get(("index", idx))
+        ohlcv_i = triple[1] if triple and isinstance(triple[1], dict) else {}
+        close_at, closes_thru = _anchored_series(ohlcv_i, anchor)
+        regime_indices[idx] = {
+            "close": close_at,
+            "ma50": _sma_rounded(closes_thru, 50),
+        }
+    vix_close_at, vix_thru = _anchored_series(vix_ohlcv, anchor)
+    regime_inputs = {
+        "anchor_session": anchor,
+        "indices": regime_indices,
+        "vix": {"close": vix_close_at, "ma20": _sma_rounded(vix_thru, 20)},
+    }
 
     # ------------------------------------------------------------------
     # Interest rates: fallback → disk → API
@@ -542,6 +712,9 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             continue
         price, ohlcv, status = triple
         ticker_prices[t] = price
+        if t in vendor_aliases:
+            status = dict(status)  # don't mutate a possibly-shared dict
+            status["vendor_symbol"] = vendor_aliases[t]
         ticker_price_statuses[t] = status
         # null when the fetch failed or there are too few bars; otherwise the
         # raw block (its legs carry their own null/insufficient_data sentinels).
@@ -554,6 +727,7 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     return {
         "market": market,
         "volatility": volatility,
+        "regime_inputs": regime_inputs,
         "rates": rates,
         "ticker_prices": ticker_prices,
         "ticker_indicators": ticker_indicators,
@@ -595,9 +769,33 @@ def _main():
         "--output", default=None,
         help="Output file path (default: stdout).",
     )
+    parser.add_argument(
+        "--vendor-aliases", default=None,
+        help='JSON object {state_key: vendor_symbol} — fetch the vendor '
+             'symbol, key output by the state key (feedback 2026-06-11 #5). '
+             '"{}" / omitted = no aliasing.',
+    )
     args = parser.parse_args()
 
-    result = fetch_macro_snapshot(tickers=args.tickers)
+    vendor_aliases = {}
+    if args.vendor_aliases not in (None, ""):
+        # User-editable money-path config: any shape other than a
+        # dict[str, non-empty str] fails CLOSED — a silently-partial alias
+        # map fetches the wrong symbol (the exact failure this flag fixes).
+        try:
+            vendor_aliases = json.loads(args.vendor_aliases)
+        except ValueError as exc:
+            parser.error(f"--vendor-aliases is not valid JSON: {exc}")
+        if not isinstance(vendor_aliases, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and v.strip()
+            for k, v in vendor_aliases.items()
+        ):
+            parser.error(
+                "--vendor-aliases must be a JSON object mapping state keys "
+                "to non-empty vendor symbol strings")
+
+    result = fetch_macro_snapshot(tickers=args.tickers,
+                                  vendor_aliases=vendor_aliases)
 
     from scripts.cli_utils import write_output
     write_output(result, args.output)

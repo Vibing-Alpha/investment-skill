@@ -104,6 +104,28 @@ def _is_date_dirname(name: str) -> bool:
     return len(name) == 8 and name.isdigit()
 
 
+def _fatal_allocation_error(path: Path, exc: OSError) -> None:
+    """Clean exit 2 with remediation when a report dir can't be created.
+
+    Feedback 2026-06-11 #6: a corrupt Cowork mount made reports/MU/
+    uncreatable; the raw traceback led the executing agent to improvise
+    writing the analysis to /tmp — ephemeral in Cowork, so a full BQ+thesis
+    run was lost at session end and the delta chain broke. The remediation
+    line exists to stop that improvisation at the source.
+    """
+    import sys as _sys
+    print(
+        f"FATAL: cannot create report dir {path}: {type(exc).__name__}: {exc}\n"
+        f"  Do NOT redirect artifacts elsewhere (/tmp is EPHEMERAL in Cowork — "
+        f"the analysis would be lost at session end and the delta layer could "
+        f"never find it).\n"
+        f"  Fix the directory/mount (or pass --reports-root to a persistent "
+        f"path inside the project) and re-run.",
+        file=_sys.stderr,
+    )
+    _sys.exit(2)
+
+
 def _cli():
     import argparse
     p = argparse.ArgumentParser()
@@ -161,9 +183,12 @@ def _cli():
         from scripts.delta.calendar import session_et
         root = Path(args.reports_root) if args.reports_root else Path("reports")
         path = root / args.ticker / session_et().strftime("%Y%m%d")
-        path.mkdir(parents=True, exist_ok=True)
-        (path / "data").mkdir(exist_ok=True)
-        (path / "scores").mkdir(exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "data").mkdir(exist_ok=True)
+            (path / "scores").mkdir(exist_ok=True)
+        except OSError as exc:
+            _fatal_allocation_error(path, exc)
         print(str(path))
     elif args.cmd == "allocate-industry-run":
         from scripts.delta.calendar import session_et
@@ -178,8 +203,11 @@ def _cli():
             _sys.exit(2)
         root = Path(args.reports_root) if args.reports_root else Path("reports")
         path = root / "industry" / args.slug / session_et().strftime("%Y%m%d")
-        path.mkdir(parents=True, exist_ok=True)
-        (path / "data").mkdir(exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "data").mkdir(exist_ok=True)
+        except OSError as exc:
+            _fatal_allocation_error(path, exc)
         print(str(path))
 
 

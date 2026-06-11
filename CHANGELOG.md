@@ -3,6 +3,17 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.2.0 — 2026-06-11
+
+- Price feed: stale Yahoo meta quotes (thin OTC ADRs) now lose to the newer chart bar in the same response; per-ticker price vintage surfaced as price_as_of/stale_meta_quote
+- Regime classification: inputs anchored to the last completed ET session (regime_inputs block) — a live pre-market VIX can no longer flip risk_off to risk_on against prior-close indices
+- portfolio-state.yaml: open_orders is now a REQUIRED key (write open_orders: [] to attest none) — decisions attach per-ticker open-order snapshots, warn on direction conflicts, and stress scenarios must cover working orders
+- portfolio-state.yaml: optional symbol_aliases map (vendor/broker symbol split, e.g. ADR depositary renames) wired into the price fetch for /portfolio and /monitor
+- Same-day /portfolio reruns archive the prior decisions pair as decisions.{run_id}.*; review now sees an earlier run today
+- Decision-log hardening: refuses missing/failed stress artifacts and non-ET-day output dirs; scripts.validate exits 1 on FAIL; limit_price honored in cash projections
+- Report-dir allocation failures fail visibly with do-not-redirect remediation (/tmp is ephemeral in Cowork)
+- SKILL prose hardening: no bare $N literals (harness positional-arg substitution defense) + ER-lint [context-only] marker
+
 ## v1.1.0 — 2026-06-10
 
 - Cowork thin-plugin packaging: install from this repo's marketplace, then run /stock-v7-setup (clone-launcher: persistent clone + venv in your project folder)

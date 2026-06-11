@@ -75,7 +75,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.1.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.2.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -572,7 +572,7 @@ fi
 Write the delta section to a file, then append. The header line is built
 via `printf` (so `$TIER` and today's date interpolate); the free-prose
 body uses a QUOTED heredoc — the delta note is agent-substituted prose
-that may contain `$` («$4.2B», «$NVDA») or backticks, which an unquoted
+that may contain `$` («$NVDA», «$X.XB» — any digit after $ would be arg-substituted, so even this example avoids it) or backticks, which an unquoted
 heredoc would silently expand / command-substitute:
 
 ```bash

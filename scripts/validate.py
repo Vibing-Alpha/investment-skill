@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 _VALID_ACTIONS = {"buy", "sell"}
-_VALID_TYPES = {"market", "limit", "stop"}
+# Order-type vocabulary is the SCHEMA contract (scripts/schemas/decisions.py
+# ORDER_TYPES, mirrored by portfolio_log.ORDER_TYPES). Cold review 2026-06-11
+# R1 HIGH-1: a locally-narrowed {market, limit, stop} set rejected
+# schema-valid orders (stop_limit/moc/loc/gtc/stop_market) at the safety
+# gate — producer-consumer rule #2 (handle ALL values in the vocabulary).
+from scripts.schemas.decisions import ORDER_TYPES as _VALID_TYPES
 
 
 def _guard_constraints(
@@ -97,12 +102,14 @@ def _validate_order_vocab(
             })
             order_bad = True
         shares = order.get("shares")
-        if isinstance(shares, bool) or not isinstance(shares, int) or shares <= 0:
+        # int|float: fractional shares are schema-valid (real broker feature
+        # — see portfolio_log F11); bool is a subclass of int, reject it.
+        if isinstance(shares, bool) or not isinstance(shares, (int, float)) or shares <= 0:
             violations.append({
                 "constraint": "invalid_shares",
                 "index": i,
                 "message": (
-                    f"order[{i}].shares={shares!r} must be positive int"
+                    f"order[{i}].shares={shares!r} must be a positive number"
                 ),
             })
             order_bad = True
@@ -114,6 +121,24 @@ def _validate_order_vocab(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
+    """Projection price for an order — explicit order prices BEFORE the
+    current-quote fallback.
+
+    Cold review 2026-06-11 R2 HIGH-1: the schema/prompt/log all carry
+    ``limit_price`` (portfolio_log._enrich_orders costs orders with it), but
+    the validator projected from est_price/price only — a GTC limit buy
+    above the current quote stress-tested at the quote, understating the
+    cash its fill consumes. Order of preference: est_price (explicit
+    estimate) → limit_price → price → current quote.
+    """
+    for key in ("est_price", "limit_price", "price"):
+        v = order.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return v
+    return ticker_prices.get(order.get("ticker", ""), 0)
+
 
 def _get_shares(holding):
     """Extract share count from holding (supports int or {"shares": N}).
@@ -266,9 +291,7 @@ def _apply_orders(
     for idx, order in enumerate(orders):
         ticker = order.get("ticker", "")
         shares = order.get("shares", 0)  # fail-open-ok: _validate_order_vocab pre-check rejects non-positive int shares before this point (sanitized_orders only)
-        price = order.get("est_price") or order.get("price", 0)  # fail-open-ok: followed by `if not price or price <= 0` → missing_price_order violation (HIGH-13)
-        if not price:
-            price = ticker_prices.get(ticker, 0)
+        price = _order_price(order, ticker_prices)  # fail-open-ok: followed by `if not price or price <= 0` → missing_price_order violation (HIGH-13)
 
         # Fail-closed: skip orders with no price
         if not price or price <= 0:
@@ -615,12 +638,48 @@ def validate_portfolio(
         _check_cash_floor(proj_cash, proj_account, normalized_constraints)
     )
 
+    # Cold review 2026-06-11 R2 HIGH-2 / R3 HIGH-1 / R4 HIGH-1: pre-scan
+    # open_orders BEFORE stress projection. A PRESENT broker order the
+    # projector cannot price (or classify as buy/sell) is an unknown
+    # commitment → VIOLATION (fail-closed, producer-consumer rule #4) —
+    # and a non-dict entry would CRASH _is_buy inside the stress run, so
+    # only mapping-shaped orders are projected.
+    unprojectable_violations: List[Dict[str, Any]] = []
+    projectable_open_orders: List[Dict[str, Any]] = []
+    for i, o in enumerate(open_orders):
+        if not isinstance(o, dict):
+            unprojectable_violations.append({
+                "constraint": "unprojectable_open_order",
+                "index": i,
+                "message": (f"open_orders[{i}] is not a mapping — it cannot "
+                            f"be projected by any stress scenario"),
+            })
+            continue
+        side_known = _is_buy(o) or _is_sell(o)
+        price_ok = _order_price(o, ticker_prices) > 0
+        if not side_known or not price_ok:
+            reason = ("has no recognizable buy/sell side" if not side_known
+                      else "cannot be priced (no est_price/limit_price/price "
+                           "and no quote)")
+            unprojectable_violations.append({
+                "constraint": "unprojectable_open_order",
+                "ticker": o.get("ticker"),
+                "index": i,
+                "message": (
+                    f"open_orders[{i}] ({o.get('ticker', '?')}) {reason} — "
+                    f"it would be silently absent from stress projections; "
+                    f"fix the entry in portfolio-state.yaml."
+                ),
+            })
+        else:
+            projectable_open_orders.append(o)
+
     # Run stress tests on sanitized orders so invalid vocab doesn't
     # pollute projections. Use normalized_constraints so stress-test
     # max_single_position check respects the range guard.
     stress_test = _run_stress_tests(
-        holdings, cash, sanitized_orders, open_orders, ticker_prices,
-        normalized_constraints,
+        holdings, cash, sanitized_orders, projectable_open_orders,
+        ticker_prices, normalized_constraints,
     )
 
     # Aggregate. Vocab + config + missing-shares/price violations go
@@ -638,9 +697,25 @@ def validate_portfolio(
     # Overall pass: no violations AND all stress tests pass
     stress_passed = all(s["passed"] for s in stress_test.values())
 
+    # Feedback 2026-06-11 #3c: with no open orders the all_buy/extreme_down/
+    # defensive scenarios collapse into each other (field run: all_buy ==
+    # extreme_down == 36,209.72, PASS reported on a vacuous stress). Say so
+    # instead of silently reporting strong-looking coverage.
+    warnings: List[str] = []
+    if not open_orders:
+        warnings.append(
+            "open_orders is empty/absent in portfolio-state.yaml — stress "
+            "scenarios all_buy/extreme_down/defensive degenerate to "
+            "proposed-orders-only (extreme_down == all_buy, defensive == "
+            "current cash). Sync broker open orders into the state file "
+            "for meaningful stress coverage."
+        )
+    all_violations.extend(unprojectable_violations)
+
     return {
         "passed": len(all_violations) == 0 and stress_passed,
         "violations": all_violations,
+        "warnings": warnings,
         "stress_test": stress_test,
     }
 
@@ -725,6 +800,12 @@ def _main():
         f"{args.output or 'stdout'}",
         file=sys.stderr,
     )
+    # Cold review 2026-06-11 R4 HIGH-2: a failed validation must FAIL the
+    # shell step (script standard: 0=success, 1=failure) — exit 0 on
+    # passed:false let an orchestration that only checks exit codes carry
+    # rejected orders forward as if validated.
+    if not result["passed"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

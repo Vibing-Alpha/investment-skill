@@ -160,9 +160,14 @@ def assert_portfolio_state_ok(root: Path) -> None:
                                          and all(isinstance(t, str) and t.strip() for t in watchlist))
     open_orders = pstate.get("open_orders")
     def _order_ok(o):
+        # Price-field vocabulary mirrors validate._order_price (est_price /
+        # limit_price / price) — cold review 2026-06-11 R8: the preflight
+        # rejected a broker-synced {type: limit, limit_price: X} open order
+        # that the validator downstream prices fine.
         return (isinstance(o, dict) and isinstance(o.get("ticker"), str) and o["ticker"].strip()
                 and isinstance(o.get("type"), str) and _is_pos_num(o.get("shares"))
-                and (_is_pos_num(o.get("price")) or _is_pos_num(o.get("est_price"))))
+                and (_is_pos_num(o.get("price")) or _is_pos_num(o.get("est_price"))
+                     or _is_pos_num(o.get("limit_price"))))
     orders_ok = open_orders is None or (isinstance(open_orders, list) and all(_order_ok(o) for o in open_orders))
     cash = pstate.get("cash")
     if not (_is_finite_num(cash) and cash >= 0 and holdings_ok and watchlist_ok and orders_ok):

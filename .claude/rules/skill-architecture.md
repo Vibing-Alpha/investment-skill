@@ -38,3 +38,11 @@ When creating or modifying skills:
    existence gate** (`[ -s "<path>/file.md" ] || { echo "FATAL…" >&2; exit 1; }`)
    — it catches a MISSING / EMPTY deliverable (the common silent-failure mode),
    though not a mid-file delimiter collision (handle that via the unique sentinel).
+9. **Artifacts live under `<ROOT>/reports/` — never improvise a fallback.**
+   If `allocate-bq-run` / a report write fails (corrupt mount, permissions),
+   STOP and surface the error to the user. Do NOT redirect output to `/tmp`,
+   `$HOME`, or any path outside the repo: in Cowork those are ephemeral
+   (lost at session end) and the delta layer (classify/resolver) can never
+   find them again — a silently relocated artifact is worse than a visibly
+   failed run (feedback 2026-06-11 #6: a full MU BQ+thesis written to /tmp
+   after a mount failure evaporated with the session).
