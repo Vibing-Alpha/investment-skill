@@ -3,6 +3,15 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.2.1 — 2026-06-11
+
+- Safety gate hardening: present-but-null state/price data (bare holdings:/cash:/open_orders: keys, null prices from a failed fetch, shares: null) now fails closed with structured violations instead of crashing or silently passing
+- Oversell detection: a proposed sell exceeding held shares, or a SINGLE broker open order selling more than held, is now a violation (stop+limit OCA brackets remain legal); an unrecognized --orders file shape is refused instead of validating zero orders
+- Decision log: write-time schema self-check — a log that tomorrow's review would reject is refused at write time; order costing uses the same est_price→limit_price→price chain as validation; open-order limit_price renders in the MD
+- Preflight: the open_orders key requirement now fails fast at config_gate (was: refused only at the final write step); watchlist-only states (bare holdings:) and int-shorthand holdings (TICKER: 100) are accepted
+- BQ staleness clock keys to the last FULL-tier run — frequent no-op/partial runs no longer reset the 90-day re-score ceiling
+- Historical multiples: when the newest reported quarter cannot be aligned yet, summary.current is flagged (current_lags_newest_reported + warning) instead of silently presenting an older quarter as current
+
 ## v1.2.0 — 2026-06-11
 
 - Price feed: stale Yahoo meta quotes (thin OTC ADRs) now lose to the newer chart bar in the same response; per-ticker price vintage surfaced as price_as_of/stale_meta_quote

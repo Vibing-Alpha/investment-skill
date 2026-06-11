@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "stock-v7-skills",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "description": "US-stock investment analysis skills (thin clone-launcher plugin).",
       "source": "./plugins/stock-v7-skills",
       "category": "productivity"

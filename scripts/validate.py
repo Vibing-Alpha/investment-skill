@@ -166,12 +166,17 @@ def _collect_missing_shares(
     """
     violations: List[Dict[str, Any]] = []
     for ticker, holding in holdings.items():
-        if isinstance(holding, dict) and "shares" not in holding:
+        # _get_shares returns None for: dict without 'shares', dict with
+        # `shares: null`, and a bare `TICKER:` (None holding). All three are
+        # the same invisible-position hazard — the original key-presence
+        # check missed the null-VALUE forms (whole-project review
+        # 2026-06-11, HIGH-14 resurrected via null).
+        if _get_shares(holding) is None:
             violations.append({
                 "constraint": "missing_shares",
                 "ticker": ticker,
                 "message": (
-                    f"holdings[{ticker!r}] has no 'shares' key — "
+                    f"holdings[{ticker!r}] has no usable 'shares' value — "
                     f"cannot evaluate position/ratio constraints "
                     f"(fail-closed, HIGH-14)"
                 ),
@@ -224,27 +229,27 @@ _SELL_ACTIONS = {"sell"}
 
 
 def _is_buy(order: Dict[str, Any]) -> bool:
-    """Detect buy orders in both formats.
+    """Detect buy orders in both formats. CANONICAL side classifier —
+    portfolio_log's conflict detection imports these; keep ONE
+    implementation (producer-consumer rule #3).
 
     Proposed orders: {"action": "buy", ...}
     Open orders:     {"type": "limit_buy"} or {"type": "stop_buy"}
+    str() coercion: user-editable open orders can carry non-string
+    action/type drift — classify from the text, never AttributeError.
     """
-    if order.get("action", "").lower() in _BUY_ACTIONS:
+    if str(order.get("action") or "").lower() in _BUY_ACTIONS:
         return True
-    if "buy" in order.get("type", "").lower():
+    if "buy" in str(order.get("type") or "").lower():
         return True
     return False
 
 
 def _is_sell(order: Dict[str, Any]) -> bool:
-    """Detect sell orders in both formats.
-
-    Proposed orders: {"action": "sell", ...}
-    Open orders:     {"type": "limit_sell"} or {"type": "stop_sell"}
-    """
-    if order.get("action", "").lower() in _SELL_ACTIONS:
+    """Detect sell orders in both formats (see _is_buy — canonical)."""
+    if str(order.get("action") or "").lower() in _SELL_ACTIONS:
         return True
-    if "sell" in order.get("type", "").lower():
+    if "sell" in str(order.get("type") or "").lower():
         return True
     return False
 
@@ -259,6 +264,7 @@ def _apply_orders(
     orders: List[Dict[str, Any]],
     ticker_prices: Dict[str, float],
     missing_price_violations: Optional[List[Dict[str, Any]]] = None,
+    oversell_violations: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, int], float]:
     """Project holdings/cash after orders execute.
 
@@ -313,9 +319,27 @@ def _apply_orders(
             proj_cash -= cost
             proj_holdings[ticker] = proj_holdings.get(ticker, 0) + shares
         elif _is_sell(order):
-            # Cap at owned shares
+            # Cap at owned shares — and SAY so on the violations pass
+            # (whole-project review 2026-06-11 C5): an oversell or a sell
+            # of an unheld ticker cannot execute as written; silently
+            # projecting the capped fill validated an impossible order.
+            # Stress callers pass None (capping is the conservative cash
+            # read there; the proposed-order pass owns the verdict).
             owned = proj_holdings.get(ticker, 0)
             actual_sell = min(shares, owned)
+            if actual_sell < shares and oversell_violations is not None:
+                oversell_violations.append({
+                    "constraint": "oversell",
+                    "ticker": ticker,
+                    "index": idx,
+                    "current": owned,
+                    "limit": shares,
+                    "message": (
+                        f"order[{idx}] sells {shares} {ticker} but only "
+                        f"{owned} held — the order cannot execute as "
+                        f"written (stale portfolio-state.yaml?)"
+                    ),
+                })
             if actual_sell > 0:
                 proceeds = actual_sell * price
                 proj_cash += proceeds
@@ -546,10 +570,20 @@ def validate_portfolio(
     Returns:
         {"passed": bool, "violations": list, "stress_test": dict}
     """
-    holdings = state.get("holdings", {})
-    cash = float(state.get("cash", 0))  # fail-open-ok: $0 cash is a legit state (fully invested)
-    open_orders = state.get("open_orders", [])
-    ticker_prices = prices.get("ticker_prices", {})
+    # Present-but-null normalization (whole-project review 2026-06-11):
+    # a bare YAML key (`holdings:` / `cash:` / `open_orders:`) loads as None
+    # with the key PRESENT, sailing past `.get(key, default)` — the sibling
+    # readers (portfolio_log, monitor) already normalize with `or`.
+    holdings = state.get("holdings") or {}
+    cash = float(state.get("cash") or 0)  # fail-open-ok: $0 cash is a legit state (fully invested)
+    open_orders = state.get("open_orders") or []
+    # A present-but-null/non-numeric price is a MISSING price — it must take
+    # the structured missing-price fail-close path (macro.py emits
+    # ticker_prices[t]=None for a failed fetch), never `shares * None`.
+    ticker_prices = {
+        k: v for k, v in (prices.get("ticker_prices") or {}).items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
 
     # Pre-check 0: holdings with missing 'shares' key → fail-closed
     # (HIGH-14). Previously `_get_shares` silently returned 0, making
@@ -590,9 +624,11 @@ def validate_portfolio(
     # _apply_orders still returns (holdings, cash) — tuple contract
     # preserved for the stress-test call sites.
     missing_price_violations: List[Dict[str, Any]] = []
+    oversell_violations: List[Dict[str, Any]] = []
     proj_holdings, proj_cash = _apply_orders(
         holdings, cash, sanitized_orders, ticker_prices,
         missing_price_violations=missing_price_violations,
+        oversell_violations=oversell_violations,
     )
     proj_account = _calc_account_value(proj_holdings, ticker_prices, proj_cash)
 
@@ -671,8 +707,37 @@ def validate_portfolio(
                     f"fix the entry in portfolio-state.yaml."
                 ),
             })
-        else:
-            projectable_open_orders.append(o)
+            continue
+        # A SINGLE open sell larger than the held position cannot execute
+        # as written — stale state vs broker (fix-batch review HIGH-1; the
+        # proposed-order pass already flags its own oversells). Deliberately
+        # per-order, NOT cumulative: a stop-loss + take-profit bracket (OCA)
+        # working against the same shares is legitimate broker state, and a
+        # cumulative check would false-positive on it (the all_sell stress
+        # scenario already caps cumulative fills conservatively).
+        o_shares = o.get("shares")
+        if (_is_sell(o) and isinstance(o_shares, (int, float))
+                and not isinstance(o_shares, bool)):
+            owned = _get_shares(holdings.get(o.get("ticker")))
+            held_unknown = o.get("ticker") in holdings and owned is None
+            if not held_unknown:   # unknown shares → missing_shares already fails the run
+                owned_n = (owned if isinstance(owned, (int, float))
+                           and not isinstance(owned, bool) else 0)
+                if o_shares > owned_n:
+                    unprojectable_violations.append({
+                        "constraint": "open_order_oversell",
+                        "ticker": o.get("ticker"),
+                        "index": i,
+                        "current": owned_n,
+                        "limit": o_shares,
+                        "message": (
+                            f"open_orders[{i}] sells {o_shares} "
+                            f"{o.get('ticker', '?')} but the state holds "
+                            f"{owned_n} — the order cannot execute as "
+                            f"written (stale portfolio-state.yaml vs broker?)"
+                        ),
+                    })
+        projectable_open_orders.append(o)
 
     # Run stress tests on sanitized orders so invalid vocab doesn't
     # pollute projections. Use normalized_constraints so stress-test
@@ -690,6 +755,7 @@ def validate_portfolio(
         + vocab_violations
         + missing_shares_violations
         + missing_price_violations
+        + oversell_violations
         + holding_price_violations
         + violations
     )
@@ -769,7 +835,24 @@ def _main():
     prices = read_json(args.prices, "--prices", prefix)
 
     orders_data = read_json(args.orders, "--orders", prefix)
-    orders = orders_data if isinstance(orders_data, list) else orders_data.get("orders", [])
+    # Fail-closed on an unrecognized orders shape (whole-project review
+    # 2026-06-11 C4): the old `.get("orders", [])` fallback silently
+    # validated ZERO orders for any dict keyed otherwise (e.g. a blob-shaped
+    # {"orders_proposed": [...]}), producing a vacuous passed:true artifact.
+    if isinstance(orders_data, list):
+        orders = orders_data
+    elif isinstance(orders_data, dict) and isinstance(orders_data.get("orders"), list):
+        orders = orders_data["orders"]
+    else:
+        print(
+            f"{prefix}: --orders must be a JSON array of orders, or an "
+            f"object with an 'orders' array; got "
+            f"{type(orders_data).__name__}"
+            + (f" with keys {sorted(orders_data)}" if isinstance(orders_data, dict) else "")
+            + " — refusing to validate an empty order set by accident.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     try:
         from scripts.schemas import SchemaError

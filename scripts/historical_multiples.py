@@ -487,6 +487,27 @@ def compute_historical_multiples(
     # dropped.
     latest_aligned_report_period = valid_windows[-1][3].report_period
 
+    # Whole-project review 2026-06-11 C7: the anchor above only catches
+    # windows dropped DURING per-window processing. A newest quarter that
+    # never became an aligned window at all (excluded upstream in the
+    # 3-statement intersection — e.g. the cash_flow family lags a filing by
+    # a day) leaves valid_windows[-1] at an older quarter with a clean
+    # status. Capture the newest REPORTED quarterly income period so the
+    # lag can be surfaced (warning + fields, NOT current=None: a one-family
+    # filing lag is routine and the older band is still valid data — the
+    # detector surfaces, the consuming agent adjudicates).
+    newest_reported_period = None
+    for _r in income if isinstance(income, list) else []:
+        if not isinstance(_r, dict):
+            continue
+        if str(_r.get("period") or "").strip().lower() not in ("quarter", "quarterly"):
+            continue
+        _rp = _r.get("report_period")
+        if isinstance(_rp, str) and (
+            newest_reported_period is None or _rp > newest_reported_period
+        ):
+            newest_reported_period = _rp
+
     # Compute TTM multiples for each aligned 4-quarter window
     quarterly_data: list[dict] = []
 
@@ -936,6 +957,29 @@ def compute_historical_multiples(
         status = "ok_with_warnings"
     else:
         status = "ok"
+
+    # C7: current lags the newest reported income quarter (upstream
+    # intersection exclusion — no SkippedWindow record exists for it).
+    current_lags_newest_reported = (
+        newest_reported_period is not None
+        and newest_reported_period > latest_aligned_report_period
+    )
+    out_warnings = list(fx_warnings_to_propagate)
+    lag_fields: dict = {}
+    if current_lags_newest_reported:
+        lag_fields = {
+            "current_lags_newest_reported": True,
+            "newest_reported_quarter": newest_reported_period,
+        }
+        out_warnings.append(
+            f"summary.current reflects {latest_aligned_report_period}, but the "
+            f"newest reported income quarter is {newest_reported_period} — that "
+            f"quarter could not be aligned across all 3 statement families "
+            f"(one family likely lags a filing); treat 'current' as one "
+            f"quarter behind."
+        )
+        if status == "ok":
+            status = "ok_with_warnings"
     # DL3c §3.3 spec L623-632: current_from_api block at L745-774 (now L850-)
     # is API pass-through and carries its OWN currency basis from FD API.
     # Do NOT certify it under the same `currency_conversion` cert block.
@@ -953,10 +997,10 @@ def compute_historical_multiples(
         "quarterly_detail": quarterly_data,
         "quarters_used": len(quarterly_data),
         "skipped_windows": skipped_serialized,
+        **lag_fields,
         **api_basis_sibling,
         **cert_block_to_add,
-        **({"warnings": fx_warnings_to_propagate}
-           if fx_warnings_to_propagate else {}),
+        **({"warnings": out_warnings} if out_warnings else {}),
     })
 
 

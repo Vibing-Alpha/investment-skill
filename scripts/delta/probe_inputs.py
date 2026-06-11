@@ -254,17 +254,20 @@ def build_bq_tier_inputs(
     prior_dir is None rather than relying on this function — but the
     values returned are still safe defaults.
     """
-    # Days since last full
+    # Days since last FULL-tier run (whole-project review 2026-06-11 C6).
+    # prior_dir is the most recent prior of ANY tier, so anchoring the clock
+    # there let frequent no_op/partial runs reset the 90-day full ceiling
+    # and the 14-day partial valve forever (spec §8.1: partials do not
+    # reset the full-tier clock — a ticker whose period detector is stuck
+    # would never re-score). Use the SAME full-tier walk portfolio_classify
+    # uses: one implementation (producer-consumer rule #3); lazy import —
+    # portfolio_classify has no back-edge into this module.
+    from scripts.delta.portfolio_classify import _days_since_last_full_bq
     if prior_dir is not None:
-        prior_rm = RunMeta.load_or_none(prior_dir / "run_meta.json")
-        if prior_rm is not None:
-            try:
-                prior_date = datetime.date.fromisoformat(prior_rm.et_trading_day)
-                days_since_last_full = (today_et() - prior_date).days
-            except (ValueError, TypeError):
-                days_since_last_full = 999
-        else:
-            days_since_last_full = 999
+        ticker_dir = Path(prior_dir).parent
+        _days = _days_since_last_full_bq(
+            ticker_dir.name, ticker_dir.parent, today_et())
+        days_since_last_full = _days if _days is not None else 999
     else:
         days_since_last_full = 999
 

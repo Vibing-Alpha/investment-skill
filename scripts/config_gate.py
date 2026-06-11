@@ -152,12 +152,31 @@ def assert_portfolio_state_ok(root: Path) -> None:
     Fail-CLOSED. Not applied to single-ticker analysis/discovery skills."""
     pstate = _load_yaml(root / "portfolio-state.yaml")        # raises ConfigError if missing/unparseable/non-mapping
     holdings = pstate.get("holdings")
-    holdings_ok = isinstance(holdings, dict) and all(
-        isinstance(k, str) and k.strip() and isinstance(v, dict) and _is_pos_num(v.get("shares"))
+    # Present-but-null allowed (C13): the shipped example's `holdings:` with
+    # all entries commented parses to None — a watchlist-only user (no
+    # positions yet) is a legitimate /monitor state, and every reader treats
+    # None as empty. A fully ABSENT key stays rejected: that file is not
+    # shaped like a portfolio state at all.
+    holdings_ok = ("holdings" in pstate and holdings is None) or isinstance(holdings, dict) and all(
+        isinstance(k, str) and k.strip() and (
+            (isinstance(v, dict) and _is_pos_num(v.get("shares")))
+            or _is_pos_num(v)   # int-shorthand `NVDA: 100` — every reader supports it (fix-batch review MED-3)
+        )
         for k, v in holdings.items())
     watchlist = pstate.get("watchlist")
     watchlist_ok = watchlist is None or (isinstance(watchlist, list)
                                          and all(isinstance(t, str) and t.strip() for t in watchlist))
+    # Key presence is the attestation (fix-batch review HIGH-2, mirroring
+    # portfolio_log's write-gate): an ABSENT open_orders key means the
+    # broker's working orders were never considered — fail FAST here, not
+    # at Step 8 after the whole analysis ran. `open_orders: []` (or a bare
+    # `open_orders:` null) is the explicit "none" attestation.
+    if "open_orders" not in pstate:
+        raise ConfigError(
+            "portfolio-state.yaml has no `open_orders` key — sync your "
+            "broker's working orders into it, or write `open_orders: []` to "
+            "attest there are none (an absent key is how a working GTC "
+            "order goes unseen)")
     open_orders = pstate.get("open_orders")
     def _order_ok(o):
         # Price-field vocabulary mirrors validate._order_price (est_price /

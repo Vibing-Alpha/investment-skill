@@ -194,17 +194,23 @@ def _extract_thesis_snapshot(
     #     thesis-side drift; trust BQ (producer authority), warn loudly
     #   - Thesis has usd_converted cert, BQ says usd_native/legacy →
     #     suspicious (thesis can't manufacture a cert the producer didn't
-    #     emit); FAIL-CLOSE
+    #     emit); WARN loudly + trust BQ's view (the write PROCEEDS — this
+    #     is fail-VISIBLE, not fail-close; see _cert_authoritative_or_none)
     #   - Both have certs but different source_currency or fx_source →
-    #     FAIL-CLOSE (cross-layer drift)
+    #     WARN loudly (cross-layer drift surfaced) + persist BQ's view
+    # NOTE (whole-project review 2026-06-11 C16): an earlier version of
+    # this comment said "FAIL-CLOSE" for the last two cases; the code has
+    # always warned-and-proceeded with BQ authority. Do not "restore" a
+    # refusal here without an RFC — existing runs depend on the
+    # warn-and-trust-BQ semantics.
     snap["dl3c_mode"] = thesis.dl3c_mode
 
     def _cert_authoritative_or_none():
-        """Return (mode, cert_obj_or_None) to persist, or raise via warn+None.
+        """Return (mode, cert_obj_or_None) to persist.
 
-        Authority: bq (producer-side) wins on disagreement that is salvageable;
-        true drift (both have different certs) is fail-close via warning +
-        emitting bq's view.
+        Authority: bq (producer-side) wins on every disagreement; drift is
+        surfaced via [WARN] on stderr while the write proceeds with BQ's
+        view. There is NO raise/refusal path in this reconciliation.
 
         F18 (codex cycle 4): bq_load_state distinguishes:
           - no_path   → no prior BQ exists (legitimate first-thesis state)
@@ -411,11 +417,18 @@ def _compute_portfolio_before(
     missing_shares: List[str] = []
     for t, h in holdings_raw.items():
         if isinstance(h, dict):
-            if "shares" not in h:
+            # Key-presence alone missed `shares: null` (key present, value
+            # None) — the same invisible-position hazard via a different
+            # spelling (whole-project review 2026-06-11 C2).
+            if h.get("shares") is None:
                 missing_shares.append(t)
                 shares = None
             else:
                 shares = h["shares"]
+        elif h is None:
+            # bare `TICKER:` holding — no usable share count
+            missing_shares.append(t)
+            shares = None
         else:
             shares = h
         cb = h.get("cost_basis") if isinstance(h, dict) else None
@@ -866,11 +879,19 @@ def _enrich_orders(
     # Deep-copy each order dict so we never mutate the caller's blob.
     # `list(orders)` in the caller is a shallow copy; without this, the
     # est_* fields would leak back into blob["orders_proposed"][i].
+    from scripts.validate import _order_price
+
     out: List[Dict[str, Any]] = []
     for src in orders:
         o = dict(src)
         ticker = o.get("ticker")
-        px = o.get("limit_price") or (prices.get(ticker) if ticker else None)
+        # Canonical price extraction (est_price → limit_price → price →
+        # quote), shared with the validator — the old limit_price-or-quote
+        # chain costed an est_price-only order at the live quote while
+        # scripts.validate stress-projected it at est_price, so the audit
+        # record and the validation it attests to disagreed on cash impact
+        # (whole-project review 2026-06-11 C15a).
+        px = _order_price(o, prices if ticker else {}) or None
         shares = o.get("shares") or 0  # fail-open-ok: guarded by `if px and shares:` truthy check below — shares=0 skips notional computation
         if px and shares:
             notional = round(px * shares, 2)
@@ -996,9 +1017,14 @@ def _render_md(log: Dict[str, Any]) -> str:
         # broker-side in-flight orders next to the decision they may
         # contradict (the JSON snapshot alone was reviewer-invisible).
         for oo in d.get("open_orders_snapshot") or []:
+            # Canonical price-field vocabulary (C15b): an order in the
+            # {type: limit, limit_price: X} shape rendered "@ ?" when this
+            # line read only 'price' — the exact visibility this exists for.
+            from scripts.validate import _order_price
+            oo_px = _order_price(oo, {}) or "?"
             lines.append(
                 f"- ⚠ 在途单: {oo.get('type', '?')} {oo.get('shares', '?')}股 "
-                f"@ {oo.get('price', '?')} ({oo.get('duration', 'GTC')})"
+                f"@ {oo_px} ({oo.get('duration', 'GTC')})"
             )
         if d.get("report_refs"):
             refs = ", ".join(f"`{r}`" for r in d["report_refs"])
@@ -1466,13 +1492,14 @@ def cmd_write(args: argparse.Namespace) -> int:
             continue
         d["open_orders_snapshot"] = oo
         action = d.get("action")
-        # Both open-order shapes (mirrors validate._is_buy/_is_sell):
-        # {"type": "limit_sell"} AND {"action": "sell", "type": "limit"}.
-        def _order_is(o, side):
-            return (side in str(o.get("type", "")).lower()
-                    or str(o.get("action", "")).lower() == side)
-        has_sell = any(_order_is(o, "sell") for o in oo)
-        has_buy = any(_order_is(o, "buy") for o in oo)
+        # ONE implementation (producer-consumer rule #3): the previous
+        # inline closure mirrored validate._is_buy/_is_sell and had already
+        # diverged in type tolerance — when the side vocabulary next grows,
+        # a copy that isn't updated silently stops detecting direction
+        # conflicts (the exact MRAAY hold-beside-open-GTC-sell failure).
+        from scripts.validate import _is_buy, _is_sell
+        has_sell = any(_is_sell(o) for o in oo)
+        has_buy = any(_is_buy(o) for o in oo)
         if (action in ("hold", "add", "buy") and has_sell) or \
            (action in ("exit", "reduce") and has_buy):
             print(
@@ -1645,6 +1672,23 @@ def cmd_write(args: argparse.Namespace) -> int:
             "reflection": None,
         },
     }
+
+    # Write-gate == read-gate (whole-project review 2026-06-11 C14): prove
+    # the log we are about to persist LOADS through the same typed contract
+    # tomorrow's Step-0 review applies. The blob-shape validator is the
+    # early human-friendly diagnostic; THIS is the guarantee — the two can
+    # never drift apart again because the reader itself is the check.
+    try:
+        from scripts.schemas.decisions import validate_decisions
+        validate_decisions(log)
+    except ValueError as exc:   # SchemaError is a ValueError subclass
+        print(
+            f"portfolio_log: REFUSED — the assembled log fails the decisions "
+            f"schema that tomorrow's review must load it through: {exc}. "
+            f"Fix the blob (this error names the field) and re-run.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Render MD BEFORE any persistence — a render exception leaves no
     # partial JSON on disk. Both files then land via atomic tmp+rename

@@ -47,9 +47,15 @@ def load_universe(state_path: Path):
     cash = data.get("cash")
     rows, seen = [], set()
     for t, h in holdings.items():
-        h = h or {}
+        # int-shorthand (`NVDA: 100`) is a supported state shape in
+        # validate._get_shares / portfolio_log — mirror it here (C12;
+        # scripts/viz.py imports this with no config_gate preflight).
+        if isinstance(h, dict):
+            shares, cb = _f(h.get("shares")), _f(h.get("cost_basis"))
+        else:
+            shares, cb = _f(h), None
         rows.append({"ticker": t, "source": "holding",
-                     "shares": _f(h.get("shares")), "cost_basis": _f(h.get("cost_basis"))})
+                     "shares": shares, "cost_basis": cb})
         seen.add(t)
     for t in watchlist:
         if t in seen:
