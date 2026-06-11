@@ -3,6 +3,11 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.2.2 — 2026-06-12
+
+- allocate-bq-run: when a Cowork virtiofs/FUSE orphan dentry leaves reports/<T> stat-visible but uncreatable, the FATAL now appends the verified host-side Write re-materialize recipe (fail-close semantics unchanged).
+- score-business gotchas: document the three Cowork mount quirks (phantom directory, delete-blocked EPERM, in-place-overwrite truncates to old byte length).
+
 ## v1.2.1 — 2026-06-11
 
 - Safety gate hardening: present-but-null state/price data (bare holdings:/cash:/open_orders: keys, null prices from a failed fetch, shares: null) now fails closed with structured violations instead of crashing or silently passing

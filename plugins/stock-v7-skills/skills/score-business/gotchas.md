@@ -11,6 +11,57 @@ Accumulated failure patterns. Update as new issues emerge.
 > entries are tagged `→ Scoring action:` below — keep the two in sync (update
 > the action there, the data detail here).
 
+## Environment — Cowork mount quirks (Windows host + Linux sandbox)
+
+In Cowork the project folder is a Windows host directory mounted into the Linux
+sandbox via virtiofs/FUSE. That mount layer has three failure modes that **no
+`scripts/` change can fix** — root cause is the mount, not the skill. They
+affect **every skill that creates `reports/<TICKER>/<DATE>/`**, not just
+score-business; this is the canonical write-up, and `scripts/delta/resolver.py`
+also prints the phantom recipe inline at the point of failure. (feedback
+2026-06-12)
+
+### Phantom directory — `stat`-visible but `mkdir`-fails
+
+**Symptom.** `python3 -m scripts.delta.resolver allocate-bq-run --ticker MU`
+dies with `FATAL: cannot create report dir reports/MU/<DATE>: FileNotFoundError`.
+Inspect `reports/MU`: `stat` hits the inode, but `ls reports/` doesn't list it,
+`cd`/`mkdir -p` → "No such file or directory", `rm`/`rmdir` → "Operation not
+permitted". It's a stale virtiofs/FUSE **orphan dentry** — the mount's dentry
+cache drifted from the host. The sandbox cannot self-heal it (the same
+corruption once hit `reports/monitor`).
+
+**This is not a skill bug, and fail-closed is correct.** Do NOT redirect the
+run to `/tmp`/`$HOME` — they are ephemeral in Cowork, so the analysis evaporates
+at session end and the delta layer can never find it (rule #9 in
+`.claude/rules/skill-architecture.md`). The resolver's exit-2 + refusal to
+relocate is the right behavior.
+
+**Verified fix (2026-06-12).** Re-materialise the directory from the Windows
+**host** side, bypassing the broken Linux mount: use the harness **Write tool
+with a Windows path** to write any small file into the phantom dir, e.g.
+`reports\MU\.writetest`. That forces the host to re-create the entry and
+refreshes the mount cache; afterwards `mkdir` etc. work normally in the sandbox.
+Then re-run the skill.
+
+### Delete blocked
+
+`rm`/`rmdir` on a mount-corrupted entry → "Operation not permitted" (EPERM),
+even as owner. Don't script cleanup that assumes deletes succeed — surface the
+failure rather than retry-looping. A stuck entry usually clears after the
+host-side re-materialise above, or in a fresh session that remounts the folder.
+
+### In-place overwrite can truncate
+
+Overwriting an existing file in place on this mount can truncate the result to
+the **old** file's byte length (new content longer than old → silently cut off).
+So don't *assume* an in-place rewrite grows a file: for content that can grow —
+analysis artifacts, `summary.md`, `portfolio-state.yaml` edits — write to a
+**fresh path** (or have the harness Write the file from the host side, which
+bypasses the mount path) rather than patching in place, and **verify the byte
+length after writing** when it matters. If an artifact looks oddly truncated to
+a round or prior length, suspect this mount quirk, not a producer bug.
+
 ## Data Handling
 
 ### ADR Stocks

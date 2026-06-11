@@ -104,6 +104,36 @@ def _is_date_dirname(name: str) -> bool:
     return len(name) == 8 and name.isdigit()
 
 
+def _phantom_mount_ancestor(path: Path) -> Optional[Path]:
+    """First stat-visible-but-untraversable ancestor of ``path`` (or None).
+
+    Cowork's virtiofs/FUSE mount can leave an *orphan dentry*: an ancestor
+    directory whose inode still stats (``exists()`` is True) but which can no
+    longer be traversed or listed (``scandir`` raises) because the mount's
+    dentry cache drifted from the Windows host. ``mkdir(parents=True)`` then
+    fails even though the parent appears present, and the sandbox cannot
+    repair it. Detection keys on the *traverse* failure, not on a specific
+    errno, so it is robust across the ENOENT / EPERM the broken mount reports.
+    Pure diagnostics — must never raise out of the fatal handler.
+    """
+    import os as _os
+    for ancestor in path.parents:
+        try:
+            present = ancestor.exists()
+        except OSError:
+            present = True            # stat itself erroring is itself suspicious
+        if not present:
+            continue                  # genuinely absent → keep walking up
+        try:
+            if not ancestor.is_dir():
+                return None           # a non-dir in the way is not a Cowork orphan
+            _os.scandir(ancestor).close()
+            return None               # stat-visible AND traversable → cause is elsewhere
+        except OSError:
+            return ancestor           # stat-visible but won't open → orphan dentry
+    return None
+
+
 def _fatal_allocation_error(path: Path, exc: OSError) -> None:
     """Clean exit 2 with remediation when a report dir can't be created.
 
@@ -112,17 +142,34 @@ def _fatal_allocation_error(path: Path, exc: OSError) -> None:
     writing the analysis to /tmp — ephemeral in Cowork, so a full BQ+thesis
     run was lost at session end and the delta chain broke. The remediation
     line exists to stop that improvisation at the source.
+
+    Feedback 2026-06-12: when the failure is a phantom (orphan-dentry)
+    directory — `stat`-visible but `mkdir`-failing — append the verified
+    host-side re-materialise recipe so the agent doesn't thrash on a mount
+    fault it cannot fix from inside the sandbox.
     """
     import sys as _sys
-    print(
-        f"FATAL: cannot create report dir {path}: {type(exc).__name__}: {exc}\n"
-        f"  Do NOT redirect artifacts elsewhere (/tmp is EPHEMERAL in Cowork — "
-        f"the analysis would be lost at session end and the delta layer could "
-        f"never find it).\n"
-        f"  Fix the directory/mount (or pass --reports-root to a persistent "
-        f"path inside the project) and re-run.",
-        file=_sys.stderr,
+    lines = [
+        f"FATAL: cannot create report dir {path}: {type(exc).__name__}: {exc}",
+        "  Do NOT redirect artifacts elsewhere (/tmp is EPHEMERAL in Cowork — "
+        "the analysis would be lost at session end and the delta layer could "
+        "never find it).",
+    ]
+    orphan = _phantom_mount_ancestor(path)
+    if orphan is not None:
+        win = str(orphan).replace("/", "\\")
+        lines.append(
+            f"  Cowork mount note: '{orphan}' stats but cannot be traversed — a "
+            "stale virtiofs/FUSE dentry (orphan) the sandbox cannot repair. From "
+            "the WINDOWS HOST side, use the harness Write tool to write any small "
+            f"file into it (e.g. {win}\\.writetest); that re-materialises the "
+            "directory on the host and refreshes the mount cache. Then re-run."
+        )
+    lines.append(
+        "  Fix the directory/mount (or pass --reports-root to a persistent "
+        "path inside the project) and re-run."
     )
+    print("\n".join(lines), file=_sys.stderr)
     _sys.exit(2)
 
 

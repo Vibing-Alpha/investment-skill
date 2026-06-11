@@ -1,6 +1,6 @@
 {
   "name": "stock-v7-skills",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "US-stock investment analysis — business-quality → thesis → portfolio. Run /stock-v7-setup first.",
   "author": {
     "name": "Vibing Alpha"
