@@ -1042,15 +1042,24 @@ def fetch_news_data(ticker: str, limit: int = 10) -> AdapterResult:
         try:
             response = _make_request(url)
         except HttpStatusError as e:
-            # The FDS news endpoint returns HTTP 404 for tickers it does
-            # NOT cover (mid-caps like VSH), not a 200-with-empty-list.
-            # Pre-fix that 404 was caught by the outer `except Exception`
-            # and returned NOT_FOUND immediately, bypassing the Finnhub
-            # fallback below (which only fired on a real-empty primary).
-            # Route a 404 into the empty-response path so the existing
-            # fallback runs; let every other status (401/429/5xx)
-            # propagate unchanged to the canonical exception mapper.
-            if e.status == 404:
+            # The FDS news endpoint returns two distinct "can't serve news"
+            # statuses, BOTH of which must route to the Finnhub fallback
+            # (live probe 2026-06-16 against the real FDS API):
+            #   404 — ticker IS in FDS's universe but has no news (mid-caps
+            #         like VSH; class shares like MOG-A): /news 404s while
+            #         /prices/snapshot 200s.
+            #   400 — ticker is entirely OUTSIDE FDS's universe (foreign OTC
+            #         ADRs like MRAAY): EVERY endpoint 400s (news AND price).
+            # Pre-fix only 404 routed; a 400 fell through to `else: raise` →
+            # outer `except Exception` → canonical mapper → HTTP_STATUS
+            # FAILED, bypassing the Finnhub fallback below and silently
+            # zeroing news for the FDS-uncovered-ADR cohort even when Finnhub
+            # had the articles. Symbol normalization does NOT help here
+            # (same probe: MOG.A == MOG-A == 404; MRAAY/MOG/MRAA all 400) —
+            # FDS simply lacks the symbol. Route 400 + 404 into the empty-
+            # response path so the existing fallback runs; let every other
+            # status (401/403/429/5xx) propagate unchanged to the mapper.
+            if e.status in (400, 404):
                 response = {"news": []}
             else:
                 raise

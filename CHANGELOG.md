@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.2.3 — 2026-06-16
+
+- Fix: news for FDS-uncovered foreign ADRs (e.g. MRAAY) is no longer silently zeroed — an FDS news HTTP 400 (ticker outside FDS's universe) now falls back to Finnhub, matching the existing 404 behavior. 401/403/429/5xx still surface as errors.
+
 ## v1.2.2 — 2026-06-12
 
 - allocate-bq-run: when a Cowork virtiofs/FUSE orphan dentry leaves reports/<T> stat-visible but uncreatable, the FATAL now appends the verified host-side Write re-materialize recipe (fail-close semantics unchanged).
