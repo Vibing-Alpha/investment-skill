@@ -300,7 +300,17 @@ _ADVICE_EN = re.compile(
     r"|go(?:ing)? long|take profits?|lock in (?:gains?|profits?)|scale (?:in|out)"
     r"|add to (?:the )?position|(?:increase|decrease|raise|cut|trim|lighten) (?:the )?(?:exposure|position|stake))\b",
     re.IGNORECASE)
-_ADVICE_ZH = re.compile(r"(买入|卖出|减仓|加仓|清仓|止损|部署|仓位|目标仓位|持有|继续持有|增持)")
+# `增持` / `持有` / `部署` are intentionally NOT listed: as bare tokens (Chinese has no word
+# boundaries, so this is a substring search) they collided with factual prose a reason
+# legitimately cites — and the advice sense each targeted stays caught by a more specific token:
+#   增持 → 新增持仓 (新增+持仓), 高管/机构增持 (insider/institutional accumulation);
+#          advice still caught by 加仓 / EN `overweight`·`add to position`
+#   持有 → 持有人 (holder), 机构持有股份, 高管持有 (ownership facts);
+#          advice still caught by `继续持有` + EN `hold`
+#   部署 → 部署新产能 (capacity/cloud deployment); advice still caught by EN `deploy`
+# Per this block's own rule: list ONLY UNAMBIGUOUS terms; a short token that collides with
+# factual prose is a false-positive treadmill, not coverage.
+_ADVICE_ZH = re.compile(r"(买入|卖出|减仓|加仓|清仓|止损|仓位|目标仓位|继续持有)")
 # Only reject a percentage in an ALLOCATION context — a factual "price down 12%" is fine.
 _PCT_WEIGHT = re.compile(r"(target\s+weight|%\s*of\s+(the\s+)?portfolio|目标仓位|仓位\s*\d+\s?%)", re.IGNORECASE)
 # Allow-rule: action-ish wording is OK only as an explicit route handoff.

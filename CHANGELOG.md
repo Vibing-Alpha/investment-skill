@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.2.4 — 2026-06-19
+
+- fix(monitor): advice-scan no longer false-flags factual 增持/持有/部署 prose — 新增持仓 / 机构持有股份 / 部署新产能 are facts a monitor reason cites, not trade advice; advice senses stay caught by 加仓·继续持有 + EN hold/deploy/overweight
+
 ## v1.2.3 — 2026-06-16
 
 - Fix: news for FDS-uncovered foreign ADRs (e.g. MRAAY) is no longer silently zeroed — an FDS news HTTP 400 (ticker outside FDS's universe) now falls back to Finnhub, matching the existing 404 behavior. 401/403/429/5xx still surface as errors.

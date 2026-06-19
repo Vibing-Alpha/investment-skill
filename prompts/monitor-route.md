@@ -101,7 +101,7 @@ rejects authored text containing action words, so phrase reasons around the SKIL
 EVIDENCE, e.g.:
 - GOOD: "support-break invalidation fired on material news → thesis needs a fresh read; route
   to /investment-thesis because a thesis decision is required".
-- BAD (will be rejected): "reduce NVDA", "增持", "目标仓位 20%", and avoid bare "exit"/"仓位"/
+- BAD (will be rejected): "reduce NVDA", "加仓", "目标仓位 20%", and avoid bare "exit"/"仓位"/
   "hold"/"buy"/"sell" even in factual phrasing — say "the structural-support invalidation
   condition" not "the exit condition", "position context" not "仓位".
 Allocation/cash/exposure questions are NOT yours — route them to `/portfolio`.
