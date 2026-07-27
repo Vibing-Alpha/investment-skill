@@ -915,6 +915,44 @@ def compute_historical_multiples(
     # Add current snapshot multiples from metrics_snapshot if available
     ms = financial_data.get("metrics_snapshot", {})
     current_from_api: dict = {}
+    # Period gate. Every multiple on this row is `market cap / <period flow>`,
+    # so a QUARTERLY row yields multiples roughly 4x the TTM truth — and
+    # `prompts/evaluate-valuation.md` tells the valuation agent to cross-check
+    # its own TTM series against `current_from_api`, which is precisely where a
+    # 4x-inflated number does damage.
+    #
+    # Named failure mode this prevents: a `quarterly`-labelled row's basis is
+    # NOT knowable from the label, because the provider redefined it mid-2026.
+    # Measured on the same tickers:
+    #   stored 2026-05 artifacts  APH pe 40.64 / AVGO 84.82 / AMD 80.74  (TTM-basis)
+    #   live 2026-07 `period=quarterly`  APH 187.77 / AVGO 206.65 / AMD 492.84 (~4x, quarterly-basis)
+    # Same request, same field name, silently different denominator. So a stored
+    # quarterly row may be roughly right (old semantics) or ~4x inflated (new) —
+    # and nothing in the artifact distinguishes them. Fail closed rather than
+    # serve a multiple whose basis cannot be established.
+    #
+    # This matters because the delta layer REUSES a prior `data/` directory on a
+    # partial/no-op re-run, so those rows keep flowing into new analyses.
+    # Declaring `period: "ttm"` on the producer was not enough — until now
+    # nothing in the repo read `metrics_snapshot["period"]`.
+    #
+    # `None` is accepted: the yfinance-only path builds its dict without a
+    # period key, and its values are genuinely TTM (`trailingPE`,
+    # `priceToSalesTrailing12Months`).
+    _ms_period = ms.get("period")
+    _ms_period_norm = (str(_ms_period).strip().lower()
+                       if isinstance(_ms_period, str) else _ms_period)
+    stale_period_warning: Optional[str] = None
+    if _ms_period_norm not in (None, "ttm"):
+        stale_period_warning = (
+            f"metrics_snapshot.period is {_ms_period!r}, not 'ttm' — the "
+            f"denominator basis of these multiples cannot be established "
+            f"(the provider redefined its {_ms_period_norm} window mid-2026, "
+            f"so such a row may be TTM-basis or ~4x inflated) and they are NOT "
+            f"comparable to summary.*.current. current_from_api omitted; "
+            f"re-fetch this ticker's data/ to refresh it."
+        )
+        ms = {}
     field_map = {
         "pe": "price_to_earnings_ratio",
         "ps": "price_to_sales_ratio",
@@ -965,6 +1003,19 @@ def compute_historical_multiples(
         and newest_reported_period > latest_aligned_report_period
     )
     out_warnings = list(fx_warnings_to_propagate)
+    if stale_period_warning:
+        out_warnings.append(stale_period_warning)
+        # Downgrade the status too. `current_from_api` silently becoming {}
+        # under status="ok" leaves no signal a consumer acts on.
+        #
+        # Note this required BOTH halves: the status downgrade here AND a
+        # matching read requirement in prompts/evaluate-valuation.md (the
+        # "Three Anchors" section), which previously read `warnings` only for
+        # fcf_inputs.json and nothing at all for this file. Emitting a signal
+        # into a channel no consumer reads is not a fix — verify the read side
+        # exists before claiming the producer side is enough.
+        if status == "ok":
+            status = "ok_with_warnings"
     lag_fields: dict = {}
     if current_lags_newest_reported:
         lag_fields = {

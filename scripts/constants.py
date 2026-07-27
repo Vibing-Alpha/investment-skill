@@ -38,6 +38,11 @@ CATEGORIES = {
 
 BASE_URL = "https://api.financialdatasets.ai"
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+# FMP's newer "stable" surface. Used only where v3/v4 lack a field we need:
+# the revenue-segmentation endpoints carry `reportedCurrency` there, which the
+# v4 `structure=flat` form omits — and a segment row with an assumed-USD
+# currency is exactly the DL3a §2 hazard for non-USD ADRs.
+FMP_STABLE_BASE_URL = "https://financialmodelingprep.com/stable"
 YAHOO_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 MIN_FILING_ITEM_CHARS = 1000

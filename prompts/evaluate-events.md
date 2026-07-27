@@ -128,15 +128,50 @@ Classify net institutional behavior from 13F data:
 - `accumulating`: net new positions or significant increases
 - `distributing`: net position reductions or exits
 - `stable`: feed PRESENT (has `holdings`) but no meaningful change
-- `unknown`: `holdings` key absent / empty / placeholder, no 13F coverage, or
-  fetch failed. Absence of signal, NOT `stable`; common on ADRs. Tag
-  `[API: 08_institutional]` with note "feed unavailable". `unknown` MUST NOT tilt
-  the Overall Event Bias (§5). (`stable` requires a PRESENT, non-empty `holdings`
-  feed showing no meaningful change.)
+- `unknown`: no usable direction. TWO distinct causes reach this bucket and the
+  note MUST say which — they are not interchangeable:
+  - **feed absent** — `holdings` key absent / empty / placeholder, no 13F
+    coverage, or fetch failed. Common on ADRs. Note: "feed unavailable".
+  - **no baseline** — the feed is PRESENT and populated, but nothing exists to
+    compare it against (see the flow rule below). Note: "13F panel present
+    (N holders, period P) but no prior-period baseline — direction not
+    determinable", and still report the holder base itself. Writing "feed
+    unavailable" here is factually false about a healthy feed and throws away
+    real ownership data the reader needs.
 
-Note that 13F data is delayed (filed up to 45 days after quarter end).
-Factor this staleness into your confidence assessment. Surface notable
-changes — a top-10 holder exiting matters more than a small fund adding.
+  Either cause is absence of signal, NOT `stable`, and `unknown` MUST NOT tilt
+  the Overall Event Bias (§5). (`stable` requires a PRESENT, non-empty feed
+  that you actually COMPARED against a baseline and found unchanged.)
+
+**Read the panel's shape before reading its numbers.** The file carries
+`row_count`, `holder_count`, `report_periods`, `single_vintage` and
+`latest_report_period` alongside `holdings`. Three consequences:
+
+- **One snapshot cannot show flow.** Each row is that filer's LATEST filing,
+  and there is no prior-period column. `accumulating` / `distributing` require
+  an actual comparison — a prior run's artifact, or a change explicitly stated
+  in a source. Absent that, the honest classification is `unknown`, not
+  `stable`. `stable` means "compared and found unchanged", never "present but
+  not compared".
+- **`row_count` is not `holder_count`.** One filer can occupy several rows
+  (common stock plus option lines). Aggregate by `investor` / `filer_cik`, and
+  report holder counts from `holder_count`.
+- **Option lines are not equity.** Check `security_type` on every row:
+  `common_stock`, `call_option`, `put_option`. Never sum `shares` across them
+  — an option line's `shares` is notional underlying, and on active names it
+  can rival the equity positions (observed: 3 call + 2 put lines among a
+  20-row panel).
+  A large put line is a bearish datapoint, not a holding.
+
+`single_vintage: false` means rows come from different quarters, so
+cross-holder totals are not a same-date ownership figure — say so rather than
+presenting a summed percentage.
+
+Note that 13F data is delayed (filed up to 45 days after quarter end), and
+that filings trickle in across that window, so the most recent quarter is
+represented only by early filers. Factor this staleness into your confidence
+assessment. Surface notable changes — a top-10 holder exiting matters more
+than a small fund adding.
 
 #### Analyst Sentiment (`data/06_analyst_estimates.json` + WebSearch)
 

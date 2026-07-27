@@ -1877,12 +1877,37 @@ def _reconcile_financials_currency(financial_output: dict) -> None:
 # _main_impl -- core orchestration
 # ---------------------------------------------------------------------------
 
+def _resolve_requested_categories(
+    categories_arg: Optional[str],
+) -> Tuple[Optional[set], set]:
+    """Parse `--categories` into `(requested_or_None, unknown_values)`.
+
+    DL7 #2 — fail-open-silent-category-gating: unknown values must be rejected
+    before any category-gated work begins. Empty-after-strip (e.g.
+    `--categories ""`) parses to an empty set and must fall back to "fetch
+    all"; leaving it as the empty set would silently mean "fetch nothing".
+
+    Split out of `_main_impl` so the guard is directly assertable. It was
+    previously reachable only by spawning a real `scripts.fetch` subprocess,
+    which meant its accepted-value test hit the live APIs and could only fail
+    inside a narrow timing window — deleting the guard outright would have
+    left that test green.
+    """
+    if not categories_arg:
+        return None, set()
+    requested = {c.strip() for c in categories_arg.split(",") if c.strip()}
+    if not requested:
+        return None, set()
+    return requested, requested - KNOWN_CATEGORIES
+
+
 def _main_impl(
     args: argparse.Namespace,
     fetch_filing_data_fn: Optional[Callable] = None,
     run_yfinance_fallback_fn: Optional[Callable] = None,
     fetch_filing_metadata_from_fmp_fn: Optional[Callable] = None,
     run_fmp_fallback_fn: Optional[Callable] = None,
+    fetch_segmented_from_fmp_fn: Optional[Callable] = None,
 ) -> int:
     """Core implementation accepting injected callables.
 
@@ -1927,7 +1952,6 @@ def _main_impl(
         fetch_insider_data,
         fetch_analyst_estimates,
         fetch_earnings_snapshot,
-        fetch_earnings_press_releases,
         fetch_institutional_ownership,
         fetch_interest_rates_snapshot,
         fetch_interest_rates_historical,
@@ -1989,28 +2013,16 @@ def _main_impl(
     # ------------------------------------------------------------------
     # Delta-era: category gating (subset fetch)
     # ------------------------------------------------------------------
-    requested_categories = None
-    if getattr(args, "categories", None):
-        requested_categories = set(
-            c.strip() for c in args.categories.split(",") if c.strip()
+    requested_categories, _unknown_categories = _resolve_requested_categories(
+        getattr(args, "categories", None)
+    )
+    if _unknown_categories:
+        print(
+            f"FATAL: unknown categories: {sorted(_unknown_categories)}. "
+            f"Known: {sorted(KNOWN_CATEGORIES)}",
+            file=sys.stderr,
         )
-        # DL7 #2 — fail-open-silent-category-gating: reject unknown values
-        # before any category-gated work begins. Empty-after-strip (e.g.
-        # `--categories ""`) parses to an empty set and falls through to the
-        # "fetch all" path below (requested_categories left as the empty set
-        # would mean "fetch nothing" — preserve legacy "fetch all" by resetting
-        # to None when the user supplied an effectively-empty arg).
-        if not requested_categories:
-            requested_categories = None
-        else:
-            unknown = requested_categories - KNOWN_CATEGORIES
-            if unknown:
-                print(
-                    f"FATAL: unknown categories: {sorted(unknown)}. "
-                    f"Known: {sorted(KNOWN_CATEGORIES)}",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
+        sys.exit(2)
 
     def _should_fetch(cat_prefix: str) -> bool:
         if requested_categories is None:
@@ -2497,6 +2509,19 @@ def _main_impl(
     if _should_fetch("02_financial_data"):
         print("\n[F2] Fetching Segmented Revenues...", file=sys.stderr)
         segmented_result = fetch_segmented_revenues(ticker)
+        # FDS `/financials/segments` answers HTTP 400 ("Invalid ticker") for
+        # every name outside its segmentation coverage — AAPL included — so
+        # this category degraded to PARTIAL and the revenue mix fell back to
+        # prose-scraped filing notes. Try FMP's structured segmentation before
+        # accepting that. FMP misses foreign ADRs, which stay FAILED and reach
+        # the filing-notes promotion below unchanged.
+        segmented_source = None
+        if segmented_result.status == "FAILED" and fetch_segmented_from_fmp_fn:
+            fmp_segmented = fetch_segmented_from_fmp_fn(ticker)
+            if fmp_segmented is not None and fmp_segmented.status == "PASSED":
+                segmented_result = fmp_segmented
+                segmented_source = "fmp_fallback"
+                print("    FMP segmentation fallback: filled", file=sys.stderr)
         segmented_data = segmented_result.data if isinstance(segmented_result.data, dict) else {}
         has_10k_revenue_notes = "10k_revenue_notes" in filing_content
         has_10q_revenue_notes = "10q_revenue_notes" in filing_content
@@ -2504,6 +2529,7 @@ def _main_impl(
             segmented_result,
             extra_keys={
                 "periods": segmented_data.get("periods", 0),
+                **({"data_source": segmented_source} if segmented_source else {}),
                 "filing_revenue_notes": {
                     "10k_available": has_10k_revenue_notes,
                     "10q_available": has_10q_revenue_notes,
@@ -2594,73 +2620,29 @@ def _main_impl(
         print("\n[J] Fetching Earnings Data...", file=sys.stderr)
         from scripts.sources.common import normalize_currency as _normalize_currency_j
         earnings_result = fetch_earnings_snapshot(ticker)
-        press_result = fetch_earnings_press_releases(ticker)
         earnings_data = earnings_result.data if isinstance(earnings_result.data, dict) else {}
-        press_data = press_result.data if isinstance(press_result.data, dict) else {}
+        # 2026-07-26: the `/earnings/press-releases` fetch was REMOVED. The FDS
+        # endpoint is retired (HTTP 404 "the endpoint does not exist"), so it
+        # failed on every run — and via the ISS-011 combined-status matrix that
+        # single dead call pinned the whole `earnings` category at PARTIAL,
+        # which in turn kept every fetch off a clean PASSED. Nothing consumed
+        # the data: no prompt, skill, rule, or script reads `press_releases`
+        # (only `audit_fail_open`'s numeric-suffix allowlist mentions the count
+        # field). Replacing it with a SEC 8-K EX-99.1 adapter would have added
+        # a money-path adapter to feed a field with no reader — the machinery
+        # CLAUDE.md's anti-ratchet guard exists to prevent. The keys are kept
+        # (empty) so the artifact shape is unchanged for anything reading it
+        # positionally.
         earnings_combined = {
             "earnings": earnings_data,
             "currency": _normalize_currency_j(earnings_data.get("currency")),
-            "press_releases": press_data.get("press_releases", []),
-            "press_releases_count": press_data.get("count", 0),
+            "press_releases": [],
+            "press_releases_count": 0,
         }
-        # ISS-011 (Cycle 4 backlog): combined-status matrix.
-        # Pre-fix used earnings_result.status as the top-level "earnings"
-        # category status, demoting press_releases failure to extra_key
-        # only — consumers seeing the top-level PASSED couldn't tell that
-        # press_releases had failed. Now combine:
-        #   both PASSED → PASSED
-        #   one PASSED + one FAILED → PARTIAL
-        #   both FAILED → FAILED
-        earnings_status = earnings_result.status
-        press_status = press_result.status
-        if earnings_status == "PASSED" and press_status == "PASSED":
-            combined_status = None  # let result envelope drive (PASSED)
-        elif earnings_status == "FAILED" and press_status == "FAILED":
-            combined_status = "FAILED"
-        elif earnings_status in ("PASSED", "PARTIAL") and press_status == "FAILED":
-            combined_status = "PARTIAL"
-        elif earnings_status == "FAILED" and press_status in ("PASSED", "PARTIAL"):
-            combined_status = "PARTIAL"
-        else:
-            # Either both PARTIAL, or one PASSED one PARTIAL — either way PARTIAL
-            combined_status = "PARTIAL"
-        # Aggregate error info when there was any non-PASSED component
-        earnings_extra = {
-            "press_releases_status": press_status,
-            "press_releases_count": press_data.get("count", 0),
-        }
-        if press_result.error is not None:
-            earnings_extra["press_releases_error_code"] = press_result.error.code.value
-            earnings_extra["press_releases_error_detail"] = press_result.error.detail
-        # ISS-220 SF-H (Loop35 cycle 1): promote child error to canonical
-        # top-level `error_code`/`error_detail` whenever combined_status
-        # is non-PASSED. Pre-fix only earnings (primary) error promoted;
-        # press_releases (secondary) error stayed nested under
-        # `press_releases_error_code` and generic consumers reading
-        # `category_statuses["earnings"]["error_code"]` saw None even
-        # though combined was PARTIAL.
-        if combined_status is not None:
-            # Prefer primary (earnings) error when both present;
-            # fall back to secondary (press) when primary succeeded.
-            primary_err = earnings_result.error
-            secondary_err = press_result.error
-            chosen_err = primary_err if primary_err is not None else secondary_err
-            if chosen_err is not None:
-                earnings_extra["error_code"] = chosen_err.code.value
-                earnings_extra["error_detail"] = chosen_err.detail
-        category_statuses["earnings"] = _derive_category_status(
-            earnings_result,
-            override_status=combined_status,
-            extra_keys=earnings_extra,
-        )
+        category_statuses["earnings"] = _derive_category_status(earnings_result)
         print(
             f"    Earnings: {earnings_result.status} "
             f"(period={earnings_data.get('report_period', '?')})",
-            file=sys.stderr,
-        )
-        print(
-            f"    Press releases: {press_result.status} "
-            f"({press_data.get('count', 0)} releases)",
             file=sys.stderr,
         )
     else:
@@ -3167,7 +3149,9 @@ def _main_impl(
             print(
                 f"    ADR EPS check: "
                 f"ratio~={adr_eps.get('estimated_ratio')}:1, "
-                f"adjustment={'needed' if adr_eps.get('needs_ratio_adjustment') else 'not needed'}",
+                # None = the cross-validation did not run (currency basis);
+                # it must not print as an affirmative "not needed".
+                f"adjustment={'unknown' if adr_eps.get('needs_ratio_adjustment') is None else ('needed' if adr_eps.get('needs_ratio_adjustment') else 'not needed')}",
                 file=sys.stderr,
             )
 
@@ -3601,6 +3585,7 @@ def _build_di_wrappers(fmp_api_key: str):
         _fetch_filing_metadata_from_fmp_impl,
         _fetch_filing_date_impl,
         _run_fmp_fallback_impl,
+        fetch_segmented_revenues_from_fmp,
     )
 
     yf_module = None
@@ -3644,8 +3629,15 @@ def _build_di_wrappers(fmp_api_key: str):
             as_of_date=as_of_date,
         )
 
+    def fetch_segmented_from_fmp(ticker):
+        # No key -> no fallback; the FDS failure stands and fetch.py promotes
+        # to filing revenue notes exactly as before.
+        if not fmp_api_key:
+            return None
+        return fetch_segmented_revenues_from_fmp(ticker, fmp_api_key=fmp_api_key)
+
     return (fetch_filing_data, run_yfinance_fallback, fetch_fmp_metadata,
-            run_fmp_fallback)
+            run_fmp_fallback, fetch_segmented_from_fmp)
 
 
 # ---------------------------------------------------------------------------
@@ -3660,13 +3652,14 @@ def main() -> None:
     args = parse_args()
     fmp_api_key = os.environ.get("FMP_API_KEY", "")
     (fetch_filing_data_fn, run_yfinance_fallback_fn, fetch_fmp_metadata_fn,
-     run_fmp_fallback_fn) = _build_di_wrappers(fmp_api_key)
+     run_fmp_fallback_fn, fetch_segmented_from_fmp_fn) = _build_di_wrappers(fmp_api_key)
     exit_code = _main_impl(
         args,
         fetch_filing_data_fn=fetch_filing_data_fn,
         run_yfinance_fallback_fn=run_yfinance_fallback_fn,
         fetch_filing_metadata_from_fmp_fn=fetch_fmp_metadata_fn,
         run_fmp_fallback_fn=run_fmp_fallback_fn,
+        fetch_segmented_from_fmp_fn=fetch_segmented_from_fmp_fn,
     )
     sys.exit(exit_code)
 

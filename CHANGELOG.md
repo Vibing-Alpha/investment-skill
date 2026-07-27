@@ -3,6 +3,14 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.3.0 — 2026-07-27
+
+- fix: data fetching works again behind a proxy — the HTTP layer was pinned to a direct connection, so on hosts that reach the providers only via a local/corporate proxy every price and macro call came back HTTP 403 and fetch reported FAILED with empty price data
+- fix (IMPORTANT — re-run affected analyses): valuation multiples were computed on a SINGLE-QUARTER denominator, making P/E, P/S and EV/EBITDA roughly 4x too high in current_from_api, which the valuation prompt cross-checks against your own TTM series. Metrics now use the TTM window on both the primary and the FMP fallback. Any investment_thesis produced before this release carries the inflated figures — re-run /investment-thesis for tickers you still rely on
+- fix: institutional 13F data was failing outright — the provider retired the endpoint (HTTP 410). Migrated, and the panel now reports holder_count separately from row_count, flags option lines (calls/puts) so they are never summed as equity, drops filings more than a year stale, and states which report periods it spans
+- fix: segmented revenue no longer degrades to prose-scraped filing notes when the primary returns no coverage — an FMP fallback supplies structured product and geography rows, and a failure in one dimension no longer discards the other
+- fix: EPS consistency check no longer emits false warnings — it now matches whichever share basis the provider used and skips comparisons whose currency or per-share basis cannot be established, instead of comparing across them
+
 ## v1.2.4 — 2026-06-19
 
 - fix(monitor): advice-scan no longer false-flags factual 增持/持有/部署 prose — 新增持仓 / 机构持有股份 / 部署新产能 are facts a monitor reason cites, not trade advice; advice senses stay caught by 加仓·继续持有 + EN hold/deploy/overweight

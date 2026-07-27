@@ -1056,6 +1056,12 @@ def yfinance_fill_metrics(  # adapter-helper-ok: fill helper; DL3 decides wrap/i
         existing_metrics = {
             "data_source": "yfinance",
             "ticker": yf_ticker_obj.ticker,
+            # Declare the window. Yahoo's mapped multiples are trailing
+            # (`trailingPE`, `priceToSalesTrailing12Months`, `trailingEps`), so
+            # this row IS a TTM row and must say so — `historical_multiples`
+            # gates `current_from_api` on this field to keep stale
+            # quarterly-basis artifacts out of the valuation cross-check.
+            "period": "ttm",
         }
 
     # ISS-153 (Loop17 cycle 1 fresh-session-4): UNKNOWN sentinel instead
@@ -1083,9 +1089,14 @@ def yfinance_fill_metrics(  # adapter-helper-ok: fill helper; DL3 decides wrap/i
         "bookValue": "book_value_per_share",
         "currentRatio": "current_ratio",
         "quickRatio": "quick_ratio",
-        "revenueGrowth": "revenue_growth",
-        "earningsGrowth": "earnings_growth",
-        "pegRatio": "peg_ratio",
+        # DELIBERATELY NOT MAPPED (2026-07-26): `revenueGrowth` / `earningsGrowth`
+        # are Yahoo's MOST-RECENT-QUARTER year-over-year figures and `pegRatio`
+        # is its 5-YEAR FORWARD estimate. metrics_snapshot is a TTM row, so
+        # back-filling them here mixes windows inside one row — e.g. quarters
+        # [100,100,100,200] vs [100,100,100,100] give a TTM YoY of 25% while
+        # Yahoo reports the latest quarter's 100%. FMP nulls both growth fields,
+        # so these were exactly the ones yfinance filled. Leaving them null is
+        # the fail-closed choice: absent means unknown, not a wrong number.
         "marketCap": "market_cap",
         "payoutRatio": "payout_ratio",
     }

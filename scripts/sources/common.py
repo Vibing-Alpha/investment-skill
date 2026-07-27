@@ -646,17 +646,38 @@ class HttpPolicy:
     # legacy ratio-based default; explicit int caps decompressed
     # output to that absolute byte count.
     max_decompressed_bytes: int | None = None
-    # ISS-220 SF-G (Loop35 cycle 1): default-disable urllib's ambient
-    # ProxyHandler. Pre-fix `urllib.request.build_opener(...)` picked
-    # up `HTTP_PROXY`/`HTTPS_PROXY` from os.environ → all DL1 traffic
-    # could be silently routed through an attacker-controlled proxy,
-    # bypassing _check_ssrf / host-pin / DNS-pin. The .env loader
-    # (now allowlisted by SF-G) cannot inject proxy vars, but
-    # OS-level env is still under attacker control in shared hosts.
-    # "disabled" (default) installs `ProxyHandler({})` which forces
-    # direct connection. "ambient" preserves urllib's default
-    # behavior (env + system config) for opt-in dev/MITM-debug use.
-    proxy_strategy: str = "disabled"
+    # ISS-220 SF-G (Loop35 cycle 1) introduced this field and defaulted it
+    # to "disabled": `urllib.request.build_opener(...)` picks up
+    # `HTTP_PROXY`/`HTTPS_PROXY` from os.environ, so on a SHARED host an
+    # attacker with OS-env control could silently route all DL1 traffic
+    # through their own proxy. `ProxyHandler({})` forced a direct connection.
+    #
+    # 2026-07-26 — default REVERTED to "ambient" (operator decision).
+    # SF-G's threat model (hostile co-tenant on a shared box) does not match
+    # how this tool is actually deployed: a single operator, on their own
+    # machine, who frequently reaches the data providers ONLY through a
+    # local proxy. Under "disabled" that operator's traffic left on the raw
+    # egress IP, which Yahoo answers with HTTP 403 — `fetch` returned FAILED
+    # with an empty `01_price_data.json` and `scripts.macro` produced
+    # `ticker_prices: {T: None}` for the entire portfolio. A security
+    # control that makes the money-path unusable in the normal deployment
+    # is not a net win.
+    #
+    # What still runs on every hop: `_check_ssrf` (scheme + suffix allowlist +
+    # public-IP check) and the auth host-pin, which refuses to attach API keys
+    # off the pinned host. Be precise about what that buys once a proxy is in
+    # path, though: urllib connects to the PROXY, so the proxy resolves and
+    # reaches the target. The public-IP check and the DNS pin therefore still
+    # validate the URL, but no longer bind the actual egress — the pin is
+    # effectively a no-op for the proxied hop. What IS accepted: the configured
+    # proxy sees the request, including the auth header, and is trusted to
+    # reach the host the URL names — exactly as the operator's browser already
+    # trusts it.
+    #
+    # "ambient" (default) preserves urllib's default behavior (env + system
+    # config). "disabled" installs `ProxyHandler({})` and remains available
+    # as an explicit opt-out for deployments that want SF-G's guarantee.
+    proxy_strategy: str = "ambient"
 
     def __post_init__(self):
         # H-B fix: module-level policy singletons (FD_API_POLICY, SEC_POLICY, etc.)
@@ -1297,13 +1318,12 @@ def http_get(
                     def redirect_request(self, req, fp, code, msg, hdrs, newurl):
                         raise urllib.request.HTTPError(newurl, code, msg, hdrs, fp)
 
-                # ISS-220 SF-G (Loop35 cycle 1): disable ambient proxy
-                # by default. `ProxyHandler({})` forces direct connection
-                # — urllib without it would honor `HTTP_PROXY` env vars
-                # and route auth-bearing traffic through an unvetted
-                # proxy, bypassing all SSRF / host-pin / DNS-pin
-                # defenses. "ambient" mode opts back in for dev/MITM
-                # debugging.
+                # Proxy handling — see the `proxy_strategy` field on
+                # HttpPolicy for the full rationale (ISS-220 SF-G, and its
+                # 2026-07-26 default revert). "ambient" (default) installs
+                # NO ProxyHandler, so urllib honors `HTTP_PROXY` /
+                # `HTTPS_PROXY` and the system proxy config. "disabled"
+                # pins `ProxyHandler({})` to force a direct connection.
                 handlers = [_NoRedirectHandler]
                 if policy.proxy_strategy == "disabled":
                     handlers.append(urllib.request.ProxyHandler({}))

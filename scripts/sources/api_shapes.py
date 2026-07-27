@@ -472,35 +472,23 @@ FD_EARNINGS_SHAPE = {
 
 # v24 correction: removed per-item `"ticker": str` (same pattern as
 # FD_NEWS_SHAPE — unverified per-item ticker presence, defensive drop).
-FD_PRESS_SHAPE = {
-    # ISS-179 (Loop23 cycle 1 fresh-session-10): fetch_earnings_press_
-    # releases emits the whole row unchanged. Pre-fix shape only validated
-    # title+date, so url/source/summary type drift slipped through into
-    # PASSED envelope. Mirrors ISS-175 (Loop22) FD_NEWS_SHAPE fix.
-    "press_releases": [{
-        "title": str,
-        "date": str,
-        "url": Optional_(str),
-        "source": Optional_(str),
-        "summary": Optional_(str),
-    }],
-}
 
-# v24 correction: removed per-item `"ticker": str`. Real holdings items
-# (per 08_institutional.json fixture) carry only
-# `investor/market_value/price/report_period/security_type/shares`;
-# no `ticker` at the item level. Original shape would SHAPE_MISMATCH.
+# 2026-07-26: `/institutional-ownership` was retired (HTTP 410) in favour of
+# `/institutional-holdings`; the envelope key and the row columns both changed
+# (investor -> filer_name, security_type -> title_of_class). Rows DO carry a
+# per-item `ticker` on the new endpoint, but it is not required here — the
+# shape only pins what the producer emits and consumers rely on.
 FD_INST_SHAPE = {
     # ISS-181 (Loop24 cycle 1 fresh-session-11): fetch_institutional_
     # ownership emits the whole row via _emit_with_numeric_coerce —
-    # numeric fields (shares/market_value/price) are coerced, but
-    # str fields (investor/security_type) were unvalidated. A
-    # `{"investor": ["bad"]}` drift slipped through PASSED with the
-    # list-valued investor in holdings. Validate emitted str fields.
-    "institutional_ownership": [{
+    # numeric fields (shares/value_usd/reported_price) are coerced, but
+    # str fields were unvalidated. A `{"filer_name": ["bad"]}` drift
+    # slipped through PASSED with the list-valued name in holdings.
+    # Validate emitted str fields.
+    "institutional_holdings": [{
         "report_period": str,
-        "investor": Optional_(str),
-        "security_type": Optional_(str),
+        "filer_name": Optional_(str),
+        "title_of_class": Optional_(str),
     }],
 }
 
@@ -927,6 +915,50 @@ FD_FILINGS_ITEMS_SHAPE = {
 # `.get()` in the converters, so only the keys the converter REQUIRES to
 # build report_period / fiscal_period are validated as `str`.
 # ---------------------------------------------------------------------------
+# 2026-07-26: the FMP revenue-segmentation rows the `stable` surface returns.
+# The sibling FDS producer validates its segment payload via FD_SEGMENTED_SHAPE;
+# without this the new FMP path was strictly weaker — a drifted `date` (list) or
+# `fiscalYear` (bool) reached a PASSED envelope and produced rows like
+# `fiscal_period="{'bad': 1}-BAD"`.
+#
+# `date` is the load-bearing field and is pinned to a real calendar date.
+# Everything else is Optional_: FMP omits or string-types these per-ticker, and
+# fail-closing a whole ticker over a soft metadata field would lose the very
+# coverage this fallback exists to add. `data` must be a dict — it is the
+# label→value map the revenue mix is computed from, so a non-dict there is not
+# salvageable.
+def _is_fiscal_year_or_null(v: Any) -> list[str]:
+    """Accept a 4-digit year as int OR str; reject bool and anything else.
+
+    FMP is not consistent about this across its surface: the segmentation
+    endpoints return `fiscalYear` as an int (probed 2026-07-26: AAPL 2025,
+    MSFT 2025, NVDA 2026) while the statement endpoints string-type the
+    sibling field (`calendarYear: "2026"` in tests/fixtures/fmp/mu_raw.json).
+    Pinning int-only would fail-close EVERY ticker's segment coverage the day
+    the provider normalises — and this fallback exists precisely because the
+    primary already has coverage holes.
+    """
+    if v is None:
+        return []
+    if isinstance(v, bool):
+        return ["expected 4-digit year, got bool"]
+    if isinstance(v, int):
+        return [] if 1000 <= v <= 9999 else [f"expected 4-digit year, got {v!r}"]
+    if isinstance(v, str) and v.strip().isdigit() and len(v.strip()) == 4:
+        return []
+    return [f"expected 4-digit year (int or str), got {v!r}"]
+
+
+FMP_SEGMENT_SHAPE = [
+    {
+        "date": Date_yyyy_mm_dd,
+        "fiscalYear": Optional_(_is_fiscal_year_or_null),
+        "period": Optional_(str),
+        "reportedCurrency": Optional_(str),
+        "data": dict,
+    },
+]
+
 FMP_STATEMENT_SHAPE = [
     {
         # `date` → report_period; `period` ("Q1".."Q4") + `calendarYear` →
@@ -978,7 +1010,8 @@ __all__ = [
     "FD_PRICE_SHAPE", "FD_METRICS_SHAPE", "FD_FINANCIALS_SHAPE",
     "FD_COMPANY_SHAPE", "FD_NEWS_SHAPE", "FD_SEGMENTED_SHAPE",
     "FD_INSIDER_SHAPE", "FD_ANALYST_SHAPE", "FD_EARNINGS_SHAPE",
-    "FD_PRESS_SHAPE", "FD_INST_SHAPE",
+    "FMP_SEGMENT_SHAPE",
+    "FD_INST_SHAPE",
     "FD_RATES_SNAPSHOT_SHAPE", "FD_RATES_HIST_SHAPE",
     "YAHOO_CHART_SHAPE",
     "YAHOO_HISTORICAL_OHLCV_SHAPE",

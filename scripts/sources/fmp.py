@@ -10,12 +10,13 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from scripts.constants import FMP_BASE_URL
+from scripts.constants import FMP_BASE_URL, FMP_STABLE_BASE_URL
 from scripts.sources.common import (
     http_get, HttpStatusError, FMP_POLICY, SEC_POLICY, safe_http_get_json,
-    safe_num, emit_with_numeric_coerce,
+    safe_num, emit_with_numeric_coerce, normalize_currency,
 )
 from scripts.sources.adapter_result import (
+    AdapterError,
     AdapterResult,
     ErrorCode,
     adapter_error_from_exception,
@@ -24,6 +25,7 @@ from scripts.sources.api_shapes import (
     validate_api_shape, FMP_FILING_LIST_SHAPE, ShapeError,
     _is_valid_yyyy_mm_dd,
     FMP_STATEMENT_SHAPE, FMP_ANALYST_EST_SHAPE, FMP_EARN_SURPRISE_SHAPE,
+    FMP_SEGMENT_SHAPE,
 )
 # ISS-220 SF-C (Loop32 cycle 2): _is_valid_yyyy_mm_dd promoted to
 # api_shapes (single source of truth + single regex compile shared
@@ -539,6 +541,24 @@ def _fmp_query_url(endpoint: str, params: Dict, fmp_api_key: str) -> str:
     return f"{FMP_BASE_URL}/{endpoint}?{urllib.parse.urlencode(q)}"
 
 
+def _fmp_stable_query_url(endpoint: str, params: Dict, fmp_api_key: str) -> str:
+    """Build an FMP `stable`-surface URL. Same host (and therefore the same
+    FMP_POLICY host pin) as the v3 builder; only the path prefix differs."""
+    q = dict(params)
+    q["apikey"] = fmp_api_key
+    return f"{FMP_STABLE_BASE_URL}/{endpoint}?{urllib.parse.urlencode(q)}"
+
+
+def _fmp_fetch_stable_list(endpoint: str, params: Dict, fmp_api_key: str) -> List:
+    """`_fmp_fetch_list` against the `stable` surface — same contract."""
+    raw = safe_http_get_json(_fmp_stable_query_url(endpoint, params, fmp_api_key),
+                             policy=FMP_POLICY)
+    if not isinstance(raw, list):
+        raise _FmpNonListError(
+            f"FMP {endpoint} returned non-list body ({type(raw).__name__})")
+    return raw
+
+
 def _fmp_fiscal_period(cal, period) -> Optional[str]:
     """FMP `calendarYear` ("2026") + `period` ("Q2") -> "2026-Q2" (YYYY-QN).
 
@@ -679,41 +699,68 @@ def _convert_fmp_cashflow_row(r: Dict) -> Dict:
 
 
 def _convert_fmp_metrics(ticker: str, quote: Dict, key_metrics: Dict,
-                         ratios: Dict) -> Dict:
-    """FMP quote + key-metrics + ratios -> FDS metrics_snapshot schema.
+                         ratios: Dict, *, reported_currency: Optional[str] = None) -> Dict:
+    """FMP quote + key-metrics-ttm + ratios-ttm -> FDS metrics_snapshot schema.
 
     All margins/ratios are decimals in BOTH APIs (verified against a real FDS
     artifact: gross_margin 0.668, debt_to_equity 3.746) — no scale conversion.
     Fields not derivable from these three endpoints (free_cash_flow absolute,
     revenue_growth, earnings_growth) are left null rather than guessed.
+
+    2026-07-26: sources switched from the quarterly `key-metrics` / `ratios`
+    rows to the `*-ttm` endpoints, whose keys all carry a `TTM` suffix. The
+    quarterly rows divided a full market cap by ONE quarter's earnings, so
+    every price multiple came out ~4x too high — and because this is the
+    FDS-starved-ticker fallback, the inflated values landed precisely on the
+    ADRs / uncovered mid-caps that have no second opinion. `market_cap`
+    still comes from the live `quote`, which is period-independent.
     """
     return {
         "ticker": ticker,
-        "period": "quarterly",
-        "price_to_earnings_ratio": ratios.get("priceEarningsRatio"),
-        "price_to_sales_ratio": ratios.get("priceToSalesRatio"),
-        "price_to_book_ratio": ratios.get("priceToBookRatio"),
-        "enterprise_value_to_ebitda_ratio": key_metrics.get("enterpriseValueOverEBITDA"),
-        "enterprise_value_to_revenue_ratio": key_metrics.get("evToSales"),
-        "enterprise_value": key_metrics.get("enterpriseValue"),
-        "market_cap": quote.get("marketCap"),
+        "period": "ttm",
+        # Emit the statement currency. Without it every non-USD filer on the
+        # FMP path fails the EPS check's currency-comparability guard and gets
+        # Check 1 SKIPPED forever — the exact cohort that guard's own comment
+        # says it declined to disable the check for. The `*-ttm` endpoints
+        # carry no currency of their own, so it is threaded in from the FMP
+        # statements fetched in the same run (None stays None: an unproven
+        # currency must not be asserted).
+        "currency": normalize_currency(reported_currency),
+        "price_to_earnings_ratio": ratios.get("priceEarningsRatioTTM"),
+        "price_to_sales_ratio": ratios.get("priceToSalesRatioTTM"),
+        "price_to_book_ratio": ratios.get("priceToBookRatioTTM"),
+        "enterprise_value_to_ebitda_ratio": key_metrics.get("enterpriseValueOverEBITDATTM"),
+        "enterprise_value_to_revenue_ratio": key_metrics.get("evToSalesTTM"),
+        "enterprise_value": key_metrics.get("enterpriseValueTTM"),
+        # `quote.marketCap` is the USD ADR quote; `enterpriseValueTTM` /
+        # `netIncomePerShareTTM` / `bookValuePerShareTTM` are all in the
+        # STATEMENT currency. Mixing them under one `currency` tag produced a
+        # ~165x internal contradiction on TTDKY (market cap 34.7B "JPY" beside
+        # an EV of 5.5T JPY). When the row is non-USD, take the market cap
+        # from FMP's own native-currency field so every money value on the row
+        # is on the tag it declares; fall back to the quote only for USD rows.
+        "market_cap": (
+            quote.get("marketCap")
+            if normalize_currency(reported_currency) in (None, "USD")
+            else key_metrics.get("marketCapTTM")
+        ),
         "free_cash_flow": None,
-        "free_cash_flow_per_share": key_metrics.get("freeCashFlowPerShare"),
-        "free_cash_flow_yield": key_metrics.get("freeCashFlowYield"),
-        "earnings_per_share": key_metrics.get("netIncomePerShare"),
-        "book_value_per_share": key_metrics.get("bookValuePerShare"),
-        "current_ratio": ratios.get("currentRatio"),
-        "quick_ratio": ratios.get("quickRatio"),
-        "debt_to_equity": ratios.get("debtEquityRatio"),
-        "gross_margin": ratios.get("grossProfitMargin"),
-        "operating_margin": ratios.get("operatingProfitMargin"),
-        "net_margin": ratios.get("netProfitMargin"),
-        "return_on_equity": ratios.get("returnOnEquity"),
-        "return_on_assets": ratios.get("returnOnAssets"),
+        "free_cash_flow_per_share": key_metrics.get("freeCashFlowPerShareTTM"),
+        "free_cash_flow_yield": key_metrics.get("freeCashFlowYieldTTM"),
+        "earnings_per_share": key_metrics.get("netIncomePerShareTTM"),
+        "book_value_per_share": key_metrics.get("bookValuePerShareTTM"),
+        "current_ratio": ratios.get("currentRatioTTM"),
+        "quick_ratio": ratios.get("quickRatioTTM"),
+        "debt_to_equity": ratios.get("debtEquityRatioTTM"),
+        "gross_margin": ratios.get("grossProfitMarginTTM"),
+        "operating_margin": ratios.get("operatingProfitMarginTTM"),
+        "net_margin": ratios.get("netProfitMarginTTM"),
+        "return_on_equity": ratios.get("returnOnEquityTTM"),
+        "return_on_assets": ratios.get("returnOnAssetsTTM"),
         "revenue_growth": None,
         "earnings_growth": None,
-        "peg_ratio": ratios.get("priceEarningsToGrowthRatio"),
-        "payout_ratio": ratios.get("payoutRatio"),
+        "peg_ratio": ratios.get("priceEarningsToGrowthRatioTTM"),
+        "payout_ratio": ratios.get("payoutRatioTTM"),
     }
 
 
@@ -903,7 +950,8 @@ def fetch_financials_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterR
     return AdapterResult.passed(data, meta={"source_hint": "fmp_financials"})
 
 
-def fetch_metrics_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterResult:
+def fetch_metrics_from_fmp(ticker: str, *, fmp_api_key: str = "",
+                           reported_currency: Optional[str] = None) -> AdapterResult:
     """Fetch quote + key-metrics + ratios from FMP and emit the FDS
     metrics_snapshot dict (bare dict, matching `fetch_metrics_data`)."""
     src = "fmp.fetch_metrics_from_fmp"
@@ -913,8 +961,14 @@ def fetch_metrics_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterResu
     safe_ticker = urllib.parse.quote(ticker, safe='')
     try:
         quote_raw = _fmp_fetch_list(f"quote/{safe_ticker}", {}, fmp_api_key)
-        km_raw = _fmp_fetch_list(f"key-metrics/{safe_ticker}", {"period": "quarter", "limit": 1}, fmp_api_key)
-        ra_raw = _fmp_fetch_list(f"ratios/{safe_ticker}", {"period": "quarter", "limit": 1}, fmp_api_key)
+        # TTM window, matching the FDS primary (`/financial-metrics?period=ttm`).
+        # These were `key-metrics`/`ratios` with `period=quarter`, which yields
+        # single-quarter-denominator multiples (~4x the true P/E, P/S, EV/EBITDA)
+        # — see the 2026-07-26 note on `financial_datasets.fetch_metrics_data`.
+        # The dedicated *-ttm endpoints take no period/limit params and return a
+        # single row whose field names all carry a `TTM` suffix.
+        km_raw = _fmp_fetch_list(f"key-metrics-ttm/{safe_ticker}", {}, fmp_api_key)
+        ra_raw = _fmp_fetch_list(f"ratios-ttm/{safe_ticker}", {}, fmp_api_key)
     except _FmpNonListError as se:
         return AdapterResult.failed(code=ErrorCode.SHAPE_MISMATCH,
                                     detail=str(se), source=src, retryable=False)
@@ -949,9 +1003,184 @@ def fetch_metrics_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterResu
                                     detail=f"FMP returned no metrics for {ticker}",
                                     source=src, retryable=False)
     from scripts.sources.financial_datasets import _METRICS_NUMERIC_FIELDS
-    snapshot = _convert_fmp_metrics(ticker, quote, km, ra)
+    snapshot = _convert_fmp_metrics(ticker, quote, km, ra,
+                                    reported_currency=reported_currency)
     data = emit_with_numeric_coerce(snapshot, numeric_fields=_METRICS_NUMERIC_FIELDS)
     return AdapterResult.passed(data, meta={"source_hint": "fmp_metrics"})
+
+
+# FMP segmentation endpoint -> the `dimension` vocabulary the FDS producer
+# emits and `prompts/score-fundamental.md` filters on. FDS also has a "segment"
+# dimension (reporting segments); FMP exposes no equivalent, so it is simply
+# absent rather than faked from the geography rows.
+_FMP_SEGMENT_ENDPOINTS = (
+    ("revenue-product-segmentation", "product"),
+    ("revenue-geographic-segmentation", "geography"),
+)
+
+
+def _convert_fmp_segment_rows(ticker: str, rows: List, dimension: str) -> List[Dict]:
+    """FMP `stable` segmentation rows -> the denormalized row shape
+    `fetch_segmented_revenues` emits: one row per (period, dimension, label).
+
+    FMP shape: `{"symbol","date","fiscalYear","period","reportedCurrency",
+    "data": {"<label>": <value>, ...}}`. Rows with an unusable label are
+    dropped fail-closed (rules/producer-consumer.md #4 — never fabricate a
+    segment label); values are left as-is for the caller's numeric coercion.
+    """
+    out: List[Dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        data = row.get("data")
+        if not isinstance(data, dict):
+            continue
+        fiscal_year = row.get("fiscalYear")
+        period_raw = str(row.get("period") or "").strip().upper()
+        # FDS spells annual rows `period="annual"`, `fiscal_period="FY2025"`.
+        # Strict vocabulary. A missing / empty / unrecognised `period` used to
+        # fall through to "quarterly", which fabricates a fact the provider
+        # never stated (rules/producer-consumer.md #4 — unknown is unknown, not
+        # a default). Observed drift values that hit this: absent, "", "TTM",
+        # "H1". Only FY and Q1-Q4 are mapped; anything else leaves BOTH period
+        # and fiscal_period None so a consumer can tell it apart.
+        if period_raw == "FY":
+            period_label = "annual"
+            fiscal_period = f"FY{fiscal_year}" if fiscal_year is not None else None
+        elif period_raw in ("Q1", "Q2", "Q3", "Q4"):
+            period_label = "quarterly"
+            fiscal_period = (f"{fiscal_year}-{period_raw}"
+                             if fiscal_year is not None else None)
+        else:
+            period_label = None
+            fiscal_period = None
+        base = {
+            "ticker": ticker,
+            "report_period": row.get("date"),
+            "fiscal_period": fiscal_period,
+            "period": period_label,
+            # NEVER assume USD — non-USD ADRs depend on this tag downstream.
+            "currency": normalize_currency(row.get("reportedCurrency")),
+        }
+        for label, value in data.items():
+            if not isinstance(label, str) or not label.strip():
+                continue
+            out.append({**base, "dimension": dimension, "label": label, "value": value})
+    return out
+
+
+def fetch_segmented_revenues_from_fmp(
+    ticker: str, *, fmp_api_key: str = "", limit: int = 5,
+) -> AdapterResult:
+    """Fetch revenue-by-product and revenue-by-geography from FMP and emit the
+    FDS `fetch_segmented_revenues` schema `{"segments": [...], "periods": N}`.
+
+    Why this exists: FDS's `/financials/segments` answers HTTP 400
+    ("Invalid ticker") for names outside its segmentation coverage — including
+    AAPL — so the category degraded to PARTIAL and the revenue mix fell back to
+    prose-scraped filing notes. FMP covers the mainstream US names with
+    structured rows.
+
+    Coverage is NOT universal either: foreign ADRs (TTDKY) come back empty,
+    which surfaces as NOT_FOUND so `fetch.py` still promotes to the
+    filing-revenue-notes fallback rather than emitting a hollow PASSED.
+    """
+    src = "fmp.fetch_segmented_revenues_from_fmp"
+    if not fmp_api_key:
+        return AdapterResult.failed(code=ErrorCode.UNAUTHORIZED,
+                                    detail="fmp_api_key not provided", source=src)
+    # NOTE: no `quote()` here. The v3 helpers put the ticker in the URL PATH,
+    # where pre-encoding is required; the stable helpers pass it as a query
+    # VALUE, which `urlencode` already encodes — pre-encoding would double it
+    # (`MOG-A` is unaffected, but the asymmetry is not worth keeping).
+    segments: List[Dict] = []
+    periods = 0
+    # Per-endpoint outcome. The two segmentation endpoints are independent
+    # dimensions: FMP answers one of them with its `{"Error Message": ...}`
+    # object on a plan-tier/rate limit while the other returns clean rows, and
+    # dropping the good rows on the floor sends fetch.py to the prose
+    # filing-notes fallback even though structured data is in hand.
+    failed_dimensions: List[str] = []
+    try:
+        for endpoint, dimension in _FMP_SEGMENT_ENDPOINTS:
+            try:
+                rows = _fmp_fetch_stable_list(
+                    endpoint, {"symbol": ticker}, fmp_api_key,
+                )
+            except _FmpNonListError:
+                failed_dimensions.append(dimension)
+                continue
+            # Newest-first from FMP; cap to the same period depth as the FDS
+            # producer so the two paths yield comparable artifacts. Slice
+            # BEFORE validating: the payload carries many years, and a drifted
+            # row from 2018 must not discard the current ones. (The FDS sibling
+            # never faces this — it passes `limit` server-side.)
+            # Slice the RAW list — do NOT pre-filter non-dict rows. Dropping
+            # them here would hide exactly the drift the gate below exists to
+            # catch: a top-level shape change in the NEWEST row would vanish
+            # silently and an older row would be served under PASSED. Let the
+            # shape validator see the window as the provider sent it.
+            rows = rows[:limit]
+            # Gate on shape before converting — the sibling FDS producer
+            # validates its payload via FD_SEGMENTED_SHAPE, and without this the
+            # FMP path was strictly weaker: a drifted `date`/`fiscalYear` flowed
+            # into a PASSED envelope. Soft metadata is Optional_ in the shape so
+            # a sparse-but-usable row does not fail-close the whole ticker.
+            v = validate_api_shape(rows, FMP_SEGMENT_SHAPE)
+            if not v.ok:
+                # A drifted row inside the consumed window is a hard stop for
+                # THIS dimension — but not a reason to discard the other one.
+                failed_dimensions.append(dimension)
+                continue
+            periods = max(periods, len(rows))
+            segments.extend(_convert_fmp_segment_rows(ticker, rows, dimension))
+    except _FmpNonListError as se:
+        return AdapterResult.failed(code=ErrorCode.SHAPE_MISMATCH,
+                                    detail=str(se), source=src, retryable=False)
+    except Exception as e:  # noqa: BLE001 — routed through canonical mapper
+        from scripts.sources.adapter_result import _scrub_detail
+        variants = _fmp_redact_variants(fmp_api_key)
+        print(f"    FMP {src} fetch failed: {_scrub_detail(str(e), variants)}",
+              file=sys.stderr)
+        return adapter_error_from_exception(e, source=src, redact=variants)
+
+    from scripts.sources.financial_datasets import _SEGMENTED_NUMERIC_FIELDS
+    segments = emit_with_numeric_coerce(
+        segments, numeric_fields=_SEGMENTED_NUMERIC_FIELDS,
+    )
+    # Same fail-closed gate as the FDS producer: a labels-only / all-null /
+    # all-zero feed cannot yield a revenue mix (zero denominator), so return
+    # NOT_FOUND instead of a hollow PASSED — fetch.py's filing-notes promotion
+    # only triggers on FAILED.
+    if not any(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        for v in (r.get("value") for r in segments)
+    ):
+        return AdapterResult.failed(
+            code=ErrorCode.NOT_FOUND,
+            detail=f"FMP returned no usable revenue segments for {ticker}",
+            source=src,
+            data={"segments": [], "periods": 0},
+            retryable=False,
+        )
+    data = {"segments": segments, "periods": periods,
+            "dimensions_failed": failed_dimensions}
+    if failed_dimensions:
+        # Salvage: usable rows from the surviving dimension(s) are returned,
+        # but the artifact says which dimension is missing so a revenue-mix
+        # consumer does not read a product-only panel as the whole picture.
+        return AdapterResult.partial(
+            data,
+            error=AdapterError(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=("segmentation dimensions unavailable: "
+                        + ", ".join(failed_dimensions)),
+                source=src,
+                retryable=False,
+            ),
+            meta={"source_hint": "fmp_segmented"},
+        )
+    return AdapterResult.passed(data=data, meta={"source_hint": "fmp_segmented"})
 
 
 # Number of near-term forward quarters to surface (FDS native returns ~10).
@@ -1190,7 +1419,19 @@ def _run_fmp_fallback_impl(
         or metrics_data.get("market_cap") is None
     )
     if want_metrics and _metrics_insufficient:
-        res = fetch_metrics_fn(ticker, fmp_api_key=fmp_api_key)
+        # Thread the statement currency from the financials already in hand
+        # (freshly filled above, else the caller's) so the metrics row can
+        # declare its currency without a second HTTP round-trip.
+        _ccy = None
+        for _fam in ("income_statements", "balance_sheets", "cash_flows"):
+            _rows = (new_fin or {}).get(_fam) if isinstance(new_fin, dict) else None
+            if isinstance(_rows, list) and _rows and isinstance(_rows[0], dict):
+                _c = _rows[0].get("currency")
+                if isinstance(_c, str) and _c.strip():
+                    _ccy = _c
+                    break
+        res = fetch_metrics_fn(ticker, fmp_api_key=fmp_api_key,
+                               reported_currency=_ccy)
         if res.ok and isinstance(res.data, dict) and res.data.get("market_cap") is not None:
             # codex 2026-05-29 (consistency hardening): field-level merge, not
             # wholesale replace — mirrors the yfinance metrics fallback and the
@@ -1202,8 +1443,33 @@ def _run_fmp_fallback_impl(
             # asymmetry.
             new_met = dict(res.data)
             if isinstance(metrics_data, dict):
+                # Period guard on the merge. `res.data` is a TTM row and is
+                # labelled `period: "ttm"`; the prior FDS snapshot may be on a
+                # different window. Carrying a period-sensitive field across
+                # that boundary would produce a row that CLAIMS "ttm" while
+                # holding, say, a quarterly-denominator P/E — and that label is
+                # what `historical_multiples`' period gate trusts, so the bad
+                # value would sail straight through it.
+                #
+                # Only merge period-sensitive fields when the old row proves it
+                # is TTM too. Period-independent identity/metadata always
+                # merges (a market cap or a ticker means the same thing on any
+                # window).
+                _old_period = str(metrics_data.get("period") or "").strip().lower()
+                _old_is_ttm = _old_period == "ttm"
+                # `report_period` / `fiscal_period` are the window-END label —
+                # the single most period-DEPENDENT thing on the row, and what
+                # normalize.validate_eps_consistency keys its window-alignment
+                # guard on. Inheriting them from the prior row would let two
+                # unrelated TTM windows look aligned. `currency` is excluded
+                # for the same reason in spirit: the FMP row now states its own.
+                _period_independent = {
+                    "ticker", "market_cap", "enterprise_value", "data_source",
+                }
                 for _k, _v in metrics_data.items():
-                    if new_met.get(_k) is None and _v is not None:
+                    if new_met.get(_k) is not None or _v is None:
+                        continue
+                    if _old_is_ttm or _k in _period_independent:
                         new_met[_k] = _v
             status_updates["metrics"] = {"status": "PASSED", "data_source": "fmp_fallback"}
             fills["metrics"] = {"filled": True}

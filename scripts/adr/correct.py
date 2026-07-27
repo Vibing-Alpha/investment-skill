@@ -1039,8 +1039,28 @@ def compute_adr_valuation_correction(
         metrics_eps = float(raw_meps) if raw_meps is not None and not isinstance(raw_meps, bool) else None
     except (TypeError, ValueError):
         metrics_eps = None
+    # Basis-comparability guard (2026-07-26 review). `corrected_ttm_eps` is
+    # USD-per-ADR: DL3c FX-converts the STATEMENTS, and the ADR ratio is
+    # applied here. `metrics_data.earnings_per_share` is never FX-converted
+    # (`apply_fx_conversion` takes only the 3 statement families), so for a
+    # non-USD filer it is still native-currency-per-ordinary-share. Comparing
+    # them measures |r/f - 1| (r = ADR ratio, f = FX rate) instead of the
+    # |r - 1| this threshold is calibrated for. Concretely: a EUR 1:1 ADR at
+    # f=0.92 yields |1/0.92 - 1| = 8.7%, under the 10% bar, so a genuinely
+    # 1:1 ADR would be reported as needing no correction for the wrong reason
+    # — and an 8:1 ADR at f=7.3 yields 9.6% and would be missed. Only compare
+    # when no FX step separates the two sides.
+    _eps_bases_comparable = detected_currency == "USD"
     needs_correction = True
-    if (
+    if not _eps_bases_comparable:
+        # Stay conservative (needs_correction=True) and say why, rather than
+        # clearing the flag off an incomparable number.
+        result["eps_comparison_skipped"] = (
+            f"snapshot EPS is {detected_currency or 'unknown'}-per-ordinary-share "
+            f"while corrected EPS is USD-per-ADR; deviation would measure the FX "
+            f"rate, not the ADR ratio"
+        )
+    elif (
         metrics_eps is not None
         and corrected_ttm_eps is not None
         and metrics_eps != 0
@@ -1540,7 +1560,33 @@ def compute_adr_eps_check(
         metrics_eps = None
     needs_adjustment = False
     eps_check_status: str = "applied"
-    if metrics_eps is None:
+    if detected_currency != "USD":
+        # Basis-comparability guard — see compute_adr_valuation_correction for
+        # the full derivation. It is FIRST because every branch below
+        # interprets a deviation between two numbers that, on a non-USD filer,
+        # are not on the same basis at all.
+        #
+        # Status stays "applied", deliberately. Control only reaches here after
+        # `apply_fx_conversion` succeeded and the aligned window was verified
+        # USD-tagged, i.e. the CORRECTION completed and `corrected_ttm_eps` is
+        # a valid USD-per-ADR figure. Only the optional cross-validation
+        # against the provider snapshot could not run. Routing to "skipped"
+        # asserts the check did not complete — which is false, and which made
+        # the CLI gate (`blocking_statuses`) exit 1 on EVERY supported non-USD
+        # ADR.
+        #
+        # What must NOT happen is the earlier fail-open: `needs_adjustment`
+        # defaults to False and renders as "EPS correction not needed", an
+        # affirmative clean result for a comparison nobody performed. So it is
+        # set to None — unknown — and every reader must treat None as unknown,
+        # not as False.
+        needs_adjustment = None
+        result["eps_comparison_skipped"] = (
+            f"snapshot EPS is {detected_currency or 'unknown'}-per-ordinary-share "
+            f"while corrected EPS is USD-per-ADR; deviation would measure the FX "
+            f"rate, not the ADR ratio"
+        )
+    elif metrics_eps is None:
         # Provider EPS missing / non-finite / non-numeric — cannot make
         # a comparison; route to skipped so the CLI blocking gate fires
         # rather than silently emitting "correction not needed".
@@ -1593,11 +1639,16 @@ def compute_adr_eps_check(
                 # message alone would conclude success when the gate
                 # actually fired skipped.
                 f"ADR ratio={estimated_ratio}:1, "
-                f"provider metrics_eps unavailable / non-finite — "
-                f"cross-validation skipped"
+                + (result["eps_comparison_skipped"]
+                   if result.get("eps_comparison_skipped")
+                   else "provider metrics_eps unavailable / non-finite")
+                + " — cross-validation skipped"
                 if eps_check_status == "skipped"
                 else f"ADR ratio={estimated_ratio}:1, "
-                f"EPS correction {'needed' if needs_adjustment else 'not needed'}"
+                + ("EPS cross-validation not performed (currency basis) — "
+                   "adjustment need unknown"
+                   if needs_adjustment is None
+                   else f"EPS correction {'needed' if needs_adjustment else 'not needed'}")
             ),
         }
     )

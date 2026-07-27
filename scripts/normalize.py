@@ -608,6 +608,75 @@ def _compute_ttm_eps(quarterly_stmts: List[Dict]) -> Optional[float]:
     return None
 
 
+def _closest_ttm_basis(
+    snapshot_eps: float,
+    basic_ttm: Optional[float],
+    diluted_ttm: Optional[float],
+) -> Tuple[Optional[float], str]:
+    """Pick whichever statement TTM basis the snapshot is closer to.
+
+    Check 1 exists to catch a MIS-SCALED snapshot (ADR-ratio errors are 2x /
+    4x / 100x). It is not the place to arbitrate basic-vs-diluted, a <=10%
+    effect whose per-ticker answer the provider does not publish — measured
+    live, the snapshot tracks basic on most names and diluted on others.
+
+    The trade-off, stated precisely: the pass band becomes the UNION of two
+    +/-2% bands rather than one, so an error smaller than the basic/diluted
+    gap can hide (constructed worst case: basic=10, diluted=2.5 — a 4x error
+    of the diluted figure lands exactly on basic). A whole-snapshot 2x/4x/100x
+    mis-scale still misses both bands and still WARNs, which is the class this
+    check is for; "misses both bases" is a property of that class, not a
+    guarantee for every conceivable error.
+
+    Returns `(value, basis_label)`; `(None, "ttm")` when neither basis is
+    computable.
+    """
+    candidates = [(basic_ttm, "basic ttm"), (diluted_ttm, "diluted ttm")]
+    usable = [(v, label) for v, label in candidates if v is not None and v != 0]
+    if not usable:
+        # Preserve a computable-but-zero value so the caller's `== 0` branch
+        # still reports "cannot calculate deviation" rather than "unavailable".
+        for v, label in candidates:
+            if v is not None:
+                return v, label
+        return None, "ttm"
+    return min(usable, key=lambda t: abs(snapshot_eps - t[0]) / abs(t[0]))
+
+
+def _compute_ttm_eps_both_bases(
+    quarterly_stmts: List[Dict],
+) -> Tuple[Optional[float], Optional[float]]:
+    """`(basic_ttm, diluted_ttm)` over the same 4-consecutive-quarter window
+    `_compute_ttm_eps` uses. Either element is None when that basis has a
+    missing value; both are None when the window itself is unusable.
+
+    Why both: the provider's snapshot EPS does NOT commit to a basis. Measured
+    live against `/financial-metrics?period=ttm` on 2026-07-26, the snapshot
+    tracked BASIC on 6 of 7 names (PLTR 0.45%, APH 0.85%, AVGO 0.56%, MU 0.27%,
+    AAPL 0.83% vs basic) but DILUTED on CRDO (4.32% vs basic, 1.39% vs
+    diluted). Pinning either basis just moves the false WARNING to the other
+    cohort. See `validate_eps_consistency` Check 1 for how this is consumed.
+    """
+    if len(quarterly_stmts) < 4:
+        return None, None
+    recent = quarterly_stmts[:4]  # fail-open-ok: pre-aggregation hygiene; per-row _year_quarter + consecutiveness gate below reject any non-quarter row before summing
+    yq: List[Tuple[int, int]] = []
+    diluted_vals: List[Optional[float]] = []
+    basic_vals: List[Optional[float]] = []
+    for stmt in recent:
+        t = _year_quarter(stmt)
+        if t is None:
+            return None, None
+        yq.append(t)
+        diluted_vals.append(_safe_float_module(stmt.get("earnings_per_share_diluted")))
+        basic_vals.append(_safe_float_module(stmt.get("earnings_per_share")))
+    if _validate_consecutive(list(reversed(yq))) is not None:
+        return None, None  # gapped window
+    basic = sum(basic_vals) if all(v is not None for v in basic_vals) else None
+    diluted = sum(diluted_vals) if all(v is not None for v in diluted_vals) else None
+    return basic, diluted
+
+
 def _safe_float_module(v):
     """Module-level _safe_float (the validator has a local clone; this one is
     used by the TTM helpers above which run outside that closure)."""
@@ -632,25 +701,31 @@ def validate_eps_consistency(
 ) -> Dict:
     """Cross-validate EPS data consistency.
 
-    On the FDS path `metrics_data.earnings_per_share` is the MOST-RECENT QUARTER
-    (MRQ): it is fetched `/financial-metrics?period=quarterly&limit=1`, NOT a TTM
-    figure. The checks are framed accordingly (a prior version wrongly compared
-    it against a 4-quarter sum and flagged a 'TTM deviation' for nearly every
-    stock — see test_eps_consistency_snapshot_mrq_not_flagged_as_ttm). On the
-    yfinance fallback the same field maps to `trailingEps` = TTM, so Check 1 is
-    SKIPPED there (see the data_source guard below) rather than mis-fired:
+    `metrics_data.earnings_per_share` is a TTM figure on every path:
+    `/financial-metrics?period=ttm&limit=1` (FDS), `/key-metrics-ttm` (FMP
+    fallback), `trailingEps` (yfinance fallback).
 
-    1. Snapshot EPS ~ latest-quarter statement EPS (apples-to-apples MRQ;
-       deviation <=2%). Detects a SAME-quarter mis-scaled snapshot (e.g. an
-       ADR-ratio / scaling error). SKIPPED when the snapshot is for a DIFFERENT
-       fiscal quarter than income_statements[0] — the FDS metrics endpoint can
-       lag the statements endpoint by a quarter, or the snapshot's quarter may
-       be absent (fiscal-Q4 gap); a cross-quarter deviation is meaningless, so a
-       stale/wrong-quarter snapshot is skipped, not flagged. The quarter is keyed
-       on the normalized fiscal label (_year_quarter), not the raw report_period
-       date (52/53-week issuers alias the same quarter to different dates across
-       endpoints). Also SKIPPED when metrics.data_source is the yfinance fallback
-       (trailingEps = TTM basis).
+    History worth keeping: the FDS fetch used `period=quarterly` until
+    2026-07-26, which made the snapshot a MOST-RECENT-QUARTER (MRQ) figure and
+    forced Check 1 to compare against a single quarter. That producer window
+    was itself the bug — it also made every price multiple on the row ~4x too
+    high — so with the producer corrected, Check 1 returns to its original
+    TTM-vs-TTM form (which is what EPS_TTM_DEVIATION_THRESHOLD is named for).
+
+    1. Snapshot EPS ~ TTM EPS summed from 4 CONSECUTIVE statement quarters
+       (deviation <=2%). Detects a mis-scaled snapshot (e.g. an ADR-ratio /
+       scaling error) independently of Check 2, which cannot see a mis-scale
+       that cancels between P/E and EPS. SKIPPED when a clean TTM is
+       unavailable (gapped window / <4 quarters), and when the snapshot's
+       fiscal quarter differs from income_statements[0] — the two TTM windows
+       then END on different quarters, so the deviation measures the lag, not
+       a scaling error. The quarter is keyed on the normalized fiscal label
+       (_year_quarter), not the raw report_period date (52/53-week issuers
+       alias the same quarter to different dates across endpoints). Also
+       SKIPPED on the yfinance fallback, whose `trailingEps` is quoted in the
+       QUOTE currency while the statements may be in another (SIVEF: USD
+       trailingEps vs SEK statements) — a cross-currency deviation is
+       meaningless and Check 1 has no currency guard of its own.
     2. P/E x TTM EPS ~ Current Price (deviation <=1%), where TTM EPS is summed
        over 4 CONSECUTIVE quarters; SKIP when a clean TTM is unavailable
        (gapped window / <4 quarters) rather than multiply by a non-TTM EPS.
@@ -663,7 +738,7 @@ def validate_eps_consistency(
     result = {
         "status": "PASSED",
         "checks": {
-            "snapshot_eps_vs_latest_quarter": {
+            "snapshot_eps_vs_statement_ttm": {
                 "status": "SKIPPED",
                 "deviation": None,
                 "message": "",
@@ -687,7 +762,7 @@ def validate_eps_consistency(
     quarterly_stmts = _filter_quarterly_stmts(income_statements)
 
     # ========================================
-    # Check 1: snapshot EPS (MRQ) vs latest-quarter statement EPS
+    # Check 1: snapshot EPS (TTM) vs statement-derived TTM EPS
     # ========================================
     def _safe_float(v):
         if v is None or isinstance(v, bool):
@@ -698,60 +773,97 @@ def validate_eps_consistency(
         except (TypeError, ValueError):
             return None
 
-    # metrics_snapshot is /financial-metrics?period=quarterly&limit=1, so on the
-    # FDS path its earnings_per_share is the MOST-RECENT QUARTER (MRQ), NOT TTM.
-    # Compare it to the latest quarter's income-statement EPS (apples-to-apples)
-    # to catch a stale / wrong-quarter / mis-scaled snapshot. A prior version
-    # compared it to a 4-quarter sum and flagged a bogus 'TTM deviation' for
-    # nearly every stock (worst for ramping/cyclical names like MU).
+    # metrics_snapshot is /financial-metrics?period=ttm&limit=1, so its
+    # earnings_per_share is a TRAILING-TWELVE-MONTH figure. Compare it to a TTM
+    # summed from 4 consecutive statement quarters (apples-to-apples) to catch a
+    # mis-scaled snapshot — e.g. an ADR-ratio error, which Check 2 is blind to
+    # because the same factor cancels in P/E x EPS.
     snapshot_eps = _safe_float(metrics_data.get("earnings_per_share"))
 
-    # The MRQ premise above holds ONLY for the FDS path. On the yfinance
-    # fallback, metrics_snapshot.earnings_per_share maps to yfinance
-    # `trailingEps` = TTM (scripts/sources/yahoo_finance.py), so a TTM-snapshot-
-    # vs-single-quarter comparison manufactures a spurious ~Nx deviation
-    # (compounded by quote-vs-statement currency mismatch on non-USD filers —
-    # e.g. SIVEF's USD trailingEps vs SEK statements -> bogus 350% WARNING).
-    # Fail-closed: SKIP rather than WARN when the snapshot basis is not MRQ.
-    # data_source is absent on the FDS path, "yfinance" on the fallback path.
+    # Currency comparability, NOT provenance. The predicate here used to be
+    # `data_source != "yfinance"`, carried over from when the yfinance path was
+    # the only TTM one. Now all three producers are TTM, so source no longer
+    # discriminates — and it never actually tested the thing it was justified
+    # by: `yahoo_finance` stamps `data_source="yfinance"` on the WHOLE row when
+    # it back-fills any field, so an FDS-sourced EPS was being skipped too
+    # (detector coverage silently lost). What genuinely breaks the comparison
+    # is a currency mismatch: a snapshot quoted in the QUOTE currency against
+    # statements in another (SIVEF: USD trailingEps vs SEK statements -> bogus
+    # 350% deviation). Test that directly; fail-closed when it can't be
+    # established.
+    _stmt_ccy_raw = None
+    if income_statements and isinstance(income_statements[0], dict):
+        _stmt_ccy_raw = income_statements[0].get("currency")
+    _stmt_ccy = (str(_stmt_ccy_raw).strip().upper()
+                 if isinstance(_stmt_ccy_raw, str) else None)
+    _snap_ccy_raw = metrics_data.get("currency")
+    _snap_ccy = (str(_snap_ccy_raw).strip().upper()
+                 if isinstance(_snap_ccy_raw, str) else None)
+    # A snapshot that does not declare a currency is only trustworthy as
+    # same-currency when the statements are USD (every producer quotes USD
+    # tickers in USD); for a non-USD filer an undeclared snapshot currency is
+    # exactly the SIVEF hazard.
+    _currencies_comparable = (
+        _stmt_ccy is not None
+        and (_snap_ccy == _stmt_ccy or (_snap_ccy is None and _stmt_ccy == "USD"))
+    )
+
+    # Per-SHARE basis, not just currency. Swapping the old
+    # `data_source != "yfinance"` precondition for a currency-only test
+    # re-enabled Check 1 on the yfinance path, where `trailingEps` is quoted
+    # PER ADR while the statements are per ORDINARY share — and Yahoo rounds
+    # it to 2 decimals on top. Measured on the stored corpus, that produced
+    # false WARNINGs into bq_analysis.json (ASX 96.9%, NOK 6.7%) on healthy
+    # data. Check 1 has no ADR ratio of its own (only Check 2 takes
+    # `profile`), so for an ADR the two sides are only comparable when the
+    # snapshot came from the statement-based producers.
     _snapshot_source = str(metrics_data.get("data_source") or "").strip().lower()
-    _snapshot_eps_is_mrq = not _snapshot_source.startswith("yfinance")
+    _is_adr = bool(profile.is_adr) if profile is not None else False
+    _per_share_basis_comparable = not (
+        _is_adr and _snapshot_source.startswith("yfinance")
+    )
+    _snapshot_eps_comparable = _currencies_comparable and _per_share_basis_comparable
 
     # The newest row must be a genuine, parseable QUARTER — guards against a
-    # blank-period annual row (kept by _filter_quarterly_stmts) being compared
-    # to the MRQ snapshot and producing a false deviation.
+    # blank-period annual row (kept by _filter_quarterly_stmts) anchoring the
+    # window-alignment check below.
     _latest = quarterly_stmts[0] if quarterly_stmts else None
-    if not _snapshot_eps_is_mrq:
+    if not _snapshot_eps_comparable:
         # Status stays SKIPPED (the dict default) — only annotate the reason,
         # matching the other skip branches' style.
-        result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
-            "Snapshot EPS sourced from yfinance (`trailingEps` = TTM), not the "
-            "MRQ basis this check requires; a TTM-vs-single-quarter comparison "
-            "would be basis-mismatched (and cross-currency for non-USD filers). "
-            "Skipped per the snapshot-MRQ precondition."
+        result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
+            (f"Snapshot currency ({_snap_ccy or 'undeclared'}) is not established "
+             f"as comparable to the statement currency ({_stmt_ccy or 'unknown'}); "
+             f"a cross-currency EPS deviation is meaningless and this check has no "
+             f"FX conversion. Skipped.")
+            if not _currencies_comparable else
+            ("Snapshot EPS came from yfinance `trailingEps`, which is quoted "
+             "per ADR while the statements are per ordinary share; this check "
+             "applies no ADR ratio, so the comparison is basis-mismatched. "
+             "Skipped.")
         )
     elif snapshot_eps is not None and _latest is not None and _year_quarter(_latest) is not None:
         latest = _latest  # newest-first (deduped by _filter_quarterly_stmts)
-        # snapshot earnings_per_share is BASIC; match basis, fall back diluted.
-        latest_q_eps = _safe_float(latest.get("earnings_per_share"))
-        eps_basis = "basic"
-        if latest_q_eps is None:
-            latest_q_eps = _safe_float(latest.get("earnings_per_share_diluted"))
-            eps_basis = "diluted"
+        # Statement-side TTM over the same 4-consecutive-quarter window, on BOTH
+        # bases; None on a gapped or short window (fail-closed — never compare
+        # against a partial sum).
+        _basic_ttm, _diluted_ttm = _compute_ttm_eps_both_bases(quarterly_stmts)
+        latest_q_eps, eps_basis = _closest_ttm_basis(
+            snapshot_eps, _basic_ttm, _diluted_ttm,
+        )
         latest_period = (latest.get("report_period")
                          or latest.get("fiscal_period") or "latest quarter")
 
-        # Period-match guard. metrics_snapshot is /financial-metrics?period=
-        # quarterly&limit=1, which can LAG /financials/income-statements by a
-        # quarter — or the snapshot's quarter may be absent from the statements
-        # (the fiscal-Q4 reporting gap seen on VPG/MU). When the snapshot is for
-        # a DIFFERENT fiscal quarter than income_statements[0], the EPS comparison
-        # is cross-period: the deviation is meaningless (and numerically unstable
-        # near a breakeven bottom line, e.g. VPG -0.14 vs -0.02 -> 600%). SKIP
+        # Window-alignment guard. The metrics endpoint can LAG
+        # /financials/income-statements by a quarter — or the snapshot's quarter
+        # may be absent from the statements (the fiscal-Q4 reporting gap seen on
+        # VPG/MU). When the snapshot's fiscal quarter differs from
+        # income_statements[0], the two TTM windows END on different quarters, so
+        # the deviation measures that lag rather than a scaling error. SKIP
         # rather than fire a spurious 'inconsistent' WARNING. This is period-
         # SCOPED, not a blanket disable: when the quarters match (the common
         # case) the comparison runs unchanged, preserving Check 1's genuine
-        # same-quarter mis-scale detector (e.g. ADR-ratio errors).
+        # mis-scale detector (e.g. ADR-ratio errors).
         #
         # Key on the NORMALIZED fiscal quarter via _year_quarter (the canonical
         # primitive already used by the latest-row gate above and the TTM sum) —
@@ -764,6 +876,7 @@ def validate_eps_consistency(
         # fallback only when a fiscal label is unparseable on either side.
         # Snapshots with no comparable period at all keep the MRQ premise (run
         # the comparison — the legacy/no-period fixtures still hold).
+        _alignment_unverified = False
         _snap_yq = _year_quarter(metrics_data)
         _latest_yq = _year_quarter(latest)
         _snap_rp = str(metrics_data.get("report_period") or "").strip()
@@ -773,7 +886,16 @@ def validate_eps_consistency(
         elif _snap_rp and _latest_rp:
             _period_mismatch = _snap_rp != _latest_rp
         else:
-            _period_mismatch = False  # no comparable period -> keep MRQ premise
+            # No comparable period label on either side. Run the comparison —
+            # skipping here would disable Check 1 for the ENTIRE FMP path
+            # (`key-metrics-ttm` / `ratios-ttm` carry no period metadata at
+            # all), i.e. exactly the FDS-starved cohort that most needs a
+            # cross-check — but record that alignment is unverified so a
+            # reader of 00_validation.json can weigh the result accordingly.
+            # Fabricating a period from the statements is NOT an option: it
+            # would assert an alignment we have no evidence for.
+            _period_mismatch = False
+            _alignment_unverified = True
 
         if _period_mismatch:
             # status stays SKIPPED (the dict default), matching other skip branches
@@ -781,58 +903,63 @@ def validate_eps_consistency(
                            or _snap_rp or "?")
             _latest_label = (str(latest.get("fiscal_period") or "").strip()
                              or _latest_rp or "?")
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
-                f"Snapshot EPS period ({_snap_label}) is not the latest "
-                f"statement quarter ({_latest_label}) — the FDS metrics "
-                f"endpoint lags income-statements, or that quarter is missing from "
-                f"the statements (fiscal-Q4 gap); cross-period EPS comparison "
-                f"skipped to avoid a spurious deviation."
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
+                f"Snapshot TTM window ends at {_snap_label}, the statements' at "
+                f"{_latest_label} — the FDS metrics endpoint lags "
+                f"income-statements, or that quarter is missing from the "
+                f"statements (fiscal-Q4 gap); misaligned TTM windows would "
+                f"measure the lag, not a scaling error. Skipped."
             )
         elif latest_q_eps is not None and latest_q_eps != 0:
             deviation = abs(snapshot_eps - latest_q_eps) / abs(latest_q_eps)
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["deviation"] = round(
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["deviation"] = round(
                 deviation * 100, 2
             )
             result["eps_data_summary"]["snapshot_eps"] = snapshot_eps
-            result["eps_data_summary"]["latest_quarter_eps"] = latest_q_eps
-            result["eps_data_summary"]["latest_quarter_period"] = latest_period
+            result["eps_data_summary"]["statement_ttm_eps"] = latest_q_eps
+            result["eps_data_summary"]["statement_ttm_end_period"] = latest_period
             _msg = (
-                f"Snapshot EPS ${snapshot_eps:.2f} vs latest quarter "
-                f"({latest_period}, {eps_basis}) ${latest_q_eps:.2f} "
+                f"Snapshot EPS ${snapshot_eps:.2f} vs statement {eps_basis} EPS "
+                f"through {latest_period} ${latest_q_eps:.2f} "
                 f"(deviation: {deviation * 100:.1f}%)"
             )
+            if _alignment_unverified:
+                _msg += (" [TTM window alignment unverified — the snapshot "
+                         "carries no period label]")
             if deviation <= EPS_TTM_DEVIATION_THRESHOLD:
-                result["checks"]["snapshot_eps_vs_latest_quarter"]["status"] = "PASSED"
-                result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = _msg
+                result["checks"]["snapshot_eps_vs_statement_ttm"]["status"] = "PASSED"
+                result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = _msg
             else:
-                result["checks"]["snapshot_eps_vs_latest_quarter"]["status"] = "WARNING"
-                result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
+                result["checks"]["snapshot_eps_vs_statement_ttm"]["status"] = "WARNING"
+                result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
                     _msg + f" > {EPS_TTM_DEVIATION_THRESHOLD * 100}% — snapshot EPS "
-                    f"inconsistent with the latest reported quarter"
+                    f"inconsistent with the statement-derived TTM"
                 )
                 result["warnings"].append(
-                    f"Snapshot EPS deviates {deviation * 100:.1f}% from the latest "
-                    f"quarter's reported EPS"
+                    f"Snapshot EPS deviates {deviation * 100:.1f}% from the "
+                    f"statement-derived TTM EPS"
                 )
         elif latest_q_eps == 0:
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
-                "Latest quarter EPS is zero, cannot calculate deviation"
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
+                "Statement-derived TTM EPS is zero, cannot calculate deviation"
             )
         else:
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
-                "Latest quarter EPS not available in income statements"
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
+                "No clean statement-derived TTM EPS available (fewer than 4 "
+                "quarters, a gapped window, or a missing EPS row) — comparison "
+                "skipped rather than run against a partial sum"
             )
     else:
         if snapshot_eps is None:
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
                 "Snapshot EPS not available from metrics"
             )
         elif not quarterly_stmts:
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
                 "No quarterly income statements available"
             )
         else:
-            result["checks"]["snapshot_eps_vs_latest_quarter"]["message"] = (
+            result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
                 "Latest income-statement row is not a parseable quarter "
                 "(e.g. annual / blank fiscal_period) — snapshot/quarter "
                 "comparison skipped"

@@ -12,7 +12,7 @@ import os
 import ssl
 import sys
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Tuple
 
 from scripts.constants import BASE_URL, YAHOO_BASE_URL
@@ -39,7 +39,6 @@ from scripts.sources.api_shapes import (
     FD_INSIDER_SHAPE,
     FD_ANALYST_SHAPE,
     FD_EARNINGS_SHAPE,
-    FD_PRESS_SHAPE,
     FD_INST_SHAPE,
     FD_RATES_SNAPSHOT_SHAPE,
     FD_RATES_HIST_SHAPE,
@@ -100,8 +99,22 @@ _ANALYST_NUMERIC_FIELDS = frozenset({
 # a drifted upstream `"shares": "not-a-number"` survived as a string in
 # the PASSED envelope.
 _INSTITUTIONAL_NUMERIC_FIELDS = frozenset({
-    "shares", "market_value", "price",
+    # `/institutional-holdings` column names (2026-07-26 migration) PLUS the
+    # retired endpoint's spellings, which are re-emitted as aliases for the
+    # LLM consumer. The aliases are copied from the raw row before the emit
+    # boundary, so leaving them out of this set let provider string drift
+    # ("huge" / "oops") survive in exactly the fields the events prompt reads
+    # while their sanitized twins read null.
+    "shares", "value_usd", "reported_price",
+    "market_value", "price",
 })
+
+# 13F `title_of_class` substrings that mark a NON-equity line. `putCall` is
+# blank on these, so without the label they would be indistinguishable from
+# common stock.
+_NON_EQUITY_CLASS_MARKERS = (
+    "NOTE", "DBCV", "CONV", "PFD", "PREF", "WT", "WARRANT", "UNIT", "RIGHT",
+)
 
 # ISS-184 (Loop25 cycle 1 fresh-session-12): insider trades carry
 # numeric fields that _sanitize_dict_numerics doesn't coerce strings on.
@@ -371,7 +384,19 @@ def fetch_price_data(
 # ---------------------------------------------------------------------------
 
 def fetch_metrics_data(ticker: str) -> AdapterResult:
-    """Fetch financial metrics via /financial-metrics?period=quarterly&limit=1."""
+    """Fetch financial metrics via /financial-metrics?period=ttm&limit=1.
+
+    2026-07-26: the window was `quarterly`, which is WRONG for every
+    price multiple this row carries. FDS computes `price_to_earnings_ratio`
+    / `price_to_sales_ratio` / `enterprise_value_to_*` against the period's
+    own denominator, so a quarterly row divides a full market cap by ONE
+    quarter of earnings — roughly 4x the true multiple (AAPL on this date:
+    quarterly P/E 138.41 vs ttm 33.40, quarterly EPS 2.01 vs ttm 8.35).
+    `historical_multiples` copies these into `current_from_api` and the
+    valuation prompt cross-checks its own TTM series against them, so the
+    error read as "this stock is 4x more expensive than its own history"
+    on every name. `ttm` returns the identical 48-field shape.
+    """
     src = "financial_datasets.fetch_metrics_data"
     try:
         # ISS-027 (Cycle 4 backlog): use urllib.parse.urlencode for ALL
@@ -379,7 +404,7 @@ def fetch_metrics_data(ticker: str) -> AdapterResult:
         # values can't inject query semantics. Defense-in-depth even
         # though current callers pass internal constants only.
         url = f"{BASE_URL}/financial-metrics?" + urllib.parse.urlencode({
-            "ticker": ticker, "period": "quarterly", "limit": 1,
+            "ticker": ticker, "period": "ttm", "limit": 1,
         })
         response = _make_request(url)
         v = validate_api_shape(response, FD_METRICS_SHAPE)
@@ -1575,39 +1600,6 @@ def fetch_earnings_snapshot(ticker: str) -> AdapterResult:
         return adapter_error_from_exception(e, source=src)
 
 
-def fetch_earnings_press_releases(ticker: str) -> AdapterResult:
-    """Fetch earnings press releases.  Known to return 400 for some tickers."""
-    src = "financial_datasets.fetch_earnings_press_releases"
-    try:
-        safe_ticker = urllib.parse.quote(ticker, safe='')
-        url = f"{BASE_URL}/earnings/press-releases?ticker={safe_ticker}"
-        response = _make_request(url)
-        v = validate_api_shape(response, FD_PRESS_SHAPE)
-        if not v.ok:
-            return AdapterResult.failed_from_shape(v, source=src)
-        releases = response.get("press_releases", [])
-        if not releases:
-            return AdapterResult.failed(
-                code=ErrorCode.NOT_FOUND,
-                detail="empty press_releases list",
-                source=src,
-                data={"press_releases": [], "count": 0},
-            )
-        return AdapterResult.passed(
-            data={
-                "press_releases": releases,
-                "count": len(releases),
-            },
-            meta={"source_hint": "fd_press"},
-        )
-    except Exception as e:
-        print(
-            f"[WARNING] Earnings press releases fetch failed: {type(e).__name__}: {e}",
-            file=sys.stderr,
-        )
-        return adapter_error_from_exception(e, source=src)
-
-
 # ---------------------------------------------------------------------------
 # Institutional ownership
 # ---------------------------------------------------------------------------
@@ -1615,25 +1607,168 @@ def fetch_earnings_press_releases(ticker: str) -> AdapterResult:
 def fetch_institutional_ownership(
     ticker: str, limit: int = 20,
 ) -> AdapterResult:
-    """Fetch institutional ownership (13F holdings)."""
+    """Fetch institutional ownership (13F holdings).
+
+    2026-07-26 endpoint migration: `/institutional-ownership` was retired and
+    now answers HTTP 410 — "the institutional-ownership API has been
+    deprecated. Please use the improved institutional-holdings API instead" —
+    so this category had been failing outright on every run. The replacement
+    returns the same list-of-13F-rows shape under `institutional_holdings`,
+    with renamed columns: `investor` -> `filer_name`,
+    `market_value` -> `value_usd`, `price` -> `reported_price`,
+    `security_type` -> `title_of_class` (plus new `cusip` / `filing_date` /
+    `form_type` / `accession_number` / `filer_cik` / `put_call`). Rows pass
+    through as-is: no consumer reads the per-row field names
+    (`prompts/evaluate-events.md` treats `08_institutional.json` as a 13F
+    blob), so they are NOT remapped onto the retired vocabulary.
+    """
     src = "financial_datasets.fetch_institutional_ownership"
     try:
         # ISS-027: urlencode for defense-in-depth.
-        url = f"{BASE_URL}/institutional-ownership?" + urllib.parse.urlencode({
-            "ticker": ticker, "limit": limit,
-        })
+        base_params = {"ticker": ticker, "limit": limit}
+        url = f"{BASE_URL}/institutional-holdings?" + urllib.parse.urlencode(base_params)
         response = _make_request(url)
         v = validate_api_shape(response, FD_INST_SHAPE)
         if not v.ok:
             return AdapterResult.failed_from_shape(v, source=src)
-        holdings = response.get("institutional_ownership", [])
+        holdings = response.get("institutional_holdings", [])
+
+        # Vintage hygiene — WITHOUT pinning to a single period.
+        #
+        # This endpoint returns the latest filing PER FILER CIK. An earlier fix
+        # here re-queried pinned to `max(report_period)` to restore what looked
+        # like the retired endpoint's single-vintage panel. That was wrong, and
+        # measurably so: 13F filings trickle in across a 45-day window, so the
+        # NEWEST period contains only the early filers. Live 2026-07 —
+        #   VELO: newest period held 2 of 20 rows; pinning kept 256,060 shares
+        #         of 5,359,046 (5%) and replaced top holder AWM (1,978,282)
+        #         with PFG (74,983), a 26x understatement.
+        #   AAPL: pinning dropped VANGUARD (1.42B shares) — the largest holder
+        #         — because it had filed one quarter earlier.
+        # Any single-period pin discards whoever has not filed yet, which
+        # skews hardest toward the biggest, slowest filers. Latest-per-filer is
+        # the better panel; a snapshot cannot express flow either way.
+        #
+        # What DOES need removing is genuinely defunct filers: an entity that
+        # stopped filing keeps its stale row forever, and can double-count a
+        # holder that re-registered under a new CIK (BlackRock appeared at both
+        # 0001364742 @2024-06-30 and 0002012383 @2026-03-31, together ~13.9% of
+        # AAPL's float against a true ~7.3%). One year behind the newest period
+        # is well past normal filing lag, so anything older is dropped.
+        _periods = sorted(
+            {r.get("report_period") for r in holdings
+             if isinstance(r, dict) and isinstance(r.get("report_period"), str)}
+        )
+        _dropped_stale = 0
+        _stale_cutoff_applied = False
+        if _periods:
+            _newest = _periods[-1]
+            try:
+                _cutoff = (datetime.strptime(_newest, "%Y-%m-%d")
+                           - timedelta(days=365)).strftime("%Y-%m-%d")
+            except ValueError:
+                # Do NOT silently continue: skipping the prune here is exactly
+                # the double-count this block exists to prevent, and a PASSED
+                # envelope would carry no trace of it. Record it instead.
+                _cutoff = None
+            if _cutoff:
+                _before = len(holdings)
+                holdings = [
+                    r for r in holdings
+                    if not (isinstance(r, dict)
+                            and isinstance(r.get("report_period"), str)
+                            and r["report_period"] < _cutoff)
+                ]
+                _dropped_stale = _before - len(holdings)
+                _stale_cutoff_applied = True
+                _periods = sorted(
+                    {r.get("report_period") for r in holdings
+                     if isinstance(r, dict) and isinstance(r.get("report_period"), str)}
+                )
+
+        # Fail closed on an empty panel.
+        #
+        # The retired endpoint's producer returned NOT_FOUND here and the
+        # migration dropped it, so a ticker with no 13F coverage began
+        # returning PASSED with `holdings: []` — and, worse, an affirmative
+        # `single_vintage: true`, which the events prompt reads as "rows come
+        # from one quarter" rather than "there are no rows". `institutional`
+        # only downgrades the run on FAILED/PARTIAL, so 00_validation.json
+        # reported PASSED overall and the operator got no signal. An absent
+        # sentiment feed must read as absent (rules/producer-consumer.md #4),
+        # never as present-but-quiet. This also covers the case where the
+        # stale-row prune above emptied the panel.
         if not holdings:
             return AdapterResult.failed(
                 code=ErrorCode.NOT_FOUND,
-                detail="empty institutional_ownership list",
+                detail=(
+                    "empty institutional_holdings list"
+                    if not _dropped_stale
+                    else f"all {_dropped_stale} institutional_holdings rows were "
+                         f"older than one year behind {_periods[-1] if _periods else 'the newest period'}"
+                ),
                 source=src,
-                data={"holdings": [], "count": 0},
+                data={"holdings": [], "count": 0, "row_count": 0,
+                      "holder_count": 0, "report_periods": [],
+                      "dropped_stale_rows": _dropped_stale},
             )
+
+        # Restore the canonical row vocabulary the retired endpoint used.
+        #
+        # The migration renamed four columns and this was adjudicated as safe
+        # because no *code* reads them. That reasoning does not hold: the
+        # consumer is an LLM reading the JSON (prompts/evaluate-events.md), and
+        # a stored artifact proves it read them by name —
+        # reports/ONDS/20260527/events.json says "296,822 common shares + 2,500
+        # call-option shares", which is `security_type: common_stock /
+        # call_option`. Grepping code can never establish that an LLM consumer
+        # does not read a field.
+        #
+        # `security_type` is reconstructed from `put_call`, which is load-
+        # bearing: live ONDS returns 5 of 20 rows as option positions (Citadel
+        # Call 11.9M, Jane Street Put 10.6M, ...) that are otherwise
+        # indistinguishable from common stock, so a naive sum of `shares`
+        # counts ~43M option-underlying shares as equity.
+        for _row in holdings:
+            if not isinstance(_row, dict):
+                continue
+            _pc = str(_row.get("put_call") or "").strip().lower()
+            _row.setdefault("investor", _row.get("filer_name"))
+            _row.setdefault("market_value", _row.get("value_usd"))
+            _row.setdefault("price", _row.get("reported_price"))
+            # `common_stock` is ASSERTED only when the class label says so.
+            # 13F info tables carry non-equity lines that leave `putCall`
+            # blank — convertible notes, preferred, warrants, units — told
+            # apart only by `title_of_class`. Defaulting those to
+            # `common_stock` would be a fabricated fact, and the events prompt
+            # now tells the agent it may sum `shares` across common rows, so
+            # the fabrication lands straight in an equity-ownership total.
+            # Detect NON-equity, do not whitelist equity. `title_of_class` is
+            # free text and every filer spells common stock differently — a
+            # first real run turned up COM, COMM STK, COMMON and Goldman's CMN
+            # in one 20-row panel. A whitelist mislabelled CMN as `other`,
+            # which the prompt rule then excludes from equity totals: that one
+            # row was 91,755,375 shares / $23.3B. The non-equity vocabulary is
+            # the bounded, distinctive side (NOTE / PFD / WARRANT / ...), so
+            # match on that and let anything unmatched stay common stock.
+            _tc = str(_row.get("title_of_class") or "").strip().upper()
+            if _pc == "call":
+                _sec = "call_option"
+            elif _pc == "put":
+                _sec = "put_option"
+            elif any(k in _tc for k in _NON_EQUITY_CLASS_MARKERS):
+                _sec = "other"
+            else:
+                _sec = "common_stock"
+            _row.setdefault("security_type", _sec)
+
+        _ciks = [r.get("filer_cik") for r in holdings if isinstance(r, dict)]
+        _cik_missing = sum(1 for c in _ciks if not (isinstance(c, str) and c.strip()))
+        _holder_count = (
+            len({c for c in _ciks if isinstance(c, str) and c.strip()})
+            if _cik_missing < len(_ciks) else None
+        )
+
         # ISS-085/095/163: bool drift + numeric string drift coerced
         # via _emit_with_numeric_coerce (list-of-rows case).
         return AdapterResult.passed(
@@ -1641,8 +1776,29 @@ def fetch_institutional_ownership(
                 "holdings": emit_with_numeric_coerce(
                     holdings, numeric_fields=_INSTITUTIONAL_NUMERIC_FIELDS,
                 ),
+                # `count` is retained for compatibility but counts SECURITY
+                # LINES, not holders — one filer can file common + call + put.
                 "count": len(holdings),
+                "row_count": len(holdings),
+                # Distinct filers. `None` means the column was not usable at
+                # all — never conflate that with a real 0, and never let a
+                # partially-populated column silently understate the count
+                # (evaluate-events.md tells the agent to report this number).
+                "holder_count": _holder_count,
+                "holder_count_partial": _cik_missing > 0,
                 "ticker": response.get("ticker", ticker),
+                # Coverage metadata. Rows are each filer's LATEST filing, so
+                # periods differ; a flow direction cannot be inferred from one
+                # snapshot regardless.
+                "latest_report_period": _periods[-1] if _periods else None,
+                "report_periods": _periods,
+                "single_vintage": len(_periods) <= 1,
+                # The prune runs client-side on a server-truncated top-N, so a
+                # dropped stale row SHRINKS the panel rather than being
+                # replaced by the next live filer. Say so, or `count` reads as
+                # the full panel and ownership totals come out understated.
+                "dropped_stale_rows": _dropped_stale,
+                "stale_cutoff_applied": _stale_cutoff_applied,
             },
             meta={"source_hint": "fd_institutional"},
         )

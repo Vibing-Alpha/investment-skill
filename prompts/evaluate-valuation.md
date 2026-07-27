@@ -84,10 +84,24 @@ fix into `metrics_snapshot` — which then carries its own
 `market_cap_reconciliation` block, with `market_cap`, `enterprise_value`, P/E,
 P/S, P/B, PEG, EV/EBITDA, EV/Rev and FCF yield already rescaled to the current
 price. Those snapshot multiples are therefore current — use them directly or
-as a cross-check, and do NOT scale them again. Your own derivation above stays
-the primary read, but when a clean TTM is unavailable (e.g. a gapped quarterly
-window with no standalone fiscal Q4), the reconciled snapshot multiple is the
-best available current value. Tag a value you compute `[Calc: current_price ×
+as a cross-check, and do NOT scale them again.
+
+**First check `metrics_snapshot.period`.** Reconciliation rescales the
+NUMERATOR to the current price; it never changes the denominator's window. So
+a row whose `period` is anything other than `"ttm"` carries multiples computed
+against a non-TTM denominator — a quarterly row is roughly 4x inflated — and
+reconciliation does not fix that, it just re-prices the inflated number. If
+`period` is not `"ttm"` (artifacts written before the producer moved to the
+TTM window carry `"quarterly"`, and the delta layer reuses a prior `data/`
+directory), treat
+these snapshot multiples as UNUSABLE: say the live snapshot is unavailable and
+fall back to your own derivation, exactly as `historical_multiples.json`
+already does by withholding `current_from_api`.
+
+Your own derivation above stays the primary read, but when a clean TTM is
+unavailable (e.g. a gapped quarterly window with no standalone fiscal Q4) AND
+`period == "ttm"`, the reconciled snapshot multiple is the best available
+current value. Tag a value you compute `[Calc: current_price ×
 shares / ...]`; tag a reconciled snapshot value
 `[API: metrics_snapshot (market-cap reconciled)]`.
 
@@ -103,6 +117,14 @@ isolation is meaningless — context is everything.
    ranges 20-40x is mid-range; one that ranges 15-20x is stretched.
    Access: `summary.<method>.min`, `.median`, `.max`, `.span_days`, `.data_points`.
    Cross-check with `current_from_api.<method>` for the live snapshot.
+
+   **Read `status` and `warnings` on this file before using it** (same rule as
+   `fcf_inputs.json` below). `status: "ok_with_warnings"` means the producer
+   deliberately withheld or qualified something — most often `current_from_api`
+   was omitted because the snapshot's period basis could not be established, in
+   which case the live cross-check is UNAVAILABLE, not merely absent. Say so in
+   the write-up and lower confidence accordingly; do not treat a missing
+   `current_from_api` as a normal gap.
 
 2. **Peer comparison** (from `peer_multiples.json`): How does the market price
    this company vs comparable businesses? Use peer_tickers from

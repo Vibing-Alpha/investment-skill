@@ -1007,7 +1007,6 @@ ADAPTER_ENTRYPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("financial_datasets", "fetch_insider_data"),
     ("financial_datasets", "fetch_analyst_estimates"),
     ("financial_datasets", "fetch_earnings_snapshot"),
-    ("financial_datasets", "fetch_earnings_press_releases"),
     ("financial_datasets", "fetch_institutional_ownership"),
     ("financial_datasets", "fetch_interest_rates_snapshot"),
     ("financial_datasets", "fetch_interest_rates_historical"),
@@ -1025,6 +1024,7 @@ ADAPTER_ENTRYPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("fmp", "fetch_metrics_from_fmp"),
     ("fmp", "fetch_analyst_estimates_from_fmp"),
     ("fmp", "fetch_earnings_from_fmp"),
+    ("fmp", "fetch_segmented_revenues_from_fmp"),
     # adr/detect.py (1) — ISS-098 (Loop8): adr/detect.detect_adr_market_data
     # is a yfinance-calling envelope-returning adapter, structurally
     # equivalent to yahoo_finance.fetch_yahoo_quote_result. Governing it
