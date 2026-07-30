@@ -440,6 +440,44 @@ def _reconcile_market_cap(
     }
 
 
+# BQ-relevant ratios in a metrics snapshot. Used ONLY by the metrics
+# post-pass, which fires when NONE of them is populated — a snapshot with
+# market cap and a P/E but no profitability or liquidity signal at all. Not a
+# required-field list: any ONE of these present is enough, because the set a
+# given issuer legitimately reports varies (banks report no quick_ratio,
+# financial-sector companies no gross_margin).
+# Definition moved to scripts.constants (twelfth cold round) so the yfinance
+# fallback's status rule reads the SAME set as the post-pass below — a second
+# copy of "what makes a snapshot usable" is how the two layers disagreed and
+# a P/E-keyed fallback status vetoed healthy loss-makers. The underscored
+# alias is kept: this module's post-pass and its tests reference it.
+from scripts.constants import BQ_METRIC_FIELDS as _BQ_METRIC_FIELDS
+
+# Balance-sheet / cash-flow value candidates for the financials family
+# post-pass (tenth cold round). Same contract as _BQ_METRIC_FIELDS:
+# CANDIDATES, not requirements — any ONE present in ANY row of the family is
+# enough. The DL4 alignment gate reads only period metadata, so a
+# metadata-only family satisfies it and the FMP fallback never attempts
+# rescue; these sets are what "the family carries something a score can
+# read" means. Names are the canonical FDS/FMP-converter field names from
+# _FINANCIALS_NUMERIC_FIELDS.
+_BQ_BALANCE_FIELDS = frozenset({
+    "total_assets", "total_liabilities", "shareholders_equity",
+    "cash_and_equivalents", "current_assets", "current_liabilities",
+    "total_debt",
+})
+_BQ_CASHFLOW_FIELDS = frozenset({
+    "net_cash_flow_from_operations", "capital_expenditure",
+    "net_cash_flow_from_investing", "net_cash_flow_from_financing",
+    "depreciation_and_amortization", "change_in_cash_and_equivalents",
+    # free_cash_flow (twenty-sixth round): the scoring prompt's cash-flow
+    # read starts with FCF, and a provider emitting an FCF-only family
+    # (components null) is a LEGITIMATE shape — omitting it here made the
+    # candidates set demote that shape into a permanent entry veto. The set
+    # is any-of, so adding a member only widens what counts as usable.
+    "free_cash_flow",
+})
+
 # metrics_snapshot fields whose value is market-cap (or, equivalently, price)
 # linear in the NUMERATOR: multiple = market_cap / fundamental. A cap
 # correction rescales them by the cap ratio — the denominator (earnings,
@@ -575,6 +613,18 @@ def _propagate_market_cap_to_metrics(
 # ---------------------------------------------------------------------------
 # _fetch_filing_data_impl -- DI variant of fetch_filing_data
 # ---------------------------------------------------------------------------
+
+def _filing_quarterly_expected(summary) -> bool:
+    """False when the annual filing is a mapped 20-F: a foreign private
+    issuer's cadence has no 10-Q (its 6-K interims are collected as metadata
+    only, never extracted), so a missing quarterly is the issuer's normal
+    state, not a retrieval loss. True for every other shape — including a
+    missing or malformed annual, where the stricter default costs nothing
+    because `has_valid_10k` already fails those."""
+    latest_10k = summary.get("latest_10k") if isinstance(summary, dict) else None
+    return not (isinstance(latest_10k, dict)
+                and latest_10k.get("original_filing_type") == "20-F")
+
 
 def _fetch_filing_data_impl(
     ticker: str,
@@ -871,6 +921,19 @@ def _fetch_filing_data_impl(
                 latest_10q = sec_10q
 
     # ADR fallback: 20-F / 6-K (extract from already-fetched filings list)
+    #
+    # KNOWN GAP, deliberately unhandled here — Form 40-F (Canadian MJDS
+    # issuers, e.g. SHOP files 40-F annuals + 6-K interims): this scan does
+    # not recognise it, so a 40-F issuer's filing lands FAILED/not_found and
+    # the structural-absence exemption clears it. That is the chosen
+    # treatment, not an oversight (thirty-fifth cold round): the absence is
+    # a PIPELINE-PERSISTENT state for every Canadian issuer, so gating on it
+    # would permanently veto the whole class until 40-F extraction ships —
+    # while the exemption leaves them exactly where 20-F issuers stood
+    # before 20-F extraction existed (the scoring agents see no filing files
+    # and score without the narrative, visibly). Proper 40-F support (its
+    # item structure differs from 20-F and needs its own mapping) is a
+    # follow-up FEATURE, recorded in the plan's follow-up list.
     if not latest_10k and not latest_10q:
         print(
             "    No 10-K/10-Q found, trying 20-F/6-K (ADR fallback)...",
@@ -893,6 +956,37 @@ def _fetch_filing_data_impl(
                 )
             if summary["latest_20f"] and summary["latest_6k"]:
                 break
+
+        # Filtered 20-F lookup (forty-fourth round — the slice-before-lookup
+        # bug's fifth sighting): the unfiltered list above is hard-limited
+        # to the newest 20 records, so an issuer that furnished 20+ 6-Ks
+        # since its annual 20-F buried it past the slice and the scan
+        # concluded FAILED/not_found — which the structural-absence
+        # exemption then read as "files no annual report". The endpoint
+        # supports filing_type filters (the 10-K/10-Q paths already use
+        # them); one more filtered request settles existence before any
+        # absence claim. Failures here are non-fatal — the scan's own
+        # conclusion stands if the lookup errors.
+        if not summary["latest_20f"]:
+            try:
+                _f20_url = (f"{BASE_URL}/filings?"
+                            + urllib.parse.urlencode(
+                                {"ticker": ticker, "filing_type": "20-F",
+                                 "limit": 1}))
+                _f20_resp = _api_get(_f20_url)
+                _f20_rows = (_f20_resp.get("filings")
+                             if isinstance(_f20_resp, dict) else None)
+                if (isinstance(_f20_rows, list) and _f20_rows
+                        and isinstance(_f20_rows[0], dict)):
+                    summary["latest_20f"] = _f20_rows[0]
+                    print(
+                        f"    Found 20-F via filtered lookup: report_date="
+                        f"{_f20_rows[0].get('report_date')}",
+                        file=sys.stderr,
+                    )
+            except Exception as _f20_e:  # noqa: BLE001 — best-effort lookup
+                print(f"    Filtered 20-F lookup failed: "
+                      f"{type(_f20_e).__name__}", file=sys.stderr)
 
         if not summary["latest_20f"] and not summary["latest_6k"]:
             print(
@@ -1343,9 +1437,17 @@ def _fetch_filing_data_impl(
 
     missing_count = len(summary["validation"]["missing_items"])
 
-    if has_valid_10k and has_valid_10q and missing_count == 0:
+    # A foreign private issuer files 20-F annuals and 6-K interims — never a
+    # 10-Q — and the 6-K is collected as metadata only, never mapped into
+    # `latest_10q`. Requiring `has_valid_10q` unconditionally therefore
+    # derived INCOMPLETE for every healthy 20-F filer, forever (fifteenth
+    # cold round; post-round-13 that INCOMPLETE gates, a permanent entry
+    # veto keyed to the issuer's legal filing cadence). A valid mapped 20-F
+    # IS that issuer class's complete extractable filing set.
+    quarterly_ok = has_valid_10q or not _filing_quarterly_expected(summary)
+    if has_valid_10k and quarterly_ok and missing_count == 0:
         status = "PASSED"
-    elif has_valid_10k and has_valid_10q and missing_count <= 1:
+    elif has_valid_10k and quarterly_ok and missing_count <= 1:
         status = "PARTIAL"
     elif has_valid_10k or summary["latest_10k"] or summary["latest_10q"]:
         status = "INCOMPLETE"
@@ -2160,6 +2262,18 @@ def _main_impl(
                     effective_status = "PARTIAL"
                 elif freshness_status == "FAILED" and freshness_status != price_result.status:
                     effective_status = "FAILED"
+                elif range_status == "FAILED":
+                    # Non-positive current price (sixteenth cold round). The
+                    # range check used to be metadata-only, so a 0.0 price
+                    # with a fresh timestamp kept the CRITICAL price category
+                    # PASSED and out of meta.degraded_categories. PARTIAL,
+                    # not FAILED — the payload's other fields (52-week range,
+                    # volume) are real content; the CURRENT price is what a
+                    # decision cannot use. Only range FAILED promotes: the
+                    # WARNING cases (52-week deviation, inverted bounds) are
+                    # sanity caveats and a breakout past the 52-week high is
+                    # the strategy's core entry shape.
+                    effective_status = "PARTIAL"
                 else:
                     effective_status = None
                 category_statuses["price"] = _derive_category_status(
@@ -2870,17 +2984,27 @@ def _main_impl(
                 == "fmp_fallback"
             )
             if analyst_fill is not None and analyst_fill.filled and not _analyst_is_fmp:
+                # Thirty-first cold round: the yfinance analyst fill only
+                # ever ADDS the supplementary price-targets/recommendations
+                # sub-dict — never consensus `estimates` rows — so REWRITING
+                # the category on its strength destroyed the structural-
+                # absence record: an FDS not_found that FMP had confirmed
+                # absent was promoted to PASSED, the consensus post-pass
+                # demoted that to PARTIAL, and PARTIAL sits outside the
+                # FAILED-scoped exemption — a permanent entry veto minted by
+                # a SUCCESSFUL enrichment (strictly worse than the fill
+                # failing). Keep the primary's status and error_code — the
+                # exemption and the post-pass both key on them — and record
+                # the enrichment as provenance beside them.
                 yf_analyst = analyst_data.get("yfinance_analyst", {})
-                has_pt = "price_targets" in yf_analyst
-                has_rec = "recommendations" in yf_analyst
-                if has_pt and has_rec:
-                    new_status = "PASSED"
-                else:
-                    new_status = "PARTIAL"
-                category_statuses["analyst_estimates"] = {
-                    "status": new_status,
-                    "data_source": "yfinance_fallback",
-                }
+                _prior_analyst = category_statuses.get("analyst_estimates")
+                if isinstance(_prior_analyst, dict):
+                    category_statuses["analyst_estimates"] = {
+                        **_prior_analyst,
+                        "yfinance_extras": sorted(
+                            k for k in ("price_targets", "recommendations")
+                            if k in yf_analyst),
+                    }
         except Exception as e:
             # ISS-220 4.30 (Loop36 cycle 1): sym-ext gap of 4.12.
             # Outer except path persisted raw `str(e)` to stderr +
@@ -3225,8 +3349,361 @@ def _main_impl(
         print("\n[DETECTION] Growth Stock Mode SKIPPED (inputs not fetched)", file=sys.stderr)
 
     # ==================================================================
+    # Save Output Files
+    # ==================================================================
+    print("\n[OUTPUT] Saving files...", file=sys.stderr)
+
+    # Financials + metrics post-passes. Same shape as the two below, same
+    # reason: `PASSED` on these means the envelope validated, not that the
+    # payload carries anything a score can read. `FD_FINANCIALS_SHAPE` types
+    # `revenue`/`net_income` as nullable and requires only `report_period` on
+    # the balance-sheet and cash-flow rows; `FD_METRICS_SHAPE` requires only
+    # ticker/period with a nullable P/E. A metadata-only response therefore
+    # validates, both fallbacks skip (their sufficiency checks read dates and
+    # market cap, not values), and `financials`/`metrics` — both CRITICAL tier,
+    # feeding the 35%-weight fundamental dimension — reach the gate as clean.
+    #
+    # Both predicates are deliberately OR-shaped: fire only when NOTHING usable
+    # is present. An AND across a field list would encode which line items each
+    # dimension needs into the fetch layer and would false-positive on real
+    # issuers — `gross_margin` is null for financial-sector companies,
+    # `quick_ratio` for banks. A false positive here is a permanent entry veto,
+    # the failure this criterion was calibrated to avoid. Measured: both fire
+    # on 0 of 43 stored runs.
+    _fin_cat = category_statuses.get("financials")
+    if isinstance(_fin_cat, dict) and _fin_cat.get("status") == "PASSED":
+        _inc = (financials_data.get("income_statements")
+                if isinstance(financials_data, dict) else None) or ()
+        if _inc and not any(
+            isinstance(r, dict) and (r.get("revenue") is not None
+                                     or r.get("net_income") is not None)
+            for r in _inc
+        ):
+            category_statuses["financials"] = {
+                **_fin_cat, "status": "PARTIAL",
+                "error_detail": "income statements carry no revenue or net income",
+            }
+
+    _met_cat = category_statuses.get("metrics")
+    if isinstance(_met_cat, dict) and _met_cat.get("status") == "PASSED":
+        _snap = metrics_data if isinstance(metrics_data, dict) else {}
+        if _snap and not any(_snap.get(f) is not None for f in _BQ_METRIC_FIELDS):
+            category_statuses["metrics"] = {
+                **_met_cat, "status": "PARTIAL",
+                "error_detail": "metrics snapshot carries no BQ ratio",
+            }
+
+    # Company description post-pass. Same shape and same reason as the analyst
+    # one below: the description-sufficiency rule lives inside the yfinance
+    # fallback, and the primary can reach PASSED without ever entering it. A
+    # structurally valid FDS payload with a null `description` is marked
+    # PASSED; if the yfinance fallback then runs but fills nothing,
+    # `merge_fallback_outcome` declines to apply any status (`update.filled`
+    # gates it), so PASSED stands. `company` is important-tier, so the gate saw
+    # a clean category with no business description behind it.
+    #
+    # PARTIAL, not FAILED — the payload still carries sector/industry/exchange.
+    # 0 of 43 stored runs have a blank description on a PASSED company, so this
+    # cannot become a steady-state veto.
+    # Uses the SAME predicate as the fallback's own gate, not a second copy of
+    # it: `_company_text_present` exists because `description=""` (a yfinance
+    # scrape miss) was once read as present by an `is not None` check, and two
+    # implementations of that rule would drift back apart.
+    from scripts.sources.yahoo_finance import _company_text_present
+    _company_cat = category_statuses.get("company")
+    if isinstance(_company_cat, dict) and _company_cat.get("status") == "PASSED":
+        _desc = company_data.get("description") if isinstance(company_data, dict) else None
+        if not _company_text_present(_desc):
+            category_statuses["company"] = {
+                **_company_cat, "status": "PARTIAL",
+                "error_detail": "company payload carries no description",
+            }
+
+    # Analyst consensus post-pass. Runs after EVERY source has had its turn,
+    # because all three can reach PASSED by different routes: FDS directly,
+    # FMP via the fallback, yfinance via the promotion above. A check inside
+    # any one of them leaves the other two open — measured, the FDS route is
+    # the one that never passes through the promotion branch at all.
+    #
+    # `estimates` being non-empty is not the same as carrying a consensus. The
+    # corpus has 43 far-future rows with a revenue figure and a null
+    # `earnings_per_share`, legitimately mixed in beside EPS-bearing ones; a
+    # payload made only of those has no EPS consensus, which is what
+    # score-forward's "EPS Expectations (weight: 20)" reads. PASSED there would
+    # tell `meta.degraded_categories` the input is clean when it is absent.
+    # PARTIAL, not FAILED — price targets and revenue rows are real content,
+    # just not this dimension's. Provenance is preserved.
+    # DELIBERATE TRADEOFF — analyst sufficiency is "any consensus EPS", NOT
+    # recency / forward-period / horizon / spread requirements. Proposed in
+    # three separate cold reviews and REJECTED each time: (1) a one-row or
+    # sparse panel is the REAL steady state of thin-coverage micro-caps —
+    # this portfolio's actual universe — so requiring horizons is a
+    # permanent entry veto wearing a data-quality costume; (2) an all-past
+    # panel is the transient steady state of the post-earnings estimate
+    # rollover window and self-heals in days; (3) unlike a hollow payload,
+    # the rows' DATES are visible to the forward scoring agent, which reads
+    # them and weighs staleness itself — the gate exists to surface what
+    # the score cannot see, and this it can. Encoding the forward
+    # dimension's needs into the fetch layer is the round-8-rejected form.
+    # Do not re-propose without measured evidence that a real issuer class
+    # is harmed by the visible-dates argument.
+    _analyst_cat = category_statuses.get("analyst_estimates")
+    if isinstance(_analyst_cat, dict) and _analyst_cat.get("status") == "PASSED":
+        _rows = analyst_data.get("estimates") if isinstance(analyst_data, dict) else None
+        def _fp_parseable(r):
+            _fp = r.get("fiscal_period") if isinstance(r, dict) else None
+            if not isinstance(_fp, str) or not _fp:
+                return False
+            try:
+                import datetime as _dt_pp
+                _dt_pp.date.fromisoformat(_fp[:10])
+            except ValueError:
+                return False
+            return True
+        if not any(isinstance(r, dict) and r.get("earnings_per_share") is not None
+                   for r in (_rows or ())):
+            category_statuses["analyst_estimates"] = {
+                **_analyst_cat, "status": "PARTIAL",
+                "error_detail": "estimates carry no consensus earnings_per_share",
+            }
+        elif not any(_fp_parseable(r) for r in (_rows or ())):
+            # Date floor (forty-first round) — the documented sparse/all-past
+            # tradeoff's premise is that the rows' DATES are visible to the
+            # forward scorer; an ALL-undated panel has no dates to see, so
+            # its horizon is unknowable and the premise fails. One parseable
+            # fiscal_period keeps the panel usable; sparse and all-past
+            # panels remain non-gating exactly as documented. Mirrors the
+            # news date rule and the FMP-path date gate.
+            category_statuses["analyst_estimates"] = {
+                **_analyst_cat, "status": "PARTIAL",
+                "error_detail": "estimates carry no parseable fiscal_period",
+            }
+        elif not any(isinstance(r, dict)
+                     and r.get("earnings_per_share") is not None
+                     and _fp_parseable(r)
+                     for r in (_rows or ())):
+            # Same-row requirement (forty-third round, the news same-article
+            # rule replayed on estimates): the two any() checks above can be
+            # satisfied by DIFFERENT rows — an undated EPS beside a dated
+            # empty row passed both while no row carried a dated estimate,
+            # so the forward scorer could not associate the value with any
+            # quarter. One row must carry both.
+            category_statuses["analyst_estimates"] = {
+                **_analyst_cat, "status": "PARTIAL",
+                "error_detail": (
+                    "no estimate carries both an earnings_per_share and a "
+                    "parseable fiscal_period"
+                ),
+            }
+
+    # Financials aligned-window rescue post-pass. The value post-pass above
+    # answers "is there anything to read"; this one answers "was the DL4
+    # aligned-quarter window confirmed". FDS marks PASSED on mere
+    # non-emptiness, so a non-aligned (missing-Q4-shape) set sails through;
+    # the FMP fallback rules it insufficient, and when its rescue then FAILS
+    # it records only `fills.financials = {"filled": False, ...}` — no status
+    # update — while the yfinance fallback fires on EMPTY lists only. Keyed
+    # on the rescue OUTCOME, not on re-deriving alignment here: an
+    # alignment-only predicate fires on 21 of 43 stored runs (a permanent
+    # entry veto — young listings and annual-only filers never form the
+    # window), the outcome-keyed one on 0. Steady-state reasons
+    # (FINANCIALS_FILL_STEADY_STATE_REASONS) stay PASSED on purpose.
+    from scripts.sources.fmp import (
+        _financials_yield_aligned_window,
+        earnings_payload_lacks_eps,
+        financials_fill_infra_failed,
+    )
+    _fin_cat_fill = category_statuses.get("financials")
+    if isinstance(_fin_cat_fill, dict) and _fin_cat_fill.get("status") == "PASSED":
+        _fmp_fills = (fmp_fallback_summary or {}).get("fills")
+        _fin_fill = _fmp_fills.get("financials") if isinstance(_fmp_fills, dict) else None
+        if financials_fill_infra_failed(_fin_fill):
+            category_statuses["financials"] = {
+                **_fin_cat_fill, "status": "PARTIAL",
+                "error_detail": (
+                    "statements do not form an aligned quarter window and the "
+                    "FMP rescue failed: %s" % _fin_fill.get("reason", "unknown")
+                ),
+            }
+        elif (_fin_fill is None
+              and isinstance(fmp_fallback_summary, dict)
+              and fmp_fallback_summary.get("error_type") is not None
+              and not _financials_yield_aligned_window(financials_data, ticker)):
+            # Eleventh cold round: the orchestrator CRASHED before answering
+            # (the except handler's record carries error_type and empty
+            # fills), so there is no fill record to key on — re-derive
+            # alignment ourselves, in this branch ONLY. Behind a crash record
+            # the alignment predicate cannot become the measured 21/43
+            # permanent veto: a re-run without the crash writes a real fill
+            # record, and a rescue that crashes deterministically DESERVES a
+            # loud persistent gate.
+            category_statuses["financials"] = {
+                **_fin_cat_fill, "status": "PARTIAL",
+                "error_detail": (
+                    "statements do not form an aligned quarter window and the "
+                    "FMP fallback crashed before answering"
+                ),
+            }
+
+    # Earnings EPS post-pass. Same shape as the siblings above. The FMP
+    # trigger and this post-pass share ONE predicate
+    # (`earnings_payload_lacks_eps`): a metadata-only row — both EPS fields
+    # null — is insufficient. Pre-fix the two rescue outcomes were INVERTED:
+    # a successful FMP completion wrote PARTIAL while a failed one left
+    # PASSED standing. PARTIAL, not FAILED — the stub is this feed's steady
+    # state (30 of 43 stored runs) and assemble gates earnings on hard
+    # failures only, so this is disclosure, not a veto.
+    _earn_cat = category_statuses.get("earnings")
+    if isinstance(_earn_cat, dict) and _earn_cat.get("status") == "PASSED":
+        if earnings_payload_lacks_eps(earnings_combined):
+            category_statuses["earnings"] = {
+                **_earn_cat, "status": "PARTIAL",
+                "error_detail": "earnings row carries no actual or estimated EPS",
+            }
+
+    # Balance/cash-flow family post-pass (tenth cold round). The income check
+    # above answers "can the income family be read"; this one asks the same
+    # of the other two statement families, because the DL4 alignment gate
+    # reads ONLY period metadata — four aligned quarters of hollow rows
+    # satisfy it, the FMP fallback sees a "sufficient" window and never
+    # attempts rescue, and a CRITICAL-tier category whose leverage/liquidity/
+    # cash-generation inputs are unreadable reached the gate clean. Same
+    # calibration as every sibling: candidates, not requirements — any ONE
+    # field in ANY row keeps the family PASSED. Fires on 0 of 43 stored runs.
+    #
+    # DELIBERATE TRADEOFF — any-row, NOT newest-window. "Require the newest
+    # aligned window to carry a value" was proposed in three separate cold
+    # reviews and REJECTED each time on a measured counterexample: TTDKY
+    # 20260522's newest income row (2026-03-31, TDK's fiscal year-end) is
+    # metadata-only beside valued older rows — provider latency during an
+    # ADR's reporting window, a healthy issuer's steady state. Any
+    # newest-N-rows predicate sits on that false-veto gradient (N=1 fires on
+    # TTDKY today; N=4 has no real precedent on either side and no nameable
+    # failure mode). Downstream already bounds the hypothetical: extract_fcf
+    # strips trailing-null FCF and the DL4 gate fail-closes valuation. Do
+    # not re-propose without a NEW measured counter-counterexample.
+    _fin_cat_fam = category_statuses.get("financials")
+    if isinstance(_fin_cat_fam, dict) and _fin_cat_fam.get("status") == "PASSED":
+        for _fam_key, _fam_fields, _fam_label in (
+            ("balance_sheets", _BQ_BALANCE_FIELDS, "balance sheets"),
+            ("cash_flows", _BQ_CASHFLOW_FIELDS, "cash flows"),
+        ):
+            _rows = (financials_data.get(_fam_key)
+                     if isinstance(financials_data, dict) else None) or ()
+            if _rows and not any(
+                isinstance(r, dict)
+                and any(r.get(f) is not None for f in _fam_fields)
+                for r in _rows
+            ):
+                category_statuses["financials"] = {
+                    **_fin_cat_fam, "status": "PARTIAL",
+                    "error_detail": f"{_fam_label} carry no scoring value",
+                }
+                break
+
+    # Mixed-currency post-pass (seventeenth cold round). When the ADR repair
+    # cannot establish a safe conversion, the statement rows keep a per-field
+    # USD/native MIX under a "USD" tag — cross-field ratios wrong by the FX
+    # factor, the demonstrated JPY-as-USD failure class. The valuation
+    # producers fail-close independently and the scoring prompts read the
+    # marker, but the CATEGORY status stayed PASSED, so the portfolio gate
+    # (which sees only meta.degraded_categories) was told the run is clean.
+    # The authoritative repair runs at the 02 save boundary, AFTER the
+    # validation payload is written — so materialise the marker here first:
+    # the call is detect-gated and idempotent (the growth-mode path already
+    # invokes it early), a clean or repairable set is a no-op or a clean
+    # all-USD set and stays PASSED. 0 of 43 stored runs carry the marker.
+    _fin_cat_ccy = category_statuses.get("financials")
+    if (isinstance(_fin_cat_ccy, dict) and _fin_cat_ccy.get("status") == "PASSED"
+            and isinstance(financials_data, dict)
+            and financials_data.get("income_statements")):
+        _repair_financials_currency_marker(financials_data)
+        _ccy_marker = financials_data.get("currency_consistency")
+        if (isinstance(_ccy_marker, dict)
+                and _ccy_marker.get("status") == "mixed_unrepairable"):
+            category_statuses["financials"] = {
+                **_fin_cat_ccy, "status": "PARTIAL",
+                "error_detail": (
+                    "statement rows mix currencies and the repair could not "
+                    "establish a safe conversion"
+                ),
+            }
+
+    # News headline post-pass (tenth cold round). Both sources can deliver
+    # hollow rows: FD_NEWS_SHAPE permits `title: null` on the primary path,
+    # and the Finnhub fallback coerced malformed headlines to "" (now dropped
+    # at the source, but this guards BOTH routes — after every source has had
+    # its turn, same doctrine as the siblings above). A titleless article
+    # cannot feed the delta materiality classifier or the monitor's
+    # corroboration path. An EMPTY articles list is not demoted: zero news is
+    # a legitimate state the not_found path already classifies, and demoting
+    # it would gate every quiet small-cap. Fires on 0 of 29 stored
+    # PASSED-news runs.
+    # DELIBERATE TRADEOFF — news sufficiency is headline+date on one
+    # article, NOT source provenance. "All-null sources should demote"
+    # was proposed in a cold review and REJECTED: the materiality
+    # classifier treats an unnamed source exactly like a non-whitelisted
+    # one (low-signal, not invisible), and no-whitelisted-source is the
+    # feed's DOCUMENTED steady state — the Finnhub fallback emits 100%
+    # aggregator sources, which is why /monitor grew a two-outlet
+    # corroboration path and why the partial-tier 14-day safety valve
+    # bounds reuse staleness. Demoting on provenance would fire on every
+    # fallback-fed run. Do not re-propose without evidence the classifier
+    # treats null differently from non-whitelisted.
+    _news_cat = category_statuses.get("news")
+    if isinstance(_news_cat, dict) and _news_cat.get("status") == "PASSED":
+        _arts = (news_data.get("articles")
+                 if isinstance(news_data, dict) else None) or ()
+        def _usable_title(a):
+            _t = a.get("title") if isinstance(a, dict) else None
+            return isinstance(_t, str) and _t.strip()
+        # ONE implementation with the consumer (twenty-second round): the
+        # delta window filter accepts only ISO-prefix-parseable dates, and a
+        # producer-side "any non-blank string" rule let "07/30/2026" keep
+        # the category PASSED while every article vanished from the probe.
+        from scripts.delta.materiality import article_date_usable
+        def _usable_date(a):
+            return article_date_usable(
+                a.get("published_at") if isinstance(a, dict) else None)
+        if _arts and not any(_usable_title(a) for a in _arts):
+            category_statuses["news"] = {
+                **_news_cat, "status": "PARTIAL",
+                "error_detail": "articles carry no usable headline",
+            }
+        elif _arts and not any(_usable_date(a) for a in _arts):
+            # Nineteenth round, the headline check's sibling: invalid
+            # timestamps coerce to published_at=None by design (ISS-171),
+            # and the delta materiality classifier windows by date and
+            # DROPS undated articles — an all-undated payload is unusable
+            # for the probe that decides whether news changed. One dated
+            # article keeps the set usable. 0 of 29 stored PASSED-news runs.
+            category_statuses["news"] = {
+                **_news_cat, "status": "PARTIAL",
+                "error_detail": "articles carry no usable date",
+            }
+        elif _arts and not any(_usable_title(a) and _usable_date(a)
+                               for a in _arts):
+            # Twenty-sixth round: the two any() checks above can be
+            # satisfied by DIFFERENT articles — a titled-but-undated
+            # material article beside a dated-but-titleless one passes
+            # both, and the classifier then keeps only the titleless row
+            # while the material one is dropped at the date filter. At
+            # least ONE article must carry both legs to feed the probe.
+            category_statuses["news"] = {
+                **_news_cat, "status": "PARTIAL",
+                "error_detail": "no article carries both a usable headline and date",
+            }
+
+    # ==================================================================
     # Determine Final Status
     # ==================================================================
+    # This block runs AFTER the sufficiency post-passes above, deliberately:
+    # `final_status` is what 00_validation.json carries at its top level and
+    # what assemble copies verbatim into `meta.validation_status`. Computing
+    # it before the post-passes let a demotion reach the categories dict but
+    # not the top-level status — an all-clear PASSED sitting above a PARTIAL
+    # category it contradicted.
+    #
     # Known limitation: category_statuses for metrics/financials/company/analyst
     # still reflect pre-yfinance-fallback results. The yfinance fallback updates
     # the *data* dicts in-place but does NOT recompute category_statuses entries.
@@ -3293,11 +3770,6 @@ def _main_impl(
             if nk_status in ("FAILED", "PARTIAL", "INCOMPLETE"):
                 final_status = "PARTIAL"
                 break
-
-    # ==================================================================
-    # Save Output Files
-    # ==================================================================
-    print("\n[OUTPUT] Saving files...", file=sys.stderr)
 
     # 00_validation.json -- ALWAYS written (even for subset fetches).
     validation_data = {

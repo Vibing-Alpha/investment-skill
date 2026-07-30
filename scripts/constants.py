@@ -18,6 +18,29 @@ class Status:
     SKIPPED = "SKIPPED"
     ADR_CHECK = "ADR_CHECK"
 
+# BQ-ratio candidate set for the metrics snapshot — the canonical answer to
+# "does this snapshot carry something a business-quality score can read".
+# CANDIDATES, not requirements: any ONE present is enough, because the set a
+# given issuer legitimately reports varies (banks report no quick_ratio,
+# financial-sector companies no gross_margin) and a false "insufficient" on a
+# critical-tier category is a permanent entry veto. P/E is deliberately NOT
+# in this set: market cap plus a P/E carries no profitability or liquidity
+# signal, and P/E is null by nature for pre-profit issuers. Read by BOTH the
+# fetch.py metrics post-pass and the yfinance fallback's status rule (twelfth
+# cold round) — one implementation, so the two layers cannot disagree.
+BQ_METRIC_FIELDS = frozenset({
+    "gross_margin", "operating_margin", "net_margin",
+    "return_on_equity", "return_on_assets",
+    "current_ratio", "quick_ratio",
+    # forty-fifth round: four more fields the scoring calibration
+    # demonstrably consumes (ROIC, asset turnover, leverage, coverage) —
+    # their absence from this any-of set turned a valid snapshot carrying
+    # ONLY them into a permanent entry veto. Membership only widens what
+    # counts as usable: the false-veto-safe direction.
+    "return_on_invested_capital", "asset_turnover",
+    "debt_to_equity", "interest_coverage",
+})
+
 CATEGORIES = {
     "price": {"importance": "critical", "retry_count": 3},
     "metrics": {"importance": "critical", "retry_count": 3},
@@ -30,6 +53,15 @@ CATEGORIES = {
     "earnings": {"importance": "auxiliary", "retry_count": 1},
     "institutional": {"importance": "auxiliary", "retry_count": 1},
     "macro_rates": {"importance": "auxiliary", "retry_count": 1},
+    # historical stays IMPORTANT — a DELIBERATE TRADEOFF (thirty-third cold
+    # round): "no BQ scoring agent reads it, so it should not gate" audits
+    # only the BQ dims and misses the thesis layer built on the SAME run's
+    # data — the ~2-year weekly series in 01_price_data.json is
+    # historical_multiples' documented input (the 2Y valuation bands the
+    # entry decision consumes via the thesis), so losing it degrades a
+    # money-path number. And it cannot become a standing veto: measured,
+    # historical is PASSED on 42 of 43 stored runs — degradation here is a
+    # run-level event, exactly what the gate exists to flag.
     "historical": {"importance": "important", "retry_count": 1},
     "segmented_revenues": {"importance": "auxiliary", "retry_count": 0},
     "eps_validation": {"importance": "auxiliary", "retry_count": 0},

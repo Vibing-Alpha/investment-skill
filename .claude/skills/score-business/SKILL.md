@@ -419,9 +419,15 @@ TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
 if [ "$TIER" != "no_op" ]; then
+# The merge MUST be exit-gated with || (forty-sixth cold round): a failed
+# merge (missing/malformed phase-1 file) followed by the rm below read as
+# success — set -e is INERT in interactive harness shells — and assemble
+# then consumed the UNMERGED phase-2 file, whose SKIPPED stubs erased the
+# phase-1 degradation record entirely.
 "$PYBIN" -m scripts.score_business.validation_merge \
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
-    --phase2 "$REPORT_DIR/data/00_validation.json"
+    --phase2 "$REPORT_DIR/data/00_validation.json" \
+    || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
 # In-place merge: phase 2's SKIPPED stubs that would have clobbered
 # phase 1's live entries are reverted to phase 1's PASSED/WARN data.
 # Top-level fields (tier_decided, validated_at) keep phase 2's value
@@ -429,6 +435,11 @@ if [ "$TIER" != "no_op" ]; then
 rm -f "$REPORT_DIR/.validation_phase1.json"
 fi
 ```
+
+If the merge command exits non-zero, show its stderr to the user and
+**STOP** — do not run assemble: an unmerged phase-2 file carries SKIPPED
+stubs where phase 1 recorded real losses, so proceeding would erase the
+degradation record the gate depends on.
 
 ### Step 5: Assemble
 

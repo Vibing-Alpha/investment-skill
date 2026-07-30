@@ -3,6 +3,13 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.4.0 — 2026-07-31
+
+- New: run-degradation gate — a degraded data fetch now travels WITH the analysis instead of vanishing behind it: bq_analysis.json meta records validation_status + degraded_categories, the delta layer classifies a degraded BQ for re-run, and /portfolio flags or blocks decisions built on degraded data (blocked_by_data_integrity) instead of silently trading on incomplete inputs
+- fix: a provider response for the WRONG or malformed company can no longer be silently relabelled as your ticker — every price/metrics/company/financials/analyst/earnings/institutional row is identity-bound to the requested symbol on both the primary and the FMP fallback, and metrics must carry a true TTM window
+- fix: dozens of status-layer fail-opens closed across the fetch pipeline — rows-present-but-unusable now reads as drift (gates) instead of absence (exempt), fallback results can no longer contradict a recorded absence, unparseable dates/periods fail conservative, and news/analyst usability is judged on a single same-row basis
+- fix: two-phase score-business fetch can no longer erase phase-1 degradation on merge failure — the merge is exit-gated; same-day validation files are treated as unverifiable to all later readers (a same-day re-probe may have rewritten them)
+
 ## v1.3.0 — 2026-07-27
 
 - fix: data fetching works again behind a proxy — the HTTP layer was pinned to a direct connection, so on hosts that reach the providers only via a local/corporate proxy every price and macro call came back HTTP 403 and fetch reported FAILED with empty price data

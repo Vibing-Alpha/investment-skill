@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.3.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.4.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -268,7 +268,7 @@ JSON for easy jq parsing.
 
 Returns one of (spec §8.1, 5-state contract):
 - `fresh` — last full-tier BQ <14 ET days old AND a completed thesis within the last 7 ET days (both `run_meta.{bq,thesis}.completed == true`; windows per `classify.py`)
-- `stale_bq` — BQ ≥14 ET days old (partial/full tier required)
+- `stale_bq` — BQ ≥14 ET days old, OR its last run lost important data (partial/full tier required)
 - `stale_thesis` — thesis >7 ET days old (events reuse ceiling)
 - `bq_only` — has BQ, no thesis
 - `none` — no reports
@@ -308,6 +308,40 @@ Proceed?  [a] all  [s] skip stale  [c] customize
   ticker's row in `decisions.md` so the audit shows decisions were
   made on stale data. Include a prominent "⚠ stale data" note in
   the decision summary.
+  **Legacy or loader-invalid artifacts must not lose their degradation
+  signal here.** A `stale_bq` conflates age with degradation, and a raw
+  read must not resurrect what the typed loader rejects — so for each
+  skipped ticker, first run the loader itself:
+  `python3 -c "from scripts.schemas.bq_analysis import load_bq_analysis;
+  load_bq_analysis(r'<resolved-run-dir>/bq_analysis.json')"`. If it exits
+  non-zero (any schema rejection: wrong types, unknown status vocabulary,
+  asymmetric fields), OR it loads but the raw meta does not carry the
+  full post-change pair — a **non-null string** `validation_status` AND a
+  **list** `degraded_categories`, both present (every other combination —
+  legacy absence, one field missing, `null` status beside an empty list,
+  any non-list value — either predates the gate or is a truncated /
+  unknowable record; assemble writes a null status exactly when
+  completeness was unknowable, and an empty list there means "could not
+  enumerate", not "nothing was lost"), run
+  `python3 -m scripts.delta.portfolio_classify --degradation-summary
+  "<resolved-run-dir>"` and use ITS two fields as the summary fields
+  below, labeled "derived from stored validation". A
+  `degraded_categories` of `null` means the stored record is unreadable —
+  treat it as degraded (entry/add blocked, say so in the rationale).
+  **A thesis outlives its source run here too.** When the selected thesis
+  dir is OLDER than the selected BQ dir, its ER/CE/entry logic was
+  computed from ITS OWN dir's run, not the clean one beside today's BQ —
+  so also run `python3 -m scripts.delta.portfolio_classify
+  --degradation-summary "<thesis-run-dir>"`; if that `degraded_categories`
+  is non-empty or `null`, attach a `thesis_source_degraded:
+  <categories|unreadable>` note beside the ticker's thesis fields. And
+  when thesis and BQ share ONE dir, the source may have been overwritten
+  under it: run `python3 -m scripts.delta.portfolio_classify
+  --thesis-orphaned "<run-dir>"`; `{"orphaned": true}` means a same-day
+  re-score replaced the run the thesis was built from and its state is
+  unrecoverable — attach `thesis_source_degraded: unreadable`. The
+  decision prompt treats the note exactly like a non-empty
+  `degraded_categories`.
 - `[c]` customize: show toggles; then behave as `[a]` for the selected subset.
 
 No timeout — wait for explicit user choice.
@@ -315,12 +349,27 @@ No timeout — wait for explicit user choice.
 For every ticker (fresh, bq_only, AND stale when `[s]` was chosen),
 resolve the latest artifacts via the delta resolver and read them as
 below (read each artifact at its absolute
-`<captured-abs-ROOT>/reports/...` path). Tickers classified `none` that
+`<captured-abs-ROOT>/reports/...` path). **The integrity checks described
+under `[s]` apply to EVERY read here — including artifacts freshly
+produced by this run's `[a]` cascade**: run the typed loader per
+artifact, and if it rejects, or the raw meta lacks the full post-change
+pair (a non-null string `validation_status` AND a list
+`degraded_categories`), derive the two fields via
+`--degradation-summary` exactly as described there. A just-written
+artifact earns no exemption — a truncation that happened during THIS
+run's cascade is precisely the one no later classification has seen yet. Tickers classified `none` that
 weren't cascaded should be flagged in decisions.md as "no analysis
 available".
 
 For tickers with `bq_analysis.json`, read the **summary only**:
 - `scores` (overall, fundamental, forward, industry)
+- `meta.validation_status` (str|null — the fetch's top-level status; disclosure context)
+- `meta.degraded_categories` (list — important/critical data the fetch lost; this is the gate. Key MISSING while `validation_status` is non-null = a corrupt record — treat as degraded, do not open/add)
+- `meta.data_freshness` + `meta.freshness_note` (disclosure, NOT a gate — the
+  latest financial period behind the score and any staleness/anomaly prose.
+  200-day-old fundamentals on a quarterly filer deserve a sentence in the
+  rationale; they do not block, because filing cadence varies by issuer and
+  the delta clocks own artifact staleness)
 - `synthesis.watchlist_recommendation`
 - `synthesis.conviction`
 - `synthesis.thesis`

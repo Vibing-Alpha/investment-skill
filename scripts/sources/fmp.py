@@ -7,6 +7,7 @@ fmp_api_key as an explicit parameter (no module-level global).
 import re
 import sys
 import urllib.parse
+import datetime as _dt
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -891,6 +892,21 @@ def fetch_financials_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterR
         if not v.ok:
             return AdapterResult.failed_from_shape(v, source=src)
 
+    # Identity binding (fortieth round): a rescue row carrying a DIFFERENT
+    # symbol is a cross-wired answer — another issuer's statements must not
+    # replace this one's. Enforced only where the field is present.
+    from scripts.sources.financial_datasets import _identity_mismatch
+    for raw in (inc_raw, bal_raw, cf_raw):
+        for _r in raw:
+            _sym = _r.get("symbol") if isinstance(_r, dict) else None
+            if _identity_mismatch(_sym, ticker):
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail=(f"response identity mismatch: requested {ticker}, "
+                            f"FMP statement row carries {_sym}"),
+                    source=src, retryable=False,
+                )
+
     income = [_convert_fmp_income_row(r) for r in inc_raw if _is_fmp_quarterly_row(r)]
     balance = [_convert_fmp_balance_row(r) for r in bal_raw if _is_fmp_quarterly_row(r)]
     cash = [_convert_fmp_cashflow_row(r) for r in cf_raw if _is_fmp_quarterly_row(r)]
@@ -935,8 +951,16 @@ def fetch_financials_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterR
         for r in income
     )
     if not _has_core_quarter:
+        # SHAPE_MISMATCH, not NOT_FOUND (thirty-second cold round): this
+        # branch's own rationale calls the state provider/schema DRIFT —
+        # rows exist, values are hollow — and coding it not_found collided
+        # with the genuine-404 vocabulary the fill steady-state exemption
+        # keys on: a drifted rescue answer was read as "FMP does not cover
+        # the issuer" and the primary's unconfirmed window stayed PASSED.
+        # Drift gates; only absence exempts (the round-29 earnings ruling).
+        # A real FMP 404 still maps to NOT_FOUND via the canonical mapper.
         return AdapterResult.failed(
-            code=ErrorCode.NOT_FOUND,
+            code=ErrorCode.SHAPE_MISMATCH,
             detail=(f"FMP statements for {ticker} are metadata-only "
                     f"(no revenue/net_income values)"),
             source=src, retryable=False,
@@ -993,6 +1017,21 @@ def fetch_metrics_from_fmp(ticker: str, *, fmp_api_key: str = "",
                 detail=f"FMP {_name} first row is {type(_rows[0]).__name__}, not dict",
                 source=src, retryable=False,
             )
+    # Identity binding (fortieth round). CRITICAL here specifically:
+    # _convert_fmp_metrics STAMPS the requested ticker onto the emitted
+    # snapshot, so a cross-wired quote/ratios row would be actively
+    # relabelled as this issuer. Verify the raw rows first.
+    from scripts.sources.financial_datasets import _identity_mismatch
+    for _rows, _name in ((quote_raw, "quote"), (km_raw, "key-metrics"), (ra_raw, "ratios")):
+        for _r in _rows:
+            _sym = _r.get("symbol") if isinstance(_r, dict) else None
+            if _identity_mismatch(_sym, ticker):
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail=(f"response identity mismatch: requested {ticker}, "
+                            f"FMP {_name} row carries {_sym}"),
+                    source=src, retryable=False,
+                )
 
     def _first(rows):
         return rows[0] if rows and isinstance(rows[0], dict) else {}
@@ -1232,15 +1271,48 @@ def fetch_analyst_estimates_from_fmp(
     if not v.ok:
         return AdapterResult.failed_from_shape(v, source=src)
 
-    # Sort ascending by period-end date (YYYY-MM-DD sorts lexically). Rows
-    # missing a date sort first under "" and are harmless (dropped by the
-    # forward filter / capped out).
-    rows_asc = sorted(
-        (r for r in raw if isinstance(r, dict)),
-        key=lambda r: r.get("date") or "",
-    )
+    # Sort ascending by period-end date. Only rows whose date PARSES as an
+    # ISO prefix participate (thirty-sixth cold round): the lexical
+    # comparison below assumes ISO strings, and a non-empty unparseable
+    # date ("not-a-date") sorts ABOVE every digit-led date, so a malformed
+    # row was classified forward and DISPLACED valid dated rows from the
+    # selection — the load-bearing value was not a date at all. A row
+    # without a usable date carries no horizon and cannot serve a
+    # forward-consensus selection; rows-present-but-none-dated is DRIFT
+    # (SHAPE_MISMATCH gates), never absence (NOT_FOUND exempts).
+    def _date_parseable(r):
+        d = r.get("date")
+        if not isinstance(d, str) or not d:
+            return False
+        try:
+            _dt.date.fromisoformat(d[:10])
+        except ValueError:
+            return False
+        return True
+
+    _dict_rows = [r for r in raw if isinstance(r, dict)]
+    # Identity binding (forty-first-round preemption of the fortieth's
+    # principle): a cross-wired estimates answer must not become this
+    # issuer's consensus. Enforced only where the field is present.
+    from scripts.sources.financial_datasets import _identity_mismatch
+    for _r in _dict_rows:
+        _sym = _r.get("symbol")
+        if _identity_mismatch(_sym, ticker):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"FMP estimate row carries {_sym}"),
+                source=src, retryable=False,
+            )
+    rows_asc = sorted((r for r in _dict_rows if _date_parseable(r)),
+                      key=lambda r: r["date"])
+    if _dict_rows and not rows_asc:
+        return AdapterResult.failed(
+            code=ErrorCode.SHAPE_MISMATCH,
+            detail=f"FMP analyst estimates for {ticker} carry no parseable dates",
+            source=src, retryable=False)
     if as_of_date:
-        forward = [r for r in rows_asc if (r.get("date") or "") >= as_of_date]
+        forward = [r for r in rows_asc if r["date"] >= as_of_date]
         # Fallback when every estimate period is already in the past: keep the
         # most recent quarters (tail of the ascending list), not the oldest.
         chosen = forward[:_FMP_ANALYST_FORWARD_QUARTERS] if forward \
@@ -1287,6 +1359,19 @@ def fetch_earnings_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterRes
     v = validate_api_shape(sur_raw, FMP_EARN_SURPRISE_SHAPE)
     if not v.ok:
         return AdapterResult.failed_from_shape(v, source=src)
+    # Identity binding (forty-first-round preemption of the fortieth's
+    # principle): a cross-wired surprises answer must not become this
+    # issuer's beat/miss snapshot. Enforced only where the field is present.
+    from scripts.sources.financial_datasets import _identity_mismatch
+    for _r in sur_raw:
+        _sym = _r.get("symbol") if isinstance(_r, dict) else None
+        if _identity_mismatch(_sym, ticker):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"FMP surprise row carries {_sym}"),
+                source=src, retryable=False,
+            )
     if not sur_raw:
         return AdapterResult.failed(code=ErrorCode.NOT_FOUND,
                                     detail=f"FMP returned no earnings surprises for {ticker}",
@@ -1329,6 +1414,59 @@ def _financials_yield_aligned_window(financials_data, ticker: str) -> bool:
     except Exception:
         # InsufficientQuartersError / SchemaError / any drift → insufficient.
         return False
+
+
+# Failure reasons that mean the rescue ANSWERED and the aligned window
+# genuinely is not formable — the issuer's steady state (young listing,
+# annual-only filer, outside FMP coverage), not a run-level loss.
+# `fetch.py`'s fill-failure post-pass must NOT demote `financials` on these:
+# a steady state cannot discriminate a run-level event, and demoting on one
+# is a PERMANENT entry veto (an alignment-only predicate was measured firing
+# on 21 of 43 stored runs; this outcome-keyed one fires on 0). Everything
+# else — rate_limit, unauthorized, transport, parse, shape_mismatch (the
+# hollow-drift response, recoded from not_found in the thirty-second round
+# so it no longer collides with this exemption), an absent reason — is an
+# infrastructure failure: the window was ruled insufficient by the primary
+# and NO second source could confirm or repair it this run.
+FINANCIALS_FILL_STEADY_STATE_REASONS = frozenset({
+    "fmp_window_insufficient", "not_found",
+})
+
+
+def financials_fill_infra_failed(fill) -> bool:
+    """True when the FMP financials rescue was attempted this run and failed
+    for an infrastructure reason. `fill` is the `fills["financials"]` record
+    written by `_run_fmp_fallback_impl` (or None/absent when the FDS window
+    was aligned, the key is unset, or the fallback never ran — all of which
+    must answer False: the no-record state is every keyless run and every
+    healthy run)."""
+    if not isinstance(fill, dict):
+        return False
+    filled = fill.get("filled")
+    if filled is True:
+        return False
+    if not isinstance(filled, bool):
+        # Strict boolean (thirty-seventh round): the string "false" is
+        # truthy, so a corrupt scalar read as "successfully filled" and the
+        # unconfirmed window stayed PASSED. A non-bool cannot testify —
+        # conservative: demote.
+        return True
+    return fill.get("reason") not in FINANCIALS_FILL_STEADY_STATE_REASONS
+
+
+def earnings_payload_lacks_eps(earnings_combined) -> bool:
+    """True when the combined earnings payload carries no usable EPS value —
+    the row is metadata-only (`report_period`/`currency` with both EPS fields
+    null), empty, or malformed. EITHER field present is usable: an
+    upcoming-quarter row legitimately carries an estimate and no actual.
+
+    ONE implementation, two callers (producer-consumer rule 3): the FMP
+    fallback trigger and `fetch.py`'s earnings post-pass. The company
+    description predicate regressed once precisely because a second copy of
+    it drifted."""
+    _e = earnings_combined.get("earnings") if isinstance(earnings_combined, dict) else None
+    return (not isinstance(_e, dict) or not _e
+            or (_e.get("actual_eps") is None and _e.get("estimated_eps") is None))
 
 
 @dataclass(frozen=True)
@@ -1502,11 +1640,7 @@ def _run_fmp_fallback_impl(
             fills["analyst"] = {"filled": False, "reason": reason}
 
     # --- Earnings (completion: FDS often returns a row with null EPS) ------
-    _e = earnings_combined.get("earnings") if isinstance(earnings_combined, dict) else None
-    _earnings_insufficient = (
-        not isinstance(_e, dict) or not _e
-        or (_e.get("actual_eps") is None and _e.get("estimated_eps") is None)
-    )
+    _earnings_insufficient = earnings_payload_lacks_eps(earnings_combined)
     if want_earnings and _earnings_insufficient:
         res = fetch_earnings_fn(ticker, fmp_api_key=fmp_api_key)
         if (res.ok and isinstance(res.data, dict)

@@ -103,6 +103,11 @@ class BQTierInputs:
     days_since_last_full: int
     material_news_count: int
     estimates_hash_changed: bool
+    # A prior run whose fetch lost important data. Forces full: no_op/partial
+    # copy dim scores from the prior while assemble stamps THIS run's
+    # (probe-scope) validation over them, which would relabel gutted scores
+    # clean without recomputing anything.
+    prior_bq_degraded: bool = False
 
 
 def decide_bq_tier(inputs: BQTierInputs) -> str:
@@ -123,6 +128,10 @@ def decide_bq_tier(inputs: BQTierInputs) -> str:
     if inputs.new_earnings_release:
         return "full"
     if inputs.days_since_last_full >= FULL_TIER_DAYS_CEILING:
+        return "full"
+    # Recompute every dimension when the prior run was degraded — a no_op/partial
+    # would copy its scores forward under a fresh, clean-looking validation.
+    if inputs.prior_bq_degraded:
         return "full"
     # partial tier
     if inputs.material_news_count > 0:

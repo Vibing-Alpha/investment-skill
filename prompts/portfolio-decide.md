@@ -28,6 +28,60 @@ You will receive:
      conditions, signal assessment, key uncertainties
    - `bq_analysis.json` (summary): BQ score, dimension scores,
      key strengths/risks, watchlist recommendation
+
+   **Check `meta.degraded_categories` before using any score.** A BQ score is
+   only as good as the fetch behind it, and a degraded fetch produces an
+   ordinary-looking score — runs that lost their metrics and news feeds scored
+   5.8-7.5. The field already excludes routine absences (auxiliary feeds, and
+   data an issuer structurally does not file), so a non-empty list means the
+   run genuinely lost important data. Rules:
+
+   - Empty list → use the score normally. Say nothing about degradation.
+   - Non-empty → name the missing categories in the decision rationale, and do
+     NOT open a new position or size up an existing one on that ticker from
+     this analysis alone. Prefer routing the ticker to a re-run.
+   - Nothing clears this block in-band. If the same categories come back
+     degraded run after run, the provider most likely does not cover them for
+     this issuer — say so in the rationale so a permanent block is legible
+     rather than mysterious, but **the block still holds**. You cannot tell a
+     structural coverage limit from a multi-day provider outage by looking at
+     the category names, and the outage is the case this gate exists for.
+   - Exits, trims and stops are ALWAYS still allowed, degraded or not.
+     Degraded data is a reason to act conservatively, never a reason to skip a
+     risk control.
+   - `validation_status` **absent, or present as `null`** → UNKNOWN, not clean.
+     Treat both identically: note once that the run's completeness is
+     unverifiable, then judge the entry on its merits. Do NOT block. Absence is
+     not evidence of data loss, and blocking on it would contradict the rule
+     below on unknown earnings dates: *missing data must not silently block an
+     otherwise-authorized entry.* The block requires a **present, non-empty**
+     `degraded_categories` — or the corrupt-record shape in the next rule.
+   - `validation_status` present and non-null but the `degraded_categories`
+     key **missing entirely** → a CORRUPT degradation record, not an unknown
+     one. The producer writes the two fields together, so this shape only
+     arises from truncation or a hand edit; the typed loader rejects it, and
+     an artifact that reached you through a raw read (the skip-stale path)
+     must not dodge the gate the loader enforces. Treat it exactly like a
+     non-empty list: say the record is corrupt in the rationale, and do NOT
+     open or size up on this analysis. The SAME treatment applies when
+     `degraded_categories` arrives as anything that is **not a list** —
+     `null` (the skip-stale substitution for a legacy artifact whose stored
+     validation is unreadable), a number, a string, anything: the producer
+     only ever writes a list, so every other type is a corrupt record — not
+     the absent-fields UNKNOWN of the rule above.
+   - A **`thesis_source_degraded`** note beside the thesis (the skill derives
+     it on the skip-stale path when the thesis is older than the BQ — or was
+     orphaned by a same-day re-score that overwrote its source in place: the
+     run the thesis was BUILT from lost those categories or is no longer
+     recoverable, even though the BQ beside today's data is clean) → same
+     treatment as a non-empty `degraded_categories`. The thesis's ER/CE/entry
+     logic came from the degraded inputs, and a clean re-scored BQ does not
+     launder them; name the categories and do NOT open or size up on this
+     analysis.
+
+   `meta.validation_status` is disclosure context only — do NOT gate on it. It
+   is `PARTIAL` or `FAILED` on essentially every run, and a `FAILED` often
+   reflects nothing but a foreign issuer's structurally absent SEC filing.
 3. **Macro snapshot** — broad market indicators (SPY/QQQ/DJI price + MAs),
    VIX (current + MA20), interest rates (fed funds, `us_10y`, `us_5y`, and
    `spread_10y_5y` — the 10Y−5Y spread; `^FVX` is the 5Y, so there is no `us_2y`)
@@ -158,6 +212,13 @@ Before finalizing each ticker's action, check five reasoning moves:
    principle-sanctioned breakout entry because ER is negative) on a criterion you
    cannot tie to a `#N`, that is the error — drop the criterion, not the action.
 
+   **One exception, and only this one:** a decision cannot rest on data the run
+   failed to fetch. `meta.degraded_categories` (see the `bq_analysis.json`
+   bullet above) is a data-integrity constraint on par with a hard constraint —
+   it is not "generally-sensible investing wisdom", and it does not need to tie
+   to a `#N`. It restricts entry and add only; it never blocks a risk-control
+   exit.
+
 ### Phase 2.5: Candidate-Action Sweep — inaction must clear the same bar as action
 
 The five reasoning moves above stop you from BLOCKING a principle-authorized
@@ -188,9 +249,19 @@ exit side:
   qualifying target to rotate into?
 
 A `hold` is valid ONLY when every status resolves to one of: `not_triggered`,
-`blocked_by_hard_constraint`, or `deferred_by_named_soft_preference`. If an add
-or rotation trigger IS present and clears its conditions, the action is
+`blocked_by_hard_constraint`, `blocked_by_data_integrity`, or
+`deferred_by_named_soft_preference`. If an add or rotation trigger IS present
+and clears its conditions — and the data-integrity gate is clear — the action is
 `add`/`reduce`/`buy` — not `hold`.
+
+`blocked_by_data_integrity` means exactly: `meta.degraded_categories` is present
+and non-empty — or carries one of the corrupt-record shapes from the
+`bq_analysis.json` rules above (the key missing beside a non-null
+`validation_status`, the skip-stale `null`, or a `thesis_source_degraded`
+note), in which case name `degradation record unreadable` (or the note's
+categories) as the category. It is not a general-purpose "I have doubts"
+escape hatch; if you cannot name the missing categories (or the corrupt
+record), it does not apply.
 
 **For every WATCHLIST name**, separate a HARD gate failure from a SOFT deferral:
 
@@ -398,8 +469,9 @@ Requirements:
   (state that in `summary`) — never manufacture entries to fill it. Each
   near-miss carries `trigger` (the satisfied evidence, in run-day technical
   terms) and `waiting_on` (the blocker, prefixed with one of `not_triggered:` /
-  `blocked_by_hard_constraint:` / `deferred_by_named_soft_preference:` /
-  `funding_or_priority:` for grep-ability). `candidate_scan` is portfolio-level
+  `blocked_by_hard_constraint:` / `blocked_by_data_integrity:` /
+  `deferred_by_named_soft_preference:` / `funding_or_priority:` for
+  grep-ability). `candidate_scan` is portfolio-level
   audit context only — the per-ticker `decisions[].rationale` remains
   authoritative for each ticker's action. An all-hold/all-skip run that omits or
   malforms `candidate_scan` triggers a logger WARN (friction, not a gate; a

@@ -32,9 +32,19 @@ from typing import Any
 
 
 def is_live_entry(entry: Any) -> bool:
-    """An entry is 'live' (carries real data) if it's a dict whose
-    status is NOT 'SKIPPED'."""
-    return isinstance(entry, dict) and entry.get("status") != "SKIPPED"
+    """An entry is 'live' (carries real data) if it's a dict with a PRESENT,
+    non-empty status that is not 'SKIPPED'.
+
+    The presence requirement is load-bearing (eleventh cold round): fetch.py
+    writes a status into every entry, so a statusless `{}` is corruption —
+    and "not SKIPPED" alone counted it as live, letting a corrupt phase-2
+    stub REPLACE a real phase-1 failure record (status, error_code, detail).
+    A merge must never prefer corruption over evidence. A non-canonical but
+    present status (e.g. "WARN") still counts as live — vocabulary policing
+    is assemble's job, evidence-preservation is this function's."""
+    return (isinstance(entry, dict)
+            and bool(entry.get("status"))
+            and entry.get("status") != "SKIPPED")
 
 
 def merge_validation(
@@ -53,9 +63,27 @@ def merge_validation(
       re-clobber a correctly-detected ADR (MRAAY/Murata) back to False. OR
       the two phases: a non-ADR stays False (neither phase sets True), a
       detected ADR stays True.
+    - EXCEPTION — `fmp_fallback`, for the same reason. Only phase 1 fetches
+      the categories FMP back-fills (financials/metrics/analyst/earnings);
+      the phase-2 subset fetch never runs the fallback and writes `None`.
+      Since phase 2 is the baseline for every top-level field, that `None`
+      replaced phase 1's audit record while phase 1's CATEGORY statuses
+      survived — so a category left at `FAILED/not_found` by a fallback that
+      was rate-limited kept its status but lost the evidence that the
+      fallback never confirmed the absence. `assemble._summarize_degradation`
+      reads exactly that record to decide whether the structural exemption
+      applies, and with it gone it read the run as legacy and exempted the
+      category: reproduced as `["earnings"]` before the merge and `[]` after.
+      Corpus confirms the reach — the only two stored runs that still carry a
+      record are `tier=probe` and `tier=no_op`, the two that never merge.
+      Phase 2 wins only if it actually has a record.
     """
     merged: dict[str, Any] = dict(phase2)  # phase 2 baseline (terminal truth)
     merged["is_adr"] = bool(phase1.get("is_adr")) or bool(phase2.get("is_adr"))
+    p2_fb = phase2.get("fmp_fallback") if isinstance(phase2, dict) else None
+    if not isinstance(p2_fb, dict):
+        merged["fmp_fallback"] = (phase1.get("fmp_fallback")
+                                  if isinstance(phase1, dict) else None)
     p1_cats = phase1.get("categories", {}) if isinstance(phase1, dict) else {}
     p2_cats = phase2.get("categories", {}) if isinstance(phase2, dict) else {}
 
@@ -66,8 +94,15 @@ def merge_validation(
             merged_cats[key] = p2_entry  # phase 2 has real data, wins
         elif key in p1_cats:
             merged_cats[key] = p1_cats[key]  # keep phase 1's live entry
-        else:
-            merged_cats[key] = p2_entry  # phase 2-only SKIPPED stub (legitimate)
+        # else: OMIT the key (thirtieth cold round). Both phases write EVERY
+        # category — SKIPPED stubs included — so a key absent from phase 1 is
+        # truncation evidence, and synthesizing phase 2's SKIPPED stub into
+        # the gap LAUNDERED that evidence past the downstream completeness
+        # checks: the merged map read gating-complete, SKIPPED read clean,
+        # and an unknown loss became an explicitly clean run. A LIVE phase-2
+        # entry (the branch above) is real evidence and stands on its own;
+        # a stub is not, and the missing key is exactly what the
+        # stored-validation shape check exists to catch.
     merged["categories"] = merged_cats
     return merged
 

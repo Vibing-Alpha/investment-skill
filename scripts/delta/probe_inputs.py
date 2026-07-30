@@ -343,12 +343,62 @@ def build_bq_tier_inputs(
     # Classifier material count (3-part health check)
     material_count, _healthy, _material_list = _load_classifier(classifier_output_path)
 
+    # ONE implementation, shared with classify() — see portfolio_classify.
+    from scripts.delta.portfolio_classify import bq_degradation_state
+
+    # EITHER directory degraded forces full. The question this answers is NOT
+    # "what is the most recent state" — it is "would a no_op/partial copy
+    # scores from a degraded run?" Those differ, because the copy SOURCE is
+    # always `PRIOR_DIR` = `find-latest-prior`, which EXCLUDES today
+    # (score-business/SKILL.md:246-262), never "the most recent".
+    #
+    # A most-recent-wins ternary gets the recovery day wrong: yesterday
+    # degraded, today re-run to `full` and rewritten clean, then a SECOND
+    # same-day run reads today's clean artifact, answers False, decides
+    # `no_op`, and copies YESTERDAY'S DEGRADED scores over today's freshly
+    # recomputed ones — which `assemble` then stamps `degraded_categories: []`.
+    # That is verbatim the failure this task exists to close, one day later.
+    #
+    #   prior_dir degraded  -> the copy source is dirty      -> full
+    #   report_dir degraded -> today's own artifact is dirty -> full
+    #
+    # The cost is one redundant `full` on a second same-day run of a recovery
+    # day, and it terminates by itself: tomorrow `find_latest_prior` returns
+    # today's clean directory.
+    #
+    # `validation_may_be_stale=True` for report_dir ONLY: this run's probe
+    # fetch has already rewritten today's 00_validation.json (fetch.py:3302)
+    # before the tier decision, so a legacy artifact there cannot be verified
+    # against it — answer conservatively. `prior_dir` is an earlier date that
+    # this run never touched, so its validation is trusted.
+    # ASYMMETRY, deliberate: the two directories answer to different defaults
+    # because "no answer" means different things at each.
+    #
+    # `prior_dir` was returned by the resolver, which only returns a directory
+    # whose run completed — so an artifact is EXPECTED there. `None` means it
+    # is present but unloadable, i.e. unknown, and unknown must fail closed:
+    # a `no_op` would otherwise copy that prior's dimension scores forward
+    # without recomputing a number, which is exactly the money-path harm this
+    # branch exists to stop. Hence `is not False`, matching `classify()`.
+    #
+    # `report_dir` is TODAY's directory, which on the ordinary first run of a
+    # day holds no `bq_analysis.json` at all — that is the normal state, not an
+    # anomaly. Reading it as degraded would force `full` on every ticker every
+    # day and kill the delta layer outright, so absence here collapses to "not
+    # degraded". Only a file that actually exists and answers True gates.
+    report_state = bq_degradation_state(report_dir, validation_may_be_stale=True)
+    prior_state = (
+        bq_degradation_state(prior_dir) if prior_dir is not None else False
+    )
+    prior_bq_degraded = bool(report_state) or prior_state is not False
+
     return BQTierInputs(
         new_financial_period=new_financial_period,
         new_earnings_release=new_earnings_release,
         days_since_last_full=days_since_last_full,
         material_news_count=material_count,
         estimates_hash_changed=estimates_hash_changed,
+        prior_bq_degraded=prior_bq_degraded,
     )
 
 

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from scripts.constants import YAHOO_BASE_URL
+from scripts.constants import BQ_METRIC_FIELDS, YAHOO_BASE_URL
 from .common import (
     is_us_country,
     http_get,
@@ -477,19 +477,30 @@ def fetch_historical_prices(
         for idx, (ts, o, h, l, c, v) in enumerate(zip(
             timestamps, opens, highs, lows, closes, volumes,
         )):
-            if c is not None:
+            # A bar without a POSITIVE close is unusable (thirty-eighth cold
+            # round): the shape layer requires finite numerics but not
+            # positivity, so close=-4 bars sailed to PASSED while
+            # indicators and the historical-multiple anchors choke on
+            # them. Drop the bar; sanitize the salvageable fields — a
+            # non-positive open/high/low refills from the close (the same
+            # treatment as None), a non-positive adjclose falls back to
+            # the close, and a NEGATIVE volume (unlike the legitimate 0
+            # of a halt day) becomes None, the documented unknown-volume
+            # path.
+            if c is not None and c > 0:
                 # Fill partial bars — Yahoo emits None for incomplete OHLC
-                o = o if o is not None else c
-                h = h if h is not None else max(o, c)
-                l = l if l is not None else min(o, c)
+                o = o if (o is not None and o > 0) else c
+                h = h if (h is not None and h > 0) else max(o, c)
+                l = l if (l is not None and l > 0) else min(o, c)
                 # Missing volume stays None — writing 0 here poisons every
                 # downstream MA20/MA5/OBV calculation with phantom zero-volume
                 # bars. calc_volume + indicator pair-filtering drop None bars
                 # cleanly; consumers that sum volumes must guard against None.
-                v = v if v is not None else None  # fail-open-ok: explicit None propagation; see audit pattern N
+                v = v if (v is not None and v >= 0) else None  # fail-open-ok: explicit None propagation; see audit pattern N
                 adjc = (
                     adj_closes[idx]
                     if idx < len(adj_closes) and adj_closes[idx] is not None
+                    and adj_closes[idx] > 0
                     else c
                 )
                 result["daily"].append({
@@ -540,18 +551,20 @@ def fetch_historical_prices(
         for idx, (ts, o, h, l, c, v) in enumerate(zip(
             timestamps, opens, highs, lows, closes, volumes,
         )):
-            if c is not None:
-                o = o if o is not None else c
-                h = h if h is not None else max(o, c)
-                l = l if l is not None else min(o, c)
+            # Same positivity gate as the daily loop (thirty-eighth round).
+            if c is not None and c > 0:
+                o = o if (o is not None and o > 0) else c
+                h = h if (h is not None and h > 0) else max(o, c)
+                l = l if (l is not None and l > 0) else min(o, c)
                 # Missing volume stays None — writing 0 here poisons every
                 # downstream MA20/MA5/OBV calculation with phantom zero-volume
                 # bars. calc_volume + indicator pair-filtering drop None bars
                 # cleanly; consumers that sum volumes must guard against None.
-                v = v if v is not None else None  # fail-open-ok: explicit None propagation; see audit pattern N
+                v = v if (v is not None and v >= 0) else None  # fail-open-ok: explicit None propagation; see audit pattern N
                 adjc = (
                     adj_closes[idx]
                     if idx < len(adj_closes) and adj_closes[idx] is not None
+                    and adj_closes[idx] > 0
                     else c
                 )
                 result["weekly"].append({
@@ -624,6 +637,16 @@ def fetch_historical_prices(
     # those values. Sanitize daily/weekly bars + raw chart before
     # construction so the producer surface stays JSON-safe regardless
     # of upstream drift (mirrors ISS-105 rates emit-site coverage).
+    # Chronological normalization (forty-second round): Yahoo's array order
+    # was preserved verbatim, and downstream indicators read [-1] as the
+    # LATEST observation — a reversed (newest-first) but otherwise valid
+    # response computed RSI/MACD/OBV and every trend signal BACKWARDS under
+    # a PASSED label. The data is fully usable once ordered, so sort rather
+    # than reject; the sort key is the ISO date string (lexical == temporal).
+    # MUST run before the sanitize below — the emitted payload is a copy.
+    result["daily"].sort(key=lambda b: b["time"])
+    result["weekly"].sort(key=lambda b: b["time"])
+
     sanitized_data = sanitize_dict_numerics(
         {"result": result, "raw_daily_chart": raw_daily_chart},
         coerce_bool=False,  # keep any legitimate bool fields (none today)
@@ -632,6 +655,19 @@ def fetch_historical_prices(
     # pre-migration body dispatches PASSED / PARTIAL / FAILED on
     # daily+weekly presence; preserve that so Slice-7 byte-equivalent
     # gate holds).
+    #
+    # DELIBERATE TRADEOFF — presence, NOT minimum bar counts. "One daily
+    # bar plus one weekly bar must not be PASSED" was proposed in three
+    # separate cold reviews and REJECTED each time: a fresh listing's
+    # COMPLETE history is one-to-a-few bars, so any minimum-count or
+    # minimum-span rule permanently vetoes new listings — the exact
+    # false-veto class this system's calibration forbids — while the
+    # downstream consumers already speak the shortage visibly
+    # (indicators.py emits insufficient_data legs the technical prompts
+    # treat as unknown, and historical_multiples' window anchoring
+    # degrades legibly). Do not re-propose without a measured
+    # counter-counterexample distinguishing truncation drift from a
+    # young listing.
     if result["daily"] and result["weekly"]:
         return AdapterResult.passed(
             data=sanitized_data,
@@ -1834,10 +1870,19 @@ def _run_yfinance_fallback_impl(
             met_filled = met_summary["fields_filled"] > 0
             met_cat_status = None
             if met_filled:
+                # Sufficiency keys on the canonical BQ-ratio set, NOT on P/E
+                # (twelfth cold round — the KYOCY description lesson replayed
+                # on metrics). P/E is null by nature for pre-profit issuers,
+                # it is this fallback's own TRIGGER, and metrics is
+                # critical-tier: a P/E-keyed status turned every healthy
+                # loss-maker whose snapshot the fallback touched into a
+                # permanent degraded_categories entry. Any BQ ratio present →
+                # PASSED; none → PARTIAL, which is what the fetch post-pass
+                # (same set, one implementation) would conclude anyway.
                 met_cat_status = {
                     "status": (
                         "PASSED"
-                        if metrics_data.get("price_to_earnings_ratio") is not None
+                        if any(metrics_data.get(f) is not None for f in BQ_METRIC_FIELDS)
                         else "PARTIAL"
                     ),
                     "data_source": "yfinance",
@@ -1871,10 +1916,19 @@ def _run_yfinance_fallback_impl(
                 # (per superpowers review): extract `_company_text_present`
                 # so the predicate is unit-testable without
                 # round-tripping through the whole fallback path.
+                # Sufficiency keys on the DESCRIPTION alone. Headcount was in
+                # this predicate and is not decision-relevant: Yahoo commonly
+                # omits `employees` for foreign issuers, and re-fetching cannot
+                # add what the profile does not carry. Measured — KYOCY
+                # 20260529 has Kyocera's full business description and a null
+                # headcount, and that alone made `company` PARTIAL, which is an
+                # important-tier category, which permanently gated the ticker
+                # for entry via `meta.degraded_categories`. A status that
+                # reports a loss where none occurred is the same failure as
+                # missing a real one; the gate can only be as honest as this.
                 desc_present = _company_text_present(company_data.get("description"))
-                emp_present = company_data.get("employees") is not None
                 comp_cat_status = {
-                    "status": "PASSED" if (desc_present and emp_present) else "PARTIAL",
+                    "status": "PASSED" if desc_present else "PARTIAL",
                     "data_source": "yfinance",
                 }
                 print(

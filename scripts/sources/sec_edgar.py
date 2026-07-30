@@ -646,8 +646,12 @@ def fetch_filing_from_sec_edgar(
                 # parse outcome; consumer's content-driven fallback chain
                 # still fires on empty items_metadata.
                 print("    SEC EDGAR: text too short, skipping", file=sys.stderr)
+                # SHAPE_MISMATCH, not NOT_FOUND (forty-fourth round): the
+                # filing EXISTS — we downloaded it — and the extraction came
+                # up short. Absence claims exempt at the gate; extraction
+                # failures on an existing filing are drift and must gate.
                 return AdapterResult.failed(
-                    code=ErrorCode.NOT_FOUND,
+                    code=ErrorCode.SHAPE_MISMATCH,
                     detail=f"plain text too short ({len(plain_text)} < 5000) for {filing_type}",
                     source=src,
                     retryable=False,
@@ -797,15 +801,18 @@ def fetch_filing_from_sec_edgar(
 
         # ISS-016 fix: post-extraction empty result was silent-success even
         # when the http+parse pipeline ran clean. If items_metadata stayed
-        # empty, no items matched their boundary patterns — surface as
-        # NOT_FOUND so observability is honest.
+        # empty, no items matched their boundary patterns. SHAPE_MISMATCH,
+        # not NOT_FOUND (forty-fourth round): the filing exists and its
+        # layout defeated the extractors — drift, which gates; a not_found
+        # here walked the structural-absence exemption as "the issuer files
+        # nothing".
         if not items_metadata:
             print(
                 "    SEC EDGAR: no items extracted from filing",
                 file=sys.stderr,
             )
             return AdapterResult.failed(
-                code=ErrorCode.NOT_FOUND,
+                code=ErrorCode.SHAPE_MISMATCH,
                 detail=f"no items_spec keys matched in {filing_type} filing content",
                 source=src,
                 retryable=False,

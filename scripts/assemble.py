@@ -16,7 +16,7 @@ from datetime import timezone
 from pathlib import Path
 
 from scripts.cli_utils import emit_dl3c_root_marker, read_json, write_output
-from scripts.constants import Status
+from scripts.constants import CATEGORIES, Status
 from scripts.delta.calendar import today_et, last_closed_trading_day
 
 PREFIX = "assemble"
@@ -79,6 +79,8 @@ def build_meta(
             if freshness_note else freshness_interpretation
         )
 
+    validation_status, degraded_categories = _summarize_degradation(validation)
+
     return {
         "ticker": ticker,
         "analysis_date": analysis_date,
@@ -86,12 +88,380 @@ def build_meta(
         "market_asof_date": last_closed_trading_day().isoformat(),
         "data_freshness": latest_period,
         "freshness_note": freshness_note,
+        # Machine-readable companions to freshness_note. The prose note is
+        # written by an LLM and read by humans; these two are what
+        # /portfolio and /monitor gate on.
+        "validation_status": validation_status,
+        "degraded_categories": degraded_categories,
         "output_version": OUTPUT_VERSION,
         "tier_this_run": tier_context["tier_this_run"],
         "component_provenance": tier_context["component_provenance"],
     }
 
 
+# Category statuses that mean the run lost data. Uses the canonical Status
+# constants so a vocabulary change here can't silently drift. SKIPPED is
+# excluded on purpose (a deliberate `--categories` scope choice, not damage);
+# so is ADR_CHECK (informational). CIRCUIT_BREAKER IS included — it means the
+# fetch was cut off mid-run, and compute_freshness_note already treats it as
+# an anomaly.
+_DEGRADED_CATEGORY_STATUSES = frozenset({
+    Status.FAILED, Status.PARTIAL, Status.INCOMPLETE,
+    Status.WARNING, Status.CIRCUIT_BREAKER,
+})
+# SKIPPED is excluded UNCONDITIONALLY — a DELIBERATE TRADEOFF proposed and
+# rejected in four separate cold reviews, latterly as "tier-aware: SKIPPED
+# should gate on terminal full/partial runs". The measured counterexample
+# refutes exactly that scoping: MU 20260522 is a stored FULL-tier run with
+# `filing` legitimately SKIPPED — an operator --categories scope choice,
+# the documented reason SKIPPED is a deliberate decision and not damage —
+# so the tier-aware rule turns a real, healthy stored run into a standing
+# false veto. Do not re-propose without a mechanism that distinguishes an
+# operator scope choice from truncation better than tier labels can.
+
+# The statuses that mean a category is AFFIRMATIVELY fine. The gate check is
+# clean-whitelist-shaped (eleventh cold round), not damage-blacklist-shaped:
+# a status outside BOTH sets — missing, empty, or unknown vocabulary
+# ("CORRUPT", a number, a drifted producer's new word) — is evidence the
+# record is broken, and unknown must fail toward degraded. A blacklist read
+# every unrecognised value as clean. Measured: all 43 stored runs use only
+# canonical statuses, so the inversion moves nothing (15/43 unchanged).
+_CLEAN_CATEGORY_STATUSES = frozenset({
+    Status.PASSED, Status.SKIPPED, Status.ADR_CHECK,
+})
+
+# The only top-level statuses fetch.py's final_status can produce. Anything
+# else in a stored validation is corruption; _summarize_degradation clamps it
+# to None (UNKNOWN) rather than parroting it into `meta.validation_status`,
+# where a non-null string beside an empty list is exactly the pair the
+# classifier reads as post-change and explicitly clean.
+_CANONICAL_TOP_STATUSES = frozenset({
+    Status.PASSED, Status.PARTIAL, Status.FAILED, Status.INCOMPLETE,
+})
+
+# Only these tiers gate a decision. The auxiliary tier is the entire
+# baseline-noise floor: measured across all 43 stored 00_validation.json
+# files, segmented_revenues is degraded on 42, earnings on 42 and
+# eps_validation on 40. Gating on those would fire on 43/43 runs — a
+# permanent veto on every new entry — while the clean branch stayed 0/43
+# dead code.
+_GATING_IMPORTANCE = frozenset({"critical", "important"})
+
+# Categories that gate DESPITE an auxiliary tag in CATEGORIES, because a
+# scoring dimension depends on them. Auxiliary is a FETCH judgement — "its
+# absence must not abort the run" — and that is not the same judgement as
+# "a decision may be taken without it".
+#
+# Both entries feed score-forward's "EPS Expectations (weight: 20)", a fifth
+# of the forward score: `06_analyst_estimates` carries the consensus and the
+# revision trend, `07_earnings` the "beat/miss history (8 quarters minimum)".
+# Losing either one left `degraded_categories: []` while forward still
+# returned a full score with that dimension unsourced, and `/portfolio` could
+# open a position on it.
+#
+# The VALUE is the status set that counts as a real loss for that category,
+# because the two have different baselines. `analyst_estimates` is PASSED on
+# 32/43 stored runs, so any damaged status there is a genuine loss.
+#
+# `earnings` is PARTIAL on 30/43, and that state does NOT mean "some quarters
+# returned, not the full 8" — inspected, it is usually a filing STUB
+# (accession_number / filing_url / filing_window) carrying no EPS at all,
+# with `press_releases` empty. PARTIAL is therefore the steady state of the
+# feed for most tickers, not a per-run loss, and it cannot discriminate one.
+# Gating on it takes the corpus from 15/43 to 24/43 and re-creates the
+# permanent entry veto this criterion exists to avoid. Only a hard failure —
+# nothing came back at all — is a run-level event.
+#
+# Measured: both entries together leave the corpus at 15/43, unchanged —
+# every run whose earnings hard-failed already fires on another category, so
+# this costs nothing today and closes the path for a run where it is the
+# only loss.
+#
+# DELIBERATE TRADEOFF — earnings PARTIAL does not gate EVEN WHEN the FMP
+# rescue failed for an infrastructure reason (rate limit / auth). Proposed
+# in five separate cold reviews and REJECTED each time: the tolerated
+# 30/43 steady-state stubs are THEMSELVES zero-usable-EPS, so the failed-
+# rescue state differs only by the rescue's failure reason, and gating on
+# that hands FMP's free-tier rate limiter an entry veto over data the
+# decision layer already treats as unknown-and-tolerated. financials is
+# different (its failed rescue DOES gate) because financials-PASSED asserts
+# a usable window; earnings-PARTIAL asserts nothing. Do not re-propose
+# without new evidence that the decision layer treats the two states
+# differently.
+_HARD_FAILURE_STATUSES = frozenset({
+    Status.FAILED, Status.INCOMPLETE, Status.CIRCUIT_BREAKER,
+})
+_GATING_EXTRA_CATEGORIES = {
+    "analyst_estimates": _DEGRADED_CATEGORY_STATUSES,
+    "earnings": _HARD_FAILURE_STATUSES,
+}
+
+# A `not_found` means the issuer genuinely has no such data: a foreign
+# private issuer files 20-F, so `filing` is permanently not_found. Re-running
+# cannot fix it, so gating on it strands those tickers forever.
+#
+# This is a BLACKLIST of the known structural cause, deliberately NOT a
+# whitelist of known-fixable causes. A whitelist of {unauthorized,
+# http_status, rate_limited, timeout} was measured and rejected: it drops
+# `price: PARTIAL` with error_code None (AMD/ASTS/GLW/LITE, 2026-05-22) —
+# a critical category lost with no code attached. Unknown cause must fail
+# toward degraded.
+#
+# `not_found` is not the only structural cause: a foreign OTC ADR outside the
+# provider's universe fails with HTTP 400, which lands on `http_status`, and
+# re-running reproduces it exactly like a 20-F issuer's absent `filing`
+# (measured: SIVEF loses `filing` + `metrics` that way, a held position).
+# `http_status` was considered for this set and DELIBERATELY EXCLUDED: it is
+# the catch-all for every unmapped status, so it carries 5xx as well as 400 —
+# exempting it would exempt genuine provider outages, which is the failure
+# mode this whole field exists to catch. Those tickers stay gated for ENTRY,
+# with the categories named in the rationale; exits and trims are never
+# blocked. An earlier revision cleared them via a cross-date reproducibility
+# carve-out in the decision prompt and that was REMOVED: an outage spanning
+# two days reproduces identically, so it cleared the gate on exactly the
+# data loss this field exists to catch.
+_STRUCTURAL_ABSENCE_CODES = frozenset({"not_found"})
+
+# ...and only for categories where structural absence is a real state.
+# `not_found` is mapped from ANY HTTP 404 (`sources/adapter_result.py`,
+# status == 404 -> ErrorCode.NOT_FOUND), so the code alone does not mean
+# "this issuer has no such data" — a provider serving 404 on /price or
+# /metrics would have had that critical loss silently exempted. Scoped to
+# the categories that can legitimately be absent for an issuer: no SEC
+# filing (20-F filers), no news, no analyst coverage, no segment/insider/
+# institutional disclosure. Measured: `not_found` appears in the corpus on
+# exactly these six and never on price/metrics/financials/historical, so
+# the scoping costs nothing today (15/43 firing, unchanged) and closes the
+# path for tomorrow.
+_STRUCTURAL_ABSENCE_CATEGORIES = frozenset({
+    "filing", "news", "analyst_estimates", "earnings",
+    "segmented_revenues", "insider", "institutional",
+})
+
+# DELIBERATE TRADEOFF — the exemption is NOT scoped by issuer classification
+# (is_adr / filing type). "A domestic issuer's filing not_found should gate"
+# was proposed in three separate cold reviews and REJECTED each time: a
+# domestic issuer with ZERO filings is a fresh listing's genuine steady state
+# (S-1 to first 10-K spans quarters), so an is_adr-scoped exemption
+# manufactures a months-long entry veto on new listings; measured, all seven
+# stored filing/not_found runs are foreign, and domestic provider gaps
+# surface as http codes (which are NOT exempt), not as not_found. Likewise
+# "an unattempted fallback (attempted: false — no FMP key) should not confirm
+# absence" was proposed twice and REJECTED: no-key is the steady OPERATING
+# MODE, not a run event — gating on it would degrade analyst/earnings on
+# every thin-coverage name for every keyless user, while the asked-and-
+# rate-limited case (a genuine run event) already gates. Do not re-propose
+# either without new measured evidence against these counterexamples.
+
+# ...and only when the SECOND source agrees the data is absent.
+#
+# The FMP fallback does not overwrite the category status when it fails: on a
+# failed fill it records `fills.<key> = {"filled": False, "reason": ...}` and
+# leaves the primary's `not_found` standing (`sources/fmp.py`, the analyst and
+# earnings branches). So an FDS 404 whose FMP rescue was rate-limited or
+# rejected looks byte-identical to an issuer with genuinely no analyst
+# coverage — and the exemption above would clear a real loss of a category
+# that carries a fifth of the forward score.
+#
+# The news path already gets this right and is the reference: when its Finnhub
+# fallback fails, `fetch_news_data` re-emits UNAUTHORIZED / RATE_LIMIT /
+# UPSTREAM_ERROR, and returns NOT_FOUND only when both sources agree there is
+# nothing (`sources/financial_datasets.py`). Fixing FMP the same way is the
+# architecturally cleaner change, but it rewrites `category_statuses` that many
+# consumers read; this reads the audit record the fallback already writes and
+# is contained to the gate.
+#
+# Reasons that mean the fallback AGREES the data is absent, so the exemption
+# stands: the FMP call itself 404'd, or it returned NO ROWS.
+#
+# `fmp_analyst_insufficient` is in the set and `fmp_earnings_insufficient` is
+# NOT, because the two predicates that raise them are not the same claim. The
+# analyst one fires when FMP returned no estimate rows — nobody covers this
+# issuer, which is genuine absence. The earnings one fires when FMP returned a
+# row whose `actual_eps` and `estimated_eps` are both null — an INCOMPLETE
+# answer, not a statement that the company has no earnings history. Treating
+# it as agreement would clear the gate on a `not_found` that neither source
+# ever confirmed.
+_FMP_FILL_KEYS = {"analyst_estimates": "analyst", "earnings": "earnings"}
+_FALLBACK_AGREES_ABSENT = frozenset({"not_found", "fmp_analyst_insufficient"})
+
+
+def _fallback_contradicts_absence(validation, name):
+    """True when `name`'s second source was asked, failed, and its failure does
+    NOT mean "the data does not exist" — so a `not_found` from the primary is
+    unconfirmed and must not be exempted as structural.
+
+    Fails toward the exemption (returns False) for legacy artifacts with no
+    `fmp_fallback` record and for runs where the fallback was never attempted:
+    there the primary's word is all there ever was, which is how all 42
+    pre-change artifacts were built.
+    """
+    key = _FMP_FILL_KEYS.get(name)
+    if key is None:
+        return False
+    fallback = validation.get("fmp_fallback")
+    if fallback is None:
+        # Legacy artifact (key absent) or a modern run where the fallback was
+        # not configured (fetch writes the key as null when FMP was never
+        # wanted): the primary's word is all there ever was — exempt stands.
+        return False
+    if not isinstance(fallback, dict):
+        # Present but NOT a dict (twenty-fourth round): fetch only ever
+        # writes null or a dict here, so a string/list/number is a corrupt
+        # audit record — the fallback's answer is unknowable, which means
+        # the primary's not_found is UNCONFIRMED, and merely corrupting the
+        # envelope must not flip a failed category from degraded to clean.
+        # 0 of 43 stored runs carry the shape (32 key-absent, 9 null, 2 dict).
+        return True
+    attempted = fallback.get("attempted")
+    if attempted is False or attempted is None:
+        return False
+    if attempted is not True:
+        # Non-bool scalar (thirty-seventh round): corruption, not a
+        # never-attempted record — the envelope cannot testify.
+        return True
+    fills = fallback.get("fills")
+    fill = fills.get(key) if isinstance(fills, dict) else None
+    if not isinstance(fill, dict):
+        # Attempted, but this category has no fill record — the fallback did
+        # not get far enough to answer. `fetch.py` writes exactly this on a
+        # crash: `{"attempted": True, "available": False, "fills": {}}`. An
+        # absent answer is not agreement, so the primary's `not_found` stays
+        # unconfirmed. (A malformed record lands here too, and for the same
+        # reason: nothing readable said the data is genuinely absent.)
+        return True
+    filled = fill.get("filled")
+    if filled is True:
+        return False
+    if not isinstance(filled, bool):
+        # Strict boolean, not truthiness (thirty-seventh round): the string
+        # "false" is TRUTHY, so a corrupt scalar flipped a rate-limited
+        # rescue into "successfully filled" and restored the exemption —
+        # the scalar-level twin of the round-24 corrupt-envelope rule. A
+        # non-bool here means the record cannot testify: unconfirmed.
+        return True
+    return fill.get("reason") not in _FALLBACK_AGREES_ABSENT
+
+
+def _summarize_degradation(validation):
+    """Return `(validation_status, degraded_categories)` for `meta`.
+
+    `validation_status` is the raw top-level status, or None when it is
+    absent or unusable — UNKNOWN, which consumers must not read as clean.
+
+    `degraded_categories` lists only losses that a decision should react to:
+    a damaged status, on a critical/important category, from a cause other
+    than structural absence. See the three module constants above.
+    """
+    if not isinstance(validation, dict) or not validation:
+        return None, []
+    status = validation.get("status")
+    status = status.strip() if isinstance(status, str) and status.strip() else None
+    if status is not None and status not in _CANONICAL_TOP_STATUSES:
+        status = None
+
+    # `categories` must be a mapping before .items(). The sibling
+    # `compute_freshness_note` already guards this (cited by symbol: a
+    # same-file line number rots on every edit above it); without the
+    # same guard here a legacy run whose categories is a list/str raises
+    # AttributeError straight out of the classifier, which /monitor and
+    # /portfolio call on EVERY ticker.
+    #
+    # The status comes back None here, NOT preserved (tenth cold round):
+    # with no readable categories the losses cannot be enumerated, so the
+    # empty list means "no evidence", not "no damage" — and preserving the
+    # status made the pair (non-null status, empty list), exactly the shape
+    # bq_degradation_state reads as post-change and EXPLICITLY CLEAN. A
+    # corrupt `{"status": "FAILED", "categories": []}` classified as fresh
+    # and dodged the forced re-score. fetch.py always writes a NON-EMPTY
+    # categories dict, so an empty one is the same truncation evidence as a
+    # missing one (0 of 43 stored runs carry either shape).
+    categories = validation.get("categories")
+    if not isinstance(categories, dict) or not categories:
+        return None, []
+    # A categories map missing GATING keys is truncation evidence too
+    # (twenty-third round): fetch writes every category on every run,
+    # SKIPPED stubs included, so a subset cannot certify anything it does
+    # not carry. The STATUS comes back None — the run's completeness is
+    # unknowable — while damage visible among the keys that DID survive is
+    # still reported (discarding it would hide real losses behind the
+    # corruption that exposed them). The same derived key set drives
+    # portfolio_classify._stored_validation_shape_ok; keeping the two
+    # answers consistent is the point — they diverged for three review
+    # rounds. Auxiliary keys (the version-growth axis) stay exempt.
+    _gating_keys = {k for k, v in CATEGORIES.items()
+                    if isinstance(v, dict)
+                    and v.get("importance") in _GATING_IMPORTANCE}
+    _gating_keys |= set(_GATING_EXTRA_CATEGORIES)
+    if not _gating_keys <= categories.keys():
+        status = None
+    degraded = []
+    for name, entry in categories.items():
+        # An unrecognised category name has unknown importance — fail closed
+        # by gating on it rather than silently treating it as auxiliary.
+        spec = CATEGORIES.get(name)
+        gates_by_tier = (spec is None
+                         or spec.get("importance") in _GATING_IMPORTANCE)
+        extra_statuses = _GATING_EXTRA_CATEGORIES.get(name)
+        if not isinstance(entry, dict):
+            # A non-dict ENTRY is a broken record — the entry-level twin of
+            # the empty-categories hole above (twelfth cold round). Unknown
+            # fails toward degraded, but only where a real loss would gate:
+            # an auxiliary entry's genuine FAILED never gates either, so its
+            # corruption must not become the one auxiliary state that does.
+            if gates_by_tier or extra_statuses is not None:
+                degraded.append(name)
+            continue
+        entry_status = entry.get("status")
+        known_clean = entry_status in _CLEAN_CATEGORY_STATUSES
+        known_damage = entry_status in _DEGRADED_CATEGORY_STATUSES
+        if gates_by_tier:
+            # Clean-whitelist, not damage-blacklist: known damage AND unknown
+            # vocabulary/missing status both gate. A category listed in both
+            # maps must never be NARROWED by the extra map.
+            if known_clean:
+                continue
+        elif extra_statuses is not None:
+            # The extra map names the KNOWN-damage statuses that count for
+            # this category (earnings: hard failures only — PARTIAL is its
+            # 30/43 steady state). Unknown vocabulary still gates even here:
+            # unknown is not a steady state, it is a broken record.
+            if entry_status not in extra_statuses and (known_clean or known_damage):
+                continue
+        else:
+            continue
+        # The exemption additionally requires status == FAILED (thirteenth
+        # cold round): "the issuer has no such data" is only a coherent
+        # claim when the fetch found NOTHING. The filing producer adopts the
+        # highest-severity CHILD error as the aggregate code, so a run whose
+        # 10-K fetched fine beside a 404'd 10-Q section emits
+        # INCOMPLETE+not_found — content exists and a required piece of it
+        # was lost, which contradicts structural absence on its face.
+        # Measured: every exempted entry in the 43 stored runs is already
+        # FAILED+not_found, so the scoping moves nothing.
+        if (entry_status == Status.FAILED
+                and entry.get("error_code") in _STRUCTURAL_ABSENCE_CODES
+                and name in _STRUCTURAL_ABSENCE_CATEGORIES
+                and not _fallback_contradicts_absence(validation, name)):
+            continue
+        degraded.append(name)
+    return status, sorted(degraded)
+
+
+# DELIBERATE TRADEOFF — financial-freshness (days_old) is DISCLOSURE, not a
+# gate. "Stale financials should demote the category / enter
+# degraded_categories" was proposed in a cold review and REJECTED: filing
+# cadence varies by issuer class (a 20-F annual filer's 200-day-old
+# statements are its normal state), so any fixed cutoff is a false veto on
+# foreign issuers, and a cadence-aware policy is a feature with its own
+# design, not a post-pass. The demonstrated stale cases (MRVL/SNOW/CRWD
+# 2026-05-22 era, 205-209 days) were the missing-fiscal-Q4 provider burial,
+# fixed at its root (fetch limit 16, DL4 gate, FMP rescue, and the
+# rescue-failure demotion). Artifact staleness is owned by the delta clocks
+# (14-day BQ / 7-day thesis), and the freshness note + data_freshness ARE
+# delivered to the decision layer as disclosure via the portfolio skill's
+# BQ-summary whitelist. Do not re-propose a cutoff without a cadence-aware
+# design.
 def compute_freshness_note(validation):
     """Build a freshness note from validation data, or return None if fresh.
 

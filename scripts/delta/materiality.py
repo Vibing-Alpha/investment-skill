@@ -47,6 +47,23 @@ class ClassifierOutput:
         )
 
 
+def article_date_usable(published_at) -> bool:
+    """True when `published_at` will survive `prepare_classifier_input`'s
+    window filter: a non-empty str whose first 10 chars parse as an ISO
+    date. ONE implementation, two callers (producer-consumer rule 3): the
+    filter below AND fetch.py's news date post-pass. The post-pass once
+    judged usability as "any non-blank string", so a `"07/30/2026"` date
+    kept the category PASSED while this module silently dropped the
+    article from the probe window (twenty-second cold round)."""
+    if not isinstance(published_at, str) or not published_at:
+        return False
+    try:
+        datetime.date.fromisoformat(published_at[:10])
+    except ValueError:
+        return False
+    return True
+
+
 def prepare_classifier_input(
     articles: List[dict], since_date: str
 ) -> dict:
@@ -59,14 +76,9 @@ def prepare_classifier_input(
         if not isinstance(a, dict):
             continue
         pub = a.get("published_at")
-        # Defensive: skip non-string published_at (int/None/dict etc.)
-        # Slicing a non-str raises TypeError; fromisoformat needs str anyway.
-        if not isinstance(pub, str) or not pub:
+        if not article_date_usable(pub):
             continue
-        try:
-            pub_dt = datetime.date.fromisoformat(pub[:10])
-        except ValueError:
-            continue
+        pub_dt = datetime.date.fromisoformat(pub[:10])
         if pub_dt > since_dt:  # strict: exclude since_date itself
             filtered.append(a)
     return {"since_date": since_date, "articles": filtered}

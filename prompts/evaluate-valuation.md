@@ -81,10 +81,15 @@ the latest fundamentals:
 If `01_price_data.json` carries a `market_cap_reconciliation` block (status
 `corrected`/`filled`), the producer fixed the lagged cap AND propagated the
 fix into `metrics_snapshot` — which then carries its own
-`market_cap_reconciliation` block, with `market_cap`, `enterprise_value`, P/E,
-P/S, P/B, PEG, EV/EBITDA, EV/Rev and FCF yield already rescaled to the current
-price. Those snapshot multiples are therefore current — use them directly or
-as a cross-check, and do NOT scale them again.
+`market_cap_reconciliation` block. **Read that block's `fields_rescaled`
+list: it names exactly which multiples were re-priced to the current cap.**
+A field IN the list is current — use it directly or as a cross-check, and do
+NOT scale it again. A field NOT in the list (or `multiples_rescaled: false`,
+where NOTHING was re-priced — the producer had no usable old cap to form a
+ratio) was left AS-IS and may be inconsistent with the reconciled
+`market_cap` beside it: do not use that stale multiple; recompute it from
+primaries (the formulas above) instead. The cap and, when finite,
+`enterprise_value` themselves are always aligned.
 
 **First check `metrics_snapshot.period`.** Reconciliation rescales the
 NUMERATOR to the current price; it never changes the denominator's window. So

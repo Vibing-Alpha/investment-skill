@@ -64,9 +64,15 @@ Routing (`route` is a BARE enum):
 |---|---|
 | A holding's `invalid_if` fired / major setup change | `/investment-thesis` (critical) |
 | A holding needs a position decision; or a watchlist `entry_attractive_if` fired with an actionable setup | `/portfolio` (critical/watch) |
-| `staleness.state == "stale_bq"` (the BQ itself needs a full refresh) or fundamental deterioration | `/score-business` (watch) |
+| `staleness.state == "stale_bq"` (the BQ needs a full refresh — either aged out, or its last run lost important data) or fundamental deterioration | `/score-business` (watch) |
 | Watchlist has NO triggered/near candidate | one `ticker:null` item → `/screen-stocks` (info) |
 
+- **`stale_bq` does not tell you WHICH of its two causes fired.** The probe
+  carries day counts and the state, not the degradation detail, so a BQ that ran
+  yesterday on a gutted fetch renders as `BQ 1d / thesis 0d (stale_bq)`. Cite the
+  state and the day counts as they are; do NOT assert "the analysis is N days
+  old" or "the fetch failed" as the reason. `/score-business` is the right route
+  either way.
 - **`staleness.state == "stale_thesis"` is NOT a standalone trigger.** An aged thesis on a
   holding whose BQ is still fresh is not, by itself, something to act on — surfacing all of them
   would bury the genuine signals. So attach the `staleness` evidence as SUPPORTING evidence to an

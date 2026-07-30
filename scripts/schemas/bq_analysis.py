@@ -31,6 +31,11 @@ from scripts.schemas.source_tag import (
 
 _ARTIFACT = "bq_analysis"
 
+# The only values fetch.py's final_status produces (and assemble clamps to).
+# Mirrors assemble._CANONICAL_TOP_STATUSES; duplicated as literals because
+# scripts/schemas/ must not import the producer it validates.
+_META_STATUS_VOCAB = frozenset({"PASSED", "PARTIAL", "FAILED", "INCOMPLETE"})
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_TS_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$"
@@ -58,6 +63,21 @@ class BqMeta:
     ticker: str
     analysis_date: str
     generated_at: str
+    # Machine-readable run degradation. `None` means UNKNOWN — either the
+    # artifact predates this field, or assemble ran without a usable
+    # validation payload. The two are indistinguishable here and are treated
+    # alike; neither is the same as a clean run.
+    validation_status: str | None = None
+    # Scoped to what the RUN THAT STAMPED IT attempted, not to the full
+    # category set: a SKIPPED category is not degraded, so anything the run
+    # never fetched cannot appear here. On a `no_op` there is no Step 4.5
+    # merge, so the list is derived from the probe-scope validation alone —
+    # which skips `filing` (critical) and `institutional`, measured on the
+    # stored corpus. Read a non-empty list as "at least these"; do not read an
+    # empty one as "every category came back clean". The scores are sound
+    # either way: a degraded copy source forces a full re-score, so a `no_op`'s
+    # scores came from a clean run.
+    degraded_categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,8 +169,53 @@ def _validate_meta(raw: Any) -> BqMeta:
     if not _ISO_TS_RE.match(generated_at):
         raise SchemaError(_ARTIFACT, "meta.generated_at",
                           f"not ISO timestamp with TZ: {generated_at!r}")
+    raw_status = raw.get("validation_status")
+    if raw_status is not None and not isinstance(raw_status, str):
+        raise SchemaError(_ARTIFACT, "meta.validation_status",
+                          f"must be a string or absent, got {type(raw_status).__name__}")
+    # Vocabulary, not just type: the producer chain only ever writes fetch's
+    # final_status values (clamped again by assemble). Any other string is a
+    # hand edit or corruption — and the classifier reads a non-null status
+    # beside an empty degraded list as EXPLICITLY CLEAN, so "CORRUPT" passing
+    # the loader walks straight into the one branch it must never reach.
+    if raw_status is not None and raw_status not in _META_STATUS_VOCAB:
+        raise SchemaError(_ARTIFACT, "meta.validation_status",
+                          f"unknown status {raw_status!r}; the producer only "
+                          f"writes {sorted(_META_STATUS_VOCAB)} or null")
+    # A non-null status with NO degraded_categories key is contract-incomplete:
+    # assemble writes the two fields together, so this shape only arises from
+    # truncation or a hand edit — and defaulting the missing list to [] would
+    # make the classifier read the artifact as "post-change and explicitly
+    # clean", the one answer a cut-off degradation record must never produce.
+    # Rejecting routes consumers to their existing conservative branches
+    # (classify → stale_bq, prior-tier gate → full). The REVERSE asymmetry
+    # stays loadable: `validation_status: null` beside a real list is a
+    # legitimate producer output (top-level status unusable), and it can never
+    # read as clean.
+    if "validation_status" in raw and "degraded_categories" not in raw:
+        # Key PRESENCE, not value (thirty-seventh round widened this from
+        # non-null-only): the producer writes both keys together always, so
+        # a present validation_status — null included — beside a MISSING
+        # list is truncation, and the defaulted [] walked the raw-read
+        # skip-stale path as non-blocking. The reverse asymmetry (a list
+        # without the status key) stays loadable: it can never read as
+        # clean and legacy tuple fixtures legitimately carry it.
+        raise SchemaError(_ARTIFACT, "meta.degraded_categories",
+                          "missing beside a present validation_status — the "
+                          "producer writes both together; refusing to default "
+                          "a truncated degradation record to clean")
+    raw_degraded = raw.get("degraded_categories", [])
+    if not isinstance(raw_degraded, (list, tuple)):
+        raise SchemaError(_ARTIFACT, "meta.degraded_categories",
+                          f"must be a list, got {type(raw_degraded).__name__}")
+    for item in raw_degraded:
+        if not isinstance(item, str):
+            raise SchemaError(_ARTIFACT, "meta.degraded_categories",
+                              f"entries must be strings, got {type(item).__name__}")
     return BqMeta(ticker=ticker, analysis_date=analysis_date,
-                  generated_at=generated_at)
+                  generated_at=generated_at,
+                  validation_status=raw_status,
+                  degraded_categories=tuple(raw_degraded))
 
 
 def _validate_scores(raw: Any) -> BqScores:

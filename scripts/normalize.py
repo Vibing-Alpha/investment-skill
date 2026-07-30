@@ -304,8 +304,17 @@ def validate_price_range(price_data: Dict) -> Tuple[str, str]:
         return "SKIPPED", "Non-numeric price or 52-week range data"
     if not all(math.isfinite(v) for v in (price, high_52, low_52)):
         return "SKIPPED", "Non-finite price or 52-week range data"
-    if price <= 0 or high_52 <= 0 or low_52 <= 0:
-        return "WARNING", "Non-positive price or 52-week range data"
+    # A non-positive CURRENT price is a hard invalidity, not a caveat — it is
+    # the value valuation and sizing divide by, and the shape layer accepts
+    # any finite number (sixteenth cold round: 0.0 sailed to PASSED because
+    # range WARNING was recorded as metadata only). Non-positive 52-WEEK
+    # bounds stay WARNING: they are auxiliary sanity values, and so are the
+    # deviation cases below — a breakout past the 52-week high is the
+    # strategy's core entry shape, never a category demotion.
+    if price <= 0:
+        return "FAILED", "Non-positive current price"
+    if high_52 <= 0 or low_52 <= 0:
+        return "WARNING", "Non-positive 52-week range data"
     if high_52 < low_52:
         return "WARNING", "52-week high below 52-week low (inverted range data)"
 

@@ -83,6 +83,12 @@ _METRICS_NUMERIC_FIELDS = frozenset({
     "operating_margin", "net_margin", "return_on_equity",
     "return_on_assets", "revenue_growth", "earnings_growth",
     "peg_ratio", "payout_ratio",
+    # forty-fifth round: the fundamental scorer's calibration explicitly
+    # consumes these two, but they were absent from this coercion set — a
+    # string-drifted "not-a-number" ROIC sailed into the scorer's context.
+    "return_on_invested_capital", "asset_turnover",
+    # interest_coverage is scorer-consumed too and was likewise uncovered.
+    "interest_coverage",
 })
 
 _ANALYST_NUMERIC_FIELDS = frozenset({
@@ -347,6 +353,20 @@ def fetch_price_data(
         day_open = opens[-1] if opens else None
         previous_close = closes[-2] if len(closes) >= 2 else None
 
+        # Identity binding (thirty-ninth round): the emitted dict stamps the
+        # REQUESTED ticker over the response, so a cross-wired chart (Yahoo
+        # answering for a different symbol) silently attached another
+        # security's price to this name. Only enforced when meta carries a
+        # symbol; dot/dash class-share variants are the same symbol.
+        _meta_symbol = meta.get("symbol")
+        if _identity_mismatch(_meta_symbol, ticker):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"chart meta.symbol is {_meta_symbol}"),
+                source=src, retryable=False,
+            )
+
         # §3.2 row 1 (DL3a Task 9): capture currency from Yahoo chart meta.
         # meta is already extracted above (line ~223); guard None from
         # prefetched_chart paths where the caller might pass meta={}.
@@ -382,6 +402,30 @@ def fetch_price_data(
 # ---------------------------------------------------------------------------
 # Financial metrics
 # ---------------------------------------------------------------------------
+
+def _identity_mismatch(claimed, requested) -> bool:
+    """True when a response's identity field is PRESENT and either malformed
+    (a non-string — it cannot testify, which is drift: forty-seventh cold
+    round, `symbol: 123` walked every string-typed guard) or names a
+    different symbol. None and empty string make no claim and pass — the
+    enforced-only-where-present contract of rounds 39-41."""
+    if claimed is None or claimed == "":
+        return False
+    if not isinstance(claimed, str):
+        return True
+    return not _same_symbol(claimed, requested)
+
+
+def _same_symbol(a, b) -> bool:
+    """Case-insensitive symbol equality with '.'/'-' class-share variants
+    treated as equal (MOG.A == MOG-A). Thirty-ninth cold round: responses
+    were never bound to the REQUESTED ticker, so a cross-wired provider
+    answer silently attached another security's numbers to this one — the
+    exact plausible-wrong-number failure the degradation gate exists for."""
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    return a.upper().replace(".", "-") == b.upper().replace(".", "-")
+
 
 def fetch_metrics_data(ticker: str) -> AdapterResult:
     """Fetch financial metrics via /financial-metrics?period=ttm&limit=1.
@@ -420,9 +464,35 @@ def fetch_metrics_data(ticker: str) -> AdapterResult:
         # ISS-105 + ISS-158: sanitize NaN/Inf/bool + coerce string
         # drift in known numeric fields. Single helper chains both
         # (post-Loop22 structural — see _emit_with_numeric_coerce).
+        _row = metrics_list[0]
+        # Identity binding (thirty-ninth round): a row carrying a DIFFERENT
+        # ticker is a cross-wired response — another security's multiples
+        # under this name. Only enforced when the field is present.
+        _row_ticker = _row.get("ticker")
+        if _identity_mismatch(_row_ticker, ticker):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"row carries {_row_ticker}"),
+                source=src, retryable=False,
+            )
+        # Window binding (thirty-ninth round): the request asks period=ttm
+        # (the 2026-07-26 fix — a quarterly row divides market cap by ONE
+        # quarter, ~4x every multiple, internally self-consistent so no
+        # self-check catches it). A response whose period is anything else,
+        # or missing, is DRIFT back to the named failure mode: reject so
+        # the FMP/yfinance fallbacks rescue instead of serving 4x numbers.
+        if _row.get("period") != "ttm":
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"requested ttm window, response period is "
+                        f"{_row.get('period')!r} — non-TTM denominators "
+                        f"inflate every multiple"),
+                source=src, retryable=False,
+            )
         return AdapterResult.passed(
             data=emit_with_numeric_coerce(
-                metrics_list[0], numeric_fields=_METRICS_NUMERIC_FIELDS,
+                _row, numeric_fields=_METRICS_NUMERIC_FIELDS,
             ),
             meta={"source_hint": "fd_metrics"},
         )
@@ -703,6 +773,54 @@ def fetch_financial_statements(ticker: str) -> AdapterResult:
     # the income/balance lists we DID fetch successfully. Better: clear
     # the bad slot back to [] so the populated slots can still emit as
     # PARTIAL+SHAPE_MISMATCH (preserving what we have).
+    # Identity binding (fortieth round, extending the thirty-ninth's
+    # price/metrics rule) — BEFORE the shape branching, because the
+    # per-slot PARTIAL drift path below emits surviving slots and must not
+    # emit cross-wired ones: any statement row carrying a DIFFERENT ticker
+    # is another issuer's fundamentals under this name. Enforced only where
+    # the field is present; dot/dash variants are the same symbol.
+    for _fam_rows in (result["income_statements"], result["balance_sheets"],
+                      result["cash_flows"]):
+        # Pre-shape-validation, a slot can be arbitrary drift (int/str) —
+        # only lists are scannable; the shape branch below owns the rest.
+        for _r in (_fam_rows if isinstance(_fam_rows, list) else ()):
+            _rt = _r.get("ticker") if isinstance(_r, dict) else None
+            if _identity_mismatch(_rt, ticker):
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail=(f"response identity mismatch: requested {ticker}, "
+                            f"statement row carries {_rt}"),
+                    source=src, retryable=False,
+                )
+
+    # Window-date sanity (forty-first round): a family whose rows exist but
+    # NONE carries an ISO-parseable report_period can never form the
+    # canonical aligned window — and that unformability is DRIFT, not the
+    # issuer's steady state, so it must not ride the fill steady-state
+    # carve-out to PASSED. Partially-malformed families pass through: the
+    # window logic drops bad rows and can still align the rest.
+    # ONE implementation with the consumer (forty-second round): the first
+    # version prefix-parsed [:10], so "2026-03-31junk" passed the floor
+    # while the canonical window validator's FULL-string parse rejected it
+    # — the floor was weaker than the consumer it fronts, the exact
+    # producer-consumer drift rule 3 forbids. Call the validator's own
+    # predicate instead of re-deriving it.
+    from scripts.schemas.quarter_window import _is_valid_report_period
+    def _rp_parseable(_r):
+        _d = _r.get("report_period") if isinstance(_r, dict) else None
+        return isinstance(_d, str) and _is_valid_report_period(_d)
+    for _fam_key in ("income_statements", "balance_sheets", "cash_flows"):
+        _rows = result[_fam_key]
+        if isinstance(_rows, list) and _rows and not any(
+                _rp_parseable(_r) for _r in _rows):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"{_fam_key} rows carry no parseable report_period — "
+                        f"the aligned window is unformable by drift, not by "
+                        f"the issuer"),
+                source=src, retryable=False,
+            )
+
     v = validate_api_shape(result, FD_FINANCIALS_SHAPE)
     if not v.ok:
         # Identify which sub-fetch slot(s) caused the failure by re-validating
@@ -815,6 +933,18 @@ def fetch_company_data(ticker: str) -> AdapterResult:
                 code=ErrorCode.NOT_FOUND,
                 detail="empty company_facts",
                 source=src,
+            )
+
+        _facts_ticker = facts.get("ticker")
+        if _identity_mismatch(_facts_ticker, ticker):
+            # Identity binding (fortieth round): another issuer's profile —
+            # description, sector, country, the ADR classification inputs —
+            # must not be returned under this name.
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"company_facts carries {_facts_ticker}"),
+                source=src, retryable=False,
             )
 
         category = facts.get("category", "")
@@ -994,7 +1124,13 @@ def _fetch_news_finnhub(ticker: str, limit: int = 10) -> Tuple[list, str]:
             return [], "fallback_error"
         articles = []
         import math as _math
-        for n in data[:limit]:
+        # Tenth cold round: iterate the FULL list and count usable articles
+        # against `limit`, instead of slicing first — `data[:limit]` let
+        # `limit` unusable leading rows hide valid ones behind them (the
+        # filter-before-gate ordering bug, third sighting in this repo).
+        for n in data:
+            if len(articles) >= limit:
+                break
             # ISS-220 4.6 (Loop32 cycle 2): guard non-dict rows. Pre-fix
             # `n.get(...)` raised AttributeError on a mixed list (e.g.
             # `[{...}, "string"]`) and the outer `except Exception` jumped
@@ -1026,19 +1162,31 @@ def _fetch_news_finnhub(ticker: str, limit: int = 10) -> Tuple[list, str]:
             # types per article. Pre-fix `headline: ["bad"]` (list) or
             # `url: 123` (int) slipped through PASSED then `.get(k, "")`
             # left them as-is; downstream consumers expecting str
-            # crashed or rendered garbage. Coerce non-string to "" so
-            # the article is dropped at the next layer (no title /
-            # no url) instead of leaking through.
+            # crashed or rendered garbage. Coerce non-string to "".
             def _safe_str(v):
                 return v if isinstance(v, str) else ""
+            # Tenth cold round: DROP the titleless row here. ISS-186's
+            # comment promised the drop would happen "at the next layer" and
+            # no layer ever did it — the caller returns PASSED on mere list
+            # non-emptiness, so a coerced-"" headline reached the gate as a
+            # clean important-tier article no consumer can classify.
+            _title = _safe_str(n.get("headline"))
+            if not _title.strip():
+                continue
             articles.append({
-                "title": _safe_str(n.get("headline")),
+                "title": _title,
                 "url": _safe_str(n.get("url")),
                 "source": f"Finnhub:{_safe_str(n.get('source')) or 'Unknown'}",
                 "published_at": pub,
                 "sentiment": None,
                 "summary": _safe_str(n.get("summary"))[:500],
             })
+        if data and not articles:
+            # Rows existed but none was usable — provider drift, NOT "no news
+            # exists". "ok"+empty maps downstream to NOT_FOUND, which the
+            # assemble exemption reads as structural absence; drift must
+            # surface as an upstream error (retryable, gates) instead.
+            return [], "fallback_error"
         return articles, "ok"
     except Exception as e:
         err = str(e)
@@ -1059,6 +1207,7 @@ def _fetch_news_finnhub(ticker: str, limit: int = 10) -> Tuple[list, str]:
 def fetch_news_data(ticker: str, limit: int = 10) -> AdapterResult:
     """Fetch recent news with complete URLs. Falls back to Finnhub if primary returns 0."""
     src = "financial_datasets.fetch_news_data"
+    primary_denied_coverage = False
     try:
         # ISS-027: urlencode for defense-in-depth.
         url = f"{BASE_URL}/news?" + urllib.parse.urlencode({
@@ -1085,6 +1234,14 @@ def fetch_news_data(ticker: str, limit: int = 10) -> AdapterResult:
             # response path so the existing fallback runs; let every other
             # status (401/403/429/5xx) propagate unchanged to the mapper.
             if e.status in (400, 404):
+                # Remember WHICH signal this was (twelfth cold round): a 404
+                # is the primary AFFIRMING "covered, no articles", but a 400
+                # means the symbol is outside the universe — the primary said
+                # nothing about news existence. The distinction matters only
+                # when the Finnhub fallback cannot answer (no API key): an
+                # affirmed empty is structural absence; an unverified one is
+                # not, and must not reach the exemption as `not_found`.
+                primary_denied_coverage = e.status == 400
                 response = {"news": []}
             else:
                 raise
@@ -1189,8 +1346,30 @@ def fetch_news_data(ticker: str, limit: int = 10) -> AdapterResult:
                     data={"articles": [], "count": 0},
                     meta={"finnhub_status": finnhub_status},
                 )
-            # finnhub_status in ("no_api_key", "ok") with empty articles —
-            # both mean "we agree there's no news for this ticker right now".
+            # finnhub_status in ("no_api_key", "ok") with empty articles.
+            # "ok"+empty is a REAL affirmed empty regardless of the primary's
+            # signal; "no_api_key" is only an affirmation when the primary
+            # itself affirmed (404 / 200-empty). A 400 (symbol outside the
+            # FDS universe) with no Finnhub key means NO source ever looked —
+            # `not_found` there would walk straight into assemble's
+            # structural-absence exemption claiming "this issuer genuinely
+            # has no news". Unverified coverage surfaces as the non-exempt
+            # http_status instead (the SIVEF precedent: out-of-universe
+            # categories stay gated).
+            if primary_denied_coverage and finnhub_status == "no_api_key":
+                return AdapterResult.failed(
+                    code=ErrorCode.HTTP_STATUS,
+                    detail=(
+                        "primary news endpoint rejected the symbol (HTTP 400, "
+                        "outside FDS universe) and no Finnhub key is "
+                        "configured — news coverage is unverified, not absent"
+                    ),
+                    source=src,
+                    retryable=False,
+                    upstream_status=400,
+                    data={"articles": [], "count": 0},
+                    meta={"finnhub_status": finnhub_status},
+                )
             return AdapterResult.failed(
                 code=ErrorCode.NOT_FOUND,
                 detail=(
@@ -1518,6 +1697,18 @@ def fetch_analyst_estimates(
         if not v.ok:
             return AdapterResult.failed_from_shape(v, source=src)
         estimates = response.get("analyst_estimates", [])
+        # Identity binding (forty-first-round preemption of the fortieth's
+        # principle): a row carrying a DIFFERENT ticker is a cross-wired
+        # answer. Enforced only where the field is present.
+        for _r in (estimates if isinstance(estimates, list) else ()):
+            _rt = _r.get("ticker") if isinstance(_r, dict) else None
+            if _identity_mismatch(_rt, ticker):
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail=(f"response identity mismatch: requested {ticker}, "
+                            f"estimate row carries {_rt}"),
+                    source=src, retryable=False,
+                )
         if not estimates:
             return AdapterResult.failed(
                 code=ErrorCode.NOT_FOUND,
@@ -1567,15 +1758,39 @@ def fetch_earnings_snapshot(ticker: str) -> AdapterResult:
             )
         # 2026-05 shape regression: API changed from a single dict to a
         # list of row dicts (FD_EARNINGS_SHAPE updated to Optional_(list)).
-        # Extract rows[0] so all downstream dict-handling consumers are
-        # unaffected.  Guard against corrupt non-dict elements before [0].
+        # Extract the first USABLE row so all downstream dict-handling
+        # consumers are unaffected. Twenty-ninth round: a blind rows[0] let
+        # a corrupt leading element ({} / a string) hide a valid later row
+        # — the filter/slice-before-gate ordering bug, fourth sighting —
+        # and the resulting not_found was then exempted as structural
+        # absence. Rows-present-but-none-usable is DRIFT, not absence:
+        # SHAPE_MISMATCH (which gates), never not_found (which the
+        # exemption reads as "the issuer has no earnings history").
         if isinstance(earnings, list):
-            earnings = earnings[0] if (earnings and isinstance(earnings[0], dict)) else None
+            _had_rows = bool(earnings)
+            earnings = next(
+                (r for r in earnings if isinstance(r, dict) and r), None)
+            if earnings is None and _had_rows:
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail="earnings list has rows but none is a usable dict",
+                    source=src,
+                    retryable=False,
+                )
         if not earnings:
             return AdapterResult.failed(
                 code=ErrorCode.NOT_FOUND,
-                detail="earnings list was empty or first element was not a dict",
+                detail="earnings list was empty",
                 source=src,
+            )
+        _row_ticker = earnings.get("ticker")
+        if _identity_mismatch(_row_ticker, ticker):
+            # Identity binding (forty-first-round preemption).
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"earnings row carries {_row_ticker}"),
+                source=src, retryable=False,
             )
         # DL3a §2 invariant 3 — pre-emit currency normalization. emit_with_
         # numeric_coerce only sanitizes numerics; the `currency` field would
@@ -1632,6 +1847,18 @@ def fetch_institutional_ownership(
         if not v.ok:
             return AdapterResult.failed_from_shape(v, source=src)
         holdings = response.get("institutional_holdings", [])
+        # Identity binding (forty-first-round preemption): 13F rows carry a
+        # per-row `ticker`; a cross-wired answer must not become this
+        # issuer's ownership picture. Enforced only where present.
+        for _r in (holdings if isinstance(holdings, list) else ()):
+            _rt = _r.get("ticker") if isinstance(_r, dict) else None
+            if _identity_mismatch(_rt, ticker):
+                return AdapterResult.failed(
+                    code=ErrorCode.SHAPE_MISMATCH,
+                    detail=(f"response identity mismatch: requested {ticker}, "
+                            f"13F row carries {_rt}"),
+                    source=src, retryable=False,
+                )
 
         # Vintage hygiene — WITHOUT pinning to a single period.
         #

@@ -4,7 +4,11 @@
 
 ### Staleness classifier is cheap-read, not a probe
 `scripts.delta.portfolio_classify` uses days-since heuristics (BQ ≥14
-days → stale_bq, thesis >7 days → stale_thesis). It does NOT run a
+days → stale_bq, thesis >7 days → stale_thesis) PLUS a stored-artifact
+read: a BQ whose own run lost important data also classifies `stale_bq`
+(`bq_degradation_state`, read off the artifact's `degraded_categories` /
+its run's `data/00_validation.json`). So `stale_bq` has two causes and
+the state alone does not say which. It still does NOT run a
 real probe or fetch data. The actual probe happens only when the user
 approves a cascade — that's where `decide_bq_tier` runs with live
 signals.
