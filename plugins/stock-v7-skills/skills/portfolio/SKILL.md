@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.5.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.6.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -497,32 +497,51 @@ Produce per-ticker decisions with specific order recommendations.
 
 ## Step 6: Validate Orders
 
-Structure the proposed orders as a JSON array and write to a temp file:
+Structure the proposed orders as a JSON array and write them to the
+run-scoped path `reports/portfolio/<ETDAY>/.proposed_orders.json` — NOT a
+Python `tempfile` path. Two reasons (both bit before): a `mkstemp` path on
+native-Windows git-bash is a backslash string that bash mangles when
+substituted into a later block (repo cross-platform rule: bash-consumed
+paths never come from Python tempfile), and a system-temp name is not
+reconstructable by the later fresh-shell blocks that re-derive their own
+paths.
 
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+ORDERS_PATH="reports/portfolio/$ETDAY/.proposed_orders.json"
+# Same-day-rerun safety: clear the prior order set FIRST. If parsing the
+# heredoc fails below, the validate block must fail loudly on a MISSING
+# file — never silently validate an earlier run's stale order set.
+rm -f "$ORDERS_PATH"
 "$PYBIN" -c "
-import json, tempfile, os, sys
+import json, sys, pathlib
+sys.stdin.reconfigure(encoding='utf-8')
 orders = json.loads(sys.stdin.read())
-fd, path = tempfile.mkstemp(suffix='.json')
-with os.fdopen(fd, 'w', encoding='utf-8') as f: json.dump(orders, f)
-print(path)
-" <<'ORDERS'
+p = pathlib.Path(sys.argv[1])
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(orders), encoding='utf-8')
+print(p.as_posix())
+" "$ORDERS_PATH" <<'ORDERS' || { echo "FATAL: proposed-orders JSON invalid — nothing written; fix the order array and re-run this block" >&2; exit 1; }
 [{"ticker":"MU","action":"buy","type":"market","shares":50,"est_price":90.0}]
 ORDERS
 ```
 
+If the write block prints FATAL (invalid order JSON), STOP — fix the
+order array and re-run this block before going any further; the file was
+deliberately cleared first, so skipping ahead would make validation fail
+on a missing file rather than silently validate a stale order set.
+
 Then validate, capturing the stress-test JSON so Step 8 can attach it to
-the decision log. Use a deterministic run-scoped path (NOT /tmp/...$$):
-Step 8 runs in a LATER shell — the conversational Step 7 sits between
-validate and the log write, and a re-validation in Step 7 must overwrite
-the same path so Step 8 reads the latest. A `$$`/PID temp name is lost
-across that boundary, and `portfolio_log --stress-test` FAILS (exit 2)
-on a missing path — fix the path, do not drop the flag to silence it.
-The fixed path is reconstructable per-call, exactly like
-`macro.json`. (`{TEMP_ORDERS_JSON}` below = the path the previous block
-printed — substitute the literal; it is not a shell variable.)
+the decision log. Both paths are deterministic and run-scoped (NOT
+/tmp/...$$): Step 8 runs in a LATER shell — the conversational Step 7 sits
+between validate and the log write, and a re-validation in Step 7 must
+overwrite the same paths so Step 8 reads the latest. A `$$`/PID temp name
+is lost across that boundary, and `portfolio_log --stress-test` FAILS
+(exit 2) on a missing path — fix the path, do not drop the flag to
+silence it. The fixed paths are reconstructable per-call, exactly like
+`macro.json`.
 
 ```bash
 cd "<captured-abs-ROOT>"
@@ -533,7 +552,7 @@ VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 "$PYBIN" -m scripts.validate \
   --state portfolio-state.yaml \
   --prices "reports/portfolio/$ETDAY/macro.json" \
-  --orders {TEMP_ORDERS_JSON} \
+  --orders "reports/portfolio/$ETDAY/.proposed_orders.json" \
   --constraints strategy.compiled.yaml \
   --output "$VALIDATOR_OUTPUT"
 ```
@@ -547,7 +566,11 @@ lost before Step 8 needs it (codex review 2026-05-22 F7).
 iteration signal here, NOT a stop-everything error):
 - Read the violations from the output.
 - Adjust the order set to resolve violations.
-- Re-run validation.
+- Re-run the ORDER-WRITE block above with the revised array FIRST, then
+  re-run validation — the validator reads `.proposed_orders.json`, not
+  the conversation; skipping the rewrite re-validates the old order set
+  and Step 8 would attach its stress results to your revised
+  recommendations. Same rule for any Step 7 revision.
 - Max 3 attempts. If still failing, present the unresolved violations
   to the user and ask how to proceed. Note: Step 8 will REFUSE to write
   the log while the validator artifact records `passed: false` — drop or

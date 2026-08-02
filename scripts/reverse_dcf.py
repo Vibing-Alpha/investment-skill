@@ -80,19 +80,45 @@ def solve_implied_growth(
     # shape as the valuation prompt's first-line guard — one contract
     # regardless of which defense tripped. Reason is split so the
     # operator log tells you WHICH input was bad.
-    if current_price <= 0:
+    # NaN bypasses a bare `<= 0` guard (NaN comparisons are all False) and
+    # then poisons every bound check below the same way — the binary search
+    # would collapse onto lo and emit a confident -20% growth from garbage
+    # inputs. `not (x > 0)` is True for NaN, None-safe via the explicit
+    # None checks, and rejects 0/negative in one expression.
+    if current_price is None or not (current_price > 0) \
+            or not math.isfinite(current_price):
         return {
             "implied_growth_rate_pct": None,
             "status": "skipped",
             "reason": "invalid_price_input",
-            "source": "[Calc: skipped in reverse_dcf — non-positive price]",
+            "source": "[Calc: skipped in reverse_dcf — non-positive or non-finite price]",
         }
-    if base_fcf_per_share is None or base_fcf_per_share <= 0:
+    if base_fcf_per_share is None or not (base_fcf_per_share > 0) \
+            or not math.isfinite(base_fcf_per_share):
         return {
             "implied_growth_rate_pct": None,
             "status": "skipped",
             "reason": "invalid_fcf_input",
-            "source": "[Calc: skipped in reverse_dcf — null or non-positive fcf]",
+            "source": "[Calc: skipped in reverse_dcf — null, non-positive or non-finite fcf]",
+        }
+    # discount_rate <= terminal_growth makes the Gordon terminal value
+    # undefined — _dcf_value's float('inf') sentinel would otherwise flow
+    # into the `current_price < val_lo` bound check (anything < inf) and
+    # return implied_growth = -20% with a misleading "Price below minimum
+    # DCF" note. The orchestrated path clamps WACC upstream; the documented
+    # standalone CLI has no clamp, so fail closed here.
+    if (not isinstance(discount_rate, (int, float))
+            or not isinstance(terminal_growth, (int, float))
+            or not math.isfinite(discount_rate)
+            or not math.isfinite(terminal_growth)
+            or discount_rate <= terminal_growth):
+        return {
+            "implied_growth_rate_pct": None,
+            "status": "skipped",
+            "reason": "invalid_rate_inputs",
+            "source": ("[Calc: skipped in reverse_dcf — discount_rate must be "
+                       "finite and > terminal_growth (Gordon terminal value "
+                       "undefined otherwise)]"),
         }
 
     # Binary search bounds: -20% to +50% growth

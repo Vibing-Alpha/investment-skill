@@ -518,17 +518,42 @@ def build_scores(score_files, weights):
     Fail-closed on empty input or fully-mismatched dimension names — main()
     guards with a ≥2 dimensions gate but defensive callers may pass junk.
     Returning ZeroDivisionError here would crash the whole assemble pipeline.
+
+    Note (reviewed + declined, codex cold-rounds 1/10): on a FULL-tier run
+    the staging strict-validation (load_bq_analysis) requires all three
+    score/weight keys, so a renormalized <3-dim result from this helper
+    ends in a STRUCTURED staging abort — that is the documented fail-closed
+    contract for full tier (operator re-runs the failed dimension agent),
+    not a defect. Widening the loader to ≥2 dims would push partial score
+    shapes onto every downstream consumer. The renormalize path here stays
+    correct for defensive/lighter callers and turns what used to be a raw
+    KeyError crash into an audible exclusion.
     """
     scores = {}
     for dim_name, weight in weights.items():
-        if dim_name in score_files:
-            scores[dim_name] = score_files[dim_name]["overall"]
-        else:
+        if dim_name not in score_files:
             print(
                 f"{PREFIX}: WARNING — missing dimension '{dim_name}', "
                 f"excluded from weighted average",
                 file=sys.stderr,
             )
+            continue
+        # LLM-authored scores/*.json can drift: a missing 'overall' key or a
+        # string value would raise KeyError / TypeError out of the pipeline
+        # AFTER Step 5 part 1 already mutated 00_validation.json. Treat a
+        # malformed dimension exactly like a missing one (warn + exclude) —
+        # NaN/Inf still flow to the finite post-condition below, which
+        # fail-closes the whole score (documented behavior, unchanged).
+        dim_doc = score_files[dim_name]
+        overall_val = dim_doc.get("overall") if isinstance(dim_doc, dict) else None
+        if isinstance(overall_val, bool) or not isinstance(overall_val, (int, float)):
+            print(
+                f"{PREFIX}: WARNING — dimension '{dim_name}' has no numeric "
+                f"'overall' (got {overall_val!r}), excluded from weighted average",
+                file=sys.stderr,
+            )
+            continue
+        scores[dim_name] = overall_val
 
     total_weight = sum(weights[d] for d in scores)
     if total_weight == 0:
@@ -701,7 +726,15 @@ def _load_strategy_weights(strategy_path=None):
             file=sys.stderr,
         )
         return dict(DEFAULT_WEIGHTS)
-    if not all(isinstance(v, (int, float)) and 0 <= v <= 1 for v in w.values()):
+    # bool is an int subclass: YAML 1.1 `yes`/`no`/`on`/`off` parse as
+    # booleans and would pass a bare (int, float) check (0 <= True <= 1),
+    # silently producing a 1/0/0 weighting and boolean values in the
+    # bq_analysis.json weights field. Reject bool explicitly, matching the
+    # repo-wide numeric-boundary convention.
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
+        for v in w.values()
+    ):
         print(
             f"{PREFIX}: strategy.yaml.scoring.dimension_weights invalid "
             f"(values={dict(w)} must be numeric in [0,1]); "
@@ -972,9 +1005,23 @@ def main():
     for dim_name in DIMENSIONS:
         score_path = report_dir / "scores" / f"{dim_name}.json"
         if score_path.exists():
-            score_files[dim_name] = read_json(
+            _doc = read_json(
                 str(score_path), f"scores/{dim_name}.json", PREFIX
             )
+            # Root-shape gate BEFORE both consumers: a list/scalar root
+            # would pass build_scores' per-field guard but crash
+            # build_dimensions at data.items() (codex cold-round 5).
+            # Treated exactly like a missing score file (the <2-dims gate
+            # below then decides whether the run can proceed).
+            if isinstance(_doc, dict):
+                score_files[dim_name] = _doc
+            else:
+                print(
+                    f"{PREFIX}: WARNING — scores/{dim_name}.json root is "
+                    f"{type(_doc).__name__}, not an object; dimension "
+                    f"excluded (treated like a missing score file)",
+                    file=sys.stderr,
+                )
         else:
             print(
                 f"{PREFIX}: WARNING — {score_path} not found, skipping",

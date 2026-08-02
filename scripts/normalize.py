@@ -130,7 +130,10 @@ def check_currency_contamination(statements: List[Dict]) -> bool:
         cur = stmt.get("currency") if isinstance(stmt, dict) else None
         if cur is None or (isinstance(cur, str) and not cur.strip()):
             return True  # Missing/blank currency = unknown = unsafe for ratio use
-        return str(cur).strip() != "USD"
+        # C4B-MED-2 case-normalization: accept lowercase/padded "usd" like
+        # every sibling currency gate (extract_fcf/_any_explicit_non_usd,
+        # historical_multiples/_is_usd_norm, quarter_window).
+        return str(cur).strip().upper() != "USD"
 
     return any(_is_non_usd(stmt) for stmt in statements)
 

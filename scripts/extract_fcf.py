@@ -789,9 +789,11 @@ def extract_fcf_inputs(
             # occur because `chosen is None` is handled above).
             if latest_balance:
                 shares_raw = latest_balance.get("outstanding_shares", 0) or 0  # fail-open-ok: guarded by `_finite_shares` below — fail-closed via FCF_SELECTION_REASON_SHARES_UNAVAILABLE
+                shares_row_period = latest_balance.get("report_period", "?")
             else:
                 sorted_bs = sorted(balance_sheets, key=lambda x: x.get("report_period") or "")
                 shares_raw = sorted_bs[-1].get("outstanding_shares", 0) or 0  # fail-open-ok: guarded by `_finite_shares` below — fail-closed via FCF_SELECTION_REASON_SHARES_UNAVAILABLE
+                shares_row_period = sorted_bs[-1].get("report_period", "?")
             # Post-impl ISS-024 (fresh-loop2): explicit bool / NaN / Inf
             # / numeric-string guard on outstanding_shares. Pre-fix a
             # bool shares value coerced to 1 (since bool is int subclass),
@@ -819,8 +821,16 @@ def extract_fcf_inputs(
                 result["ttm_fcf_tag"] = (
                     "[Calc: sum of 4 quarters per " + result["fcf_source"] + "]"
                 )
+                # Provenance must cite the row ACTUALLY used: since the DL4
+                # migration shares come from the aligned window's latest
+                # balance row, which is an OLDER quarter than
+                # balance_sheets[-1] whenever the newest balance row failed
+                # 3-family alignment. A [-1] tag would send an auditor to a
+                # different (e.g. post-buyback) share count.
                 result["shares_tag"] = (
-                    "[API: 02_financial_data.balance_sheets[-1].outstanding_shares]"
+                    "[API: 02_financial_data.balance_sheets[period="
+                    + str(shares_row_period)
+                    + "].outstanding_shares]"
                 )
                 result["quarters_used"] = [
                     cf.get("report_period", "?") for cf in sorted_cfs_final

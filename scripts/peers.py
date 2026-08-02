@@ -128,16 +128,24 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
     # DL3b §3.1: median pass restricted to currency == _MEDIANS_BASE_CURRENCY.
     # Non-USD peers remain in `peers` for audit (raw multiples preserved)
     # but are excluded from the median aggregation.
-    usd_peers = {
-        t: rec for t, rec in peers.items()
-        if rec.get("currency") == _MEDIANS_BASE_CURRENCY
-    }
+    #
+    # Suffix-resolved peers are ALSO excluded from medians: the exchange-
+    # suffix retry binds the first foreign listing that shares the symbol
+    # with NO identity re-verification (there is no reference name to check
+    # against), so a stale/renamed US peer can resolve to an UNRELATED
+    # same-symbol foreign issuer. A USD-quoting foreign line (LSE USD
+    # duals) would otherwise pass the currency gate and contaminate the
+    # peer-band anchor with a different company's multiples. Audit-only.
+    def _median_eligible(rec):
+        return (rec.get("currency") == _MEDIANS_BASE_CURRENCY
+                and "resolved_as" not in rec)
+
+    usd_peers = {t: rec for t, rec in peers.items() if _median_eligible(rec)}
     # medians_excluded_tickers records the peers-dict KEY (requested ticker
     # form, NOT the suffix-resolved form). Order is fetch order via
     # peers.items() iteration. Cx-R1-M7.
     medians_excluded_tickers = [
-        t for t, rec in peers.items()
-        if rec.get("currency") != _MEDIANS_BASE_CURRENCY
+        t for t, rec in peers.items() if not _median_eligible(rec)
     ]
 
     medians = {}

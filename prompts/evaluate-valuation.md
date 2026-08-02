@@ -139,6 +139,14 @@ isolation is meaningless — context is everything.
    Access: `medians.<method>` for peer median; `peers.<TICKER>.multiples.<method>`
    for individual peer values.
 
+   **`resolved_as` records are audit-only — NEVER a valuation input.** A
+   peer record carrying `resolved_as` was resolved through the exchange-
+   suffix retry with NO identity verification: a stale/renamed symbol can
+   bind an UNRELATED same-symbol foreign issuer (the producer already
+   excludes these from `medians` for exactly this reason). Do not use such
+   a record's multiples for any individual-peer comparison, band, or
+   narrative — at most mention its existence as an unverified data point.
+
    **REQUIRED: read `medians_sample_size.<method>` before anchoring on a median.**
    A median backed by 1 peer (`n == 1`) is NOT a peer benchmark — it is that
    single ticker's value (common for pre-profit cohorts where only the lone

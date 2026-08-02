@@ -85,6 +85,16 @@ You will receive:
 3. **Macro snapshot** — broad market indicators (SPY/QQQ/DJI price + MAs),
    VIX (current + MA20), interest rates (fed funds, `us_10y`, `us_5y`, and
    `spread_10y_5y` — the 10Y−5Y spread; `^FVX` is the 5Y, so there is no `us_2y`)
+
+   **`rates_status` read requirement** (unlike `meta.validation_status`, this
+   one you MUST read): it qualifies the interest-rate block. `PASSED` =
+   current (live fetch, or a caller-provided fallback). Anything else —
+   `PARTIAL` with `source: disk` means the live fetch failed and
+   `fed_funds` is a disk cache of the age given in the status detail
+   (vintage in `rates.as_of_date`); `FAILED` means no source at all —
+   treat the policy rate as stale/unknown: cite it with its vintage, and
+   do NOT evaluate rate-sensitive principles (e.g.
+   raise-cash-on-macro-deterioration) as if it were today's rate.
    Also includes `ticker_indicators[TICKER]` — **run-day** technical
    indicators (RSI, MACD, Bollinger `pct_b`/`position`, ATR, volume
    confirmation, RSI divergence), same shape as `indicators.json`. These are

@@ -3,6 +3,15 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.6.0 — 2026-08-02
+
+- fix (IMPORTANT — affects entry/reduce timing): /portfolio run-day technical indicators were computed from the LIVE partial session bar — a mid-session run read a genuinely volume-confirmed breakout as 'no volume confirmation' and could falsely arm a momentum-weakening reduce. Ticker indicators and benchmark relative-strength returns are now anchored to the last completed ET session; the live quote remains the display price
+- fix: the ratio-ADR unit-mismatch guard can no longer be silently disarmed — a missing, corrupt, stale or mixed-shape adr_correction.json anchor now fails closed instead of running USD-reporting ratio-ADRs (BP/SHEL class) in non-ADR mode, which produced 2-6x per-share valuation errors with status ok; fetch writes a static-fallback anchor when the data-driven classification is unavailable, and BP/SHEL/HSBC/BHP joined the known ratio-ADR table
+- fix: fed_funds in /portfolio's macro snapshot could be weeks stale while reading PASSED — any disk-cached report short-circuited the live rates fetch. Rates are now fetched live FIRST; a disk cache is used only after live failure, always marked PARTIAL with its mtime-derived vintage, and the decide prompt must read rates_status before citing the policy rate
+- fix: peer valuation medians can no longer be contaminated by an unrelated same-symbol foreign issuer — exchange-suffix-resolved peers are identity-unverified, excluded from medians and audit-only for the valuation agent
+- fix: portfolio safety-gate hardening — open orders with missing/null/absurd share counts or corrupted prices are structured violations instead of zero-impact projections or crashes (NaN/inf/huge-int passed bare comparisons at three boundaries); YAML boolean dimension_weights rejected; malformed dimension score files excluded audibly instead of crashing assemble mid-write
+- fix: reverse DCF returns a skipped status for NaN inputs and discount_rate <= terminal_growth instead of a confident -20% implied growth; fcf shares provenance cites the aligned-window balance row actually used; thesis Step 5a/alpha-scan resolve the prior-day BQ dir on the declined-cascade path instead of crashing
+
 ## v1.5.0 — 2026-08-02
 
 - User-strategy lens now reliably reaches the thesis layer (mandate.style_notes authoritative; evidence layer stays lens-free); macro regime_inputs adds ma200/high_52w/off_52w_high_pct for regime classification; portfolio context carries full portfolio-state incl. NAV-peak circuit-breaker bookkeeping (ratchet + reconfirmation); thesis conflict heuristics are style-dependent defaults.

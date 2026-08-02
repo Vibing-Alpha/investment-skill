@@ -23,6 +23,7 @@ so divergence is caught at CI time rather than at runtime in production.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,16 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_\-:.TZ+]+$")
 # asserts these are identical.
 DECISION_ACTIONS = frozenset({"exit", "reduce", "hold", "add", "buy", "skip"})
 ORDER_ACTIONS = frozenset({"sell", "buy"})
+
+# Sanity ceiling for order share counts AND order price fields, shared by
+# every such boundary (this loader, validate._validate_order_vocab /
+# _usable_price, portfolio_log). No real instrument has anywhere near this
+# many shares (~1e11 is the largest listed count) or this price; above
+# float range an arbitrary-precision int crashes `float(x)` / `x * y`
+# with OverflowError, so absurd magnitudes must be rejected structurally
+# at the boundary instead. Comparing an int against this float is
+# overflow-safe (Python int/float comparison is exact and never converts).
+MAX_ORDER_SHARES = 1e15
 # Order types — empirically observed in decisions.json across portfolio
 # runs. Constraint kept loose (validated only by membership when present).
 ORDER_TYPES = frozenset({
@@ -128,7 +139,20 @@ def _opt_float(d: Mapping[str, Any], key: str, *, path: str) -> float | None:
     if not isinstance(v, (int, float)):
         raise SchemaError(_ARTIFACT, f"{path}.{key}",
                           f"must be number or null, got {type(v).__name__}")
-    return float(v)
+    # All _opt_float consumers are money/percent fields (limit_price,
+    # target_weight_pct, ...) — NaN/inf must never enter the decision log
+    # (codex cold-round 6: price twins of the share-count finite guards).
+    # isfinite gated to floats; an arbitrary-precision int is caught at
+    # the float() conversion instead (codex cold-round 7).
+    if isinstance(v, float) and not math.isfinite(v):
+        raise SchemaError(_ARTIFACT, f"{path}.{key}",
+                          f"must be finite, got {v}")
+    try:
+        return float(v)
+    except OverflowError:
+        raise SchemaError(_ARTIFACT, f"{path}.{key}",
+                          f"magnitude too large for a money field, "
+                          f"got {v!r:.40s}") from None
 
 
 def _opt_str(d: Mapping[str, Any], key: str, *, path: str) -> str | None:
@@ -195,16 +219,27 @@ def _validate_order(d: Mapping[str, Any], idx: int) -> Order:
     if isinstance(shares, bool) or not isinstance(shares, (int, float)):
         raise SchemaError(_ARTIFACT, f"{path}.shares",
                           f"must be number, got {type(shares).__name__}")
-    _require(shares > 0, f"{path}.shares",
-             f"must be positive, got {shares}")
+    # isfinite on FLOATS only (`inf > 0` is True, so a bare positivity check
+    # admits an infinite share count; ints are always finite but overflow
+    # math.isfinite). MAX_ORDER_SHARES bounds arbitrary-precision ints so
+    # the `float(shares)` below cannot raise OverflowError.
+    _require((not isinstance(shares, float) or math.isfinite(shares))
+             and 0 < shares < MAX_ORDER_SHARES, f"{path}.shares",
+             f"must be positive, finite and below {MAX_ORDER_SHARES:.0e}, "
+             f"got {shares}")
 
     linked = _require_str(d, "linked_decision", path=path)
 
     limit_price = _opt_float(d, "limit_price", path=path)
     if limit_price is not None:
-        _require(limit_price > 0,
+        # Ceiling shares the MAX_ORDER_SHARES money-magnitude bound: a
+        # limit_price like 1e100 converts to a finite float but is a
+        # corrupted commitment no downstream consumer can cost honestly
+        # (codex cold-round 8).
+        _require(0 < limit_price < MAX_ORDER_SHARES,
                  f"{path}.limit_price",
-                 f"must be positive when set, got {limit_price}")
+                 f"must be positive and below {MAX_ORDER_SHARES:.0e} "
+                 f"when set, got {limit_price}")
 
     duration = _opt_str(d, "duration", path=path)
 

@@ -21,6 +21,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import pathlib
 import re
 import sys
@@ -520,6 +521,13 @@ def _compact_macro(macro: Dict[str, Any]) -> Dict[str, Any]:
     # its own regime classification (feedback 2026-06-11 #2).
     if isinstance(macro.get("regime_inputs"), dict):
         out["regime_inputs"] = macro["regime_inputs"]
+    # rates_status travels WITH the rates it qualifies — a stale-disk
+    # PARTIAL (live fetch failed, cache beyond the freshness bound) or
+    # FAILED must be visible in the durable decision log, not dropped at
+    # compaction (codex cold-round 9; same lesson as historical_multiples'
+    # status downgrade: a signal without a reader is not a fix).
+    if isinstance(macro.get("rates_status"), dict):
+        out["rates_status"] = macro["rates_status"]
     return out
 
 
@@ -707,6 +715,7 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
                     f"is background context only, append [context-only] to that clause.",
                     file=sys.stderr,
                 )
+    from scripts.schemas.decisions import MAX_ORDER_SHARES
     for i, o in enumerate(_as_list("orders_proposed")):
         if not isinstance(o, dict):
             errors.append(f"orders_proposed[{i}]: not a dict ({type(o).__name__})")
@@ -746,12 +755,30 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
             # time. Reject bool explicitly (bool is subclass of int in Python).
             if (isinstance(shares, bool) or
                 not isinstance(shares, (int, float)) or
-                shares <= 0):
+                (isinstance(shares, float) and not math.isfinite(shares)) or
+                shares <= 0 or shares >= MAX_ORDER_SHARES):
                 errors.append(
                     f"orders_proposed[{i}] ({o.get('ticker', '?')}): "
-                    f"shares={shares!r} must be a positive number "
+                    f"shares={shares!r} must be a positive finite number "
+                    f"below {MAX_ORDER_SHARES:.0e} "
                     f"(int or float for fractional shares)"
                 )
+        # PRESENT-but-invalid price fields fail the write gate (codex
+        # cold-round 8): an est_price of inf would pass into decisions.json
+        # while the validator costs the order at the finite quote — a
+        # contradictory audit record. Absent/null keys stay legal.
+        for pkey in ("est_price", "limit_price", "price"):
+            pval = o.get(pkey)
+            if pkey in o and pval is not None:
+                if (isinstance(pval, bool) or
+                    not isinstance(pval, (int, float)) or
+                    (isinstance(pval, float) and not math.isfinite(pval)) or
+                    pval <= 0 or pval >= MAX_ORDER_SHARES):
+                    errors.append(
+                        f"orders_proposed[{i}] ({o.get('ticker', '?')}): "
+                        f"{pkey}={pval!r} must be a positive finite number "
+                        f"below {MAX_ORDER_SHARES:.0e} when present"
+                    )
     # HIGH-17: follow_ups schema (decide.md) requires date, ticker, event,
     # what_to_watch. Past-date filtering happens in _sanitize_follow_ups;
     # missing-field checks belong here so malformed entries never reach

@@ -915,6 +915,20 @@ def compute_historical_multiples(
     # Add current snapshot multiples from metrics_snapshot if available
     ms = financial_data.get("metrics_snapshot", {})
     current_from_api: dict = {}
+    # Shape guard — same "malformed but valid-JSON" rationale as the root +
+    # 3-statement-family guards above. A metrics_snapshot drifted to a
+    # list/string would AttributeError at `ms.get(...)` OUTSIDE the error
+    # envelope (the CLI catches only InsufficientQuartersError), turning a
+    # degradable snapshot problem into a whole-run "producer crash".
+    # Degrade to "no snapshot": current_from_api omitted + audible warning.
+    _ms_shape_warning: Optional[str] = None
+    if not isinstance(ms, dict):
+        _ms_shape_warning = (
+            f"metrics_snapshot is {type(ms).__name__}, not an object — "
+            f"snapshot multiples unavailable (current_from_api omitted); "
+            f"re-fetch this ticker's data/ to refresh it."
+        )
+        ms = {}
     # Period gate. Every multiple on this row is `market cap / <period flow>`,
     # so a QUARTERLY row yields multiples roughly 4x the TTM truth — and
     # `prompts/evaluate-valuation.md` tells the valuation agent to cross-check
@@ -1003,6 +1017,10 @@ def compute_historical_multiples(
         and newest_reported_period > latest_aligned_report_period
     )
     out_warnings = list(fx_warnings_to_propagate)
+    if _ms_shape_warning:
+        out_warnings.append(_ms_shape_warning)
+        if status == "ok":
+            status = "ok_with_warnings"
     if stale_period_warning:
         out_warnings.append(stale_period_warning)
         # Downgrade the status too. `current_from_api` silently becoming {}

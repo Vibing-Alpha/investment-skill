@@ -536,9 +536,20 @@ for f in historical_multiples.json fcf_inputs.json; do
 done
 
 # Peer multiples — peer_tickers come from bq_analysis dimensions.industry.peer_tickers.
+# Resolve the BQ dir the same way Step 6 does ("same-day or prior"): on the
+# Step 1 declined-cascade path, $REPORT_DIR has NO bq_analysis.json — the
+# only valid one lives in a prior-day dir. Hardcoding $REPORT_DIR here
+# crashed the run mid-pipeline (or silently dropped the peer lens).
+BQ_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
+  --ticker "$TICKER" --skill score-business --include-today)
+[ -n "$BQ_DIR" ] && [ -s "$BQ_DIR/bq_analysis.json" ] || {
+  echo "FATAL: no valid bq_analysis.json (run /score-business $TICKER first)" >&2; exit 1; }
+# Printed so later steps (Step 6 synthesis, Step 7 alpha dispatch) can
+# substitute the concrete path — fresh shells lose this variable.
+printf 'BQ_DIR=%s\n' "$BQ_DIR"
 "$PYBIN" -c "
 import json, subprocess, sys
-with open('$REPORT_DIR/bq_analysis.json', encoding='utf-8') as f:
+with open('$BQ_DIR/bq_analysis.json', encoding='utf-8') as f:
     pts = json.load(f).get('dimensions',{}).get('industry',{}).get('peer_tickers',[])
 if pts:
     subprocess.run([sys.executable, '-m', 'scripts.peers', '--tickers'] + pts +
@@ -604,7 +615,7 @@ MA200-approximation notes.
 Spawn synthesis agent with `<captured-abs-ROOT>/prompts/evaluate-thesis.md`.
 If events was reused (Step 4 took the reuse path), include the
 `events_reuse_context` block per the prompt. Read `bq_analysis.json` from
-same-day or prior BQ dir.
+same-day or prior BQ dir (the `<BQ_DIR>` Step 5a printed).
 
 Include `<captured-abs-ROOT>/strategy.yaml` in the dispatch input list — the
 prompt's Step 3 user-mandate overlay reads `mandate.style` /
@@ -747,7 +758,13 @@ alpha" is a valid and expected output for most well-covered names.
 
 **Phase 1 — Automatic scan:**
 
-Perform divergence detection by cross-referencing `bq_analysis.json`,
+Perform divergence detection by cross-referencing `bq_analysis.json`
+(under `<captured-abs-ROOT>/<BQ_DIR>/` — the dir Step 5a printed; on the
+declined-cascade path `<REPORT_DIR>` has NO bq_analysis.json. If the
+printed value is no longer in context, re-run the full idempotent
+resolver command from Step 5a:
+`"$PYBIN" -m scripts.delta.resolver find-latest-prior --ticker "$TICKER"
+--skill score-business --include-today`) with
 `valuation.json`, `technical.json`, `events.json`, and
 `investment_thesis.json` (all under `<captured-abs-ROOT>/<REPORT_DIR>/`)
 against the 6 patterns in
@@ -807,7 +824,14 @@ On user selection:
   ```
   Agent Advocate:
     Read <captured-abs-ROOT>/prompts/evaluate-alpha.md (Phase 3, Agent A section)
-    Data: <captured-abs-ROOT>/<REPORT_DIR>/{bq_analysis,valuation,technical,events}.json
+    Data: <captured-abs-ROOT>/<REPORT_DIR>/{valuation,technical,events}.json
+          + <captured-abs-ROOT>/<BQ_DIR>/bq_analysis.json
+          (<BQ_DIR> = the value Step 5a printed; if it is no longer in
+          context, re-run the full idempotent resolver command before
+          composing: `"$PYBIN" -m scripts.delta.resolver find-latest-prior
+          --ticker "$TICKER" --skill score-business --include-today` — on
+          the declined-cascade path <REPORT_DIR> has no bq_analysis.json,
+          so do NOT point this at <REPORT_DIR>)
     Hypothesis: [the articulated hypothesis]
     Output: <captured-abs-ROOT>/<REPORT_DIR>/alpha_advocate.json
 

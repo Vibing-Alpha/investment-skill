@@ -114,6 +114,16 @@ KNOWN_ADR_CLASSIFICATIONS = {
     # 44.85 vs computed 11.29) until this entry forced the correction
     # path via the derive_adr_profile known-adr-table fallback.
     "MRAAY": {"filing_type": "20-F", "needs_ratio_correction": True,  "data_quality_tier": "pure_adr"},
+    # codex cold-round 2 (2026-08-02): USD-reporting ratio-ADRs. These file
+    # 20-F in USD, so the DL3c currency gate passes and the ratio guard is
+    # the ONLY defense against per-ordinary-share vs per-ADR unit mismatch
+    # (BP 1 ADS = 6 ordinary; SHEL 1 ADS = 2 ordinary). Without table
+    # entries, the H-block-skipped static-fallback anchor writes
+    # needs_ratio_correction: false and the guard never engages.
+    "BP":    {"filing_type": "20-F", "needs_ratio_correction": True,  "data_quality_tier": "pure_adr"},
+    "SHEL":  {"filing_type": "20-F", "needs_ratio_correction": True,  "data_quality_tier": "pure_adr"},
+    "HSBC":  {"filing_type": "20-F", "needs_ratio_correction": True,  "data_quality_tier": "pure_adr"},  # 1 ADS = 5 ordinary
+    "BHP":   {"filing_type": "20-F", "needs_ratio_correction": True,  "data_quality_tier": "pure_adr"},  # 1 ADS = 2 ordinary
     # ISS-020: TDK Corp JPY ADR. Currently annual-only Financial
     # Datasets coverage (DL5 territory for quarterly unlock) but the
     # correction path is correct to run when adr_units / latest_shares

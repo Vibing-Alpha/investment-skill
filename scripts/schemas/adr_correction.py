@@ -20,6 +20,7 @@ Consumers: scripts.assemble, downstream ADR-aware prompts.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,8 +73,25 @@ def adr_ratio_correction_required(data_dir: Path | str) -> bool:
     (total / outstanding_shares) but the price is per-ADR, so for a
     ratio-correction ADR (ADR ratio != 1:1) the per-share-vs-price comparison is
     a unit mismatch (codex Loop review F). Currency repair does NOT fix this —
-    it is an independent ADR-units problem. Missing/unreadable anchor → False
-    (treated as non-ADR; the producer's existing guards still apply).
+    it is an independent ADR-units problem.
+
+    Anchor states:
+      - MISSING file → False. Legacy pre-anchor report dirs and minimal test
+        fixtures never carried one; fetch.py now writes an anchor on every
+        fetch (static-fallback when the H-block is skipped), so in-pipeline
+        dirs always have it.
+      - Present, frozen-anchor shape (bool ``needs_ratio_correction``) →
+        that bool.
+      - Present, VALID DL3c adr-correct artifact (legitimately shares this
+        path) → False (not a classification anchor; guard inert, as before).
+        Validity is decided by ``load_adr_correction`` — a merely
+        DL3c-SHAPED dict (e.g. ``{"_dl3c_version": 99}`` or
+        ``{"status": null}``) fail-closes; a key-presence heuristic here
+        would let corrupt state disarm the guard (codex cold-round 6).
+      - Present but UNREADABLE or matching NO known shape → True
+        (fail-close). A produced-but-broken anchor is a pipeline fault;
+        silently treating it as non-ADR would disable the ratio guard
+        exactly when upstream state is corrupt (producer-consumer §4).
     """
     p = Path(data_dir) / "adr_correction.json"
     if not p.exists():
@@ -82,8 +100,37 @@ def adr_ratio_correction_required(data_dir: Path | str) -> bool:
         with open(p, "r", encoding="utf-8") as f:
             d = json.load(f)
     except (OSError, ValueError):
+        return True
+    if isinstance(d, dict):
+        # Honor the classification flag ONLY on the strict frozen-anchor
+        # signature — a mixed-shape dict like {"needs_ratio_correction":
+        # false, "_dl3c_version": 99} matches NEITHER legit shape and must
+        # not disarm the guard via a bare bool key (codex cold-round 7).
+        if _is_frozen_anchor(d):
+            return d["needs_ratio_correction"]
+        try:
+            load_adr_correction(p)
+        except (OSError, ValueError):
+            return True
+        # A loader-VALID adr-correct artifact still blocks non-ADR-aware
+        # per-share math when it says the ticker needs correction:
+        # extract_fcf / historical_multiples recompute from raw statements
+        # and do NOT consume the artifact's corrected metrics, so
+        # "correction applied over there" is not "safe to divide per-ADR
+        # price by per-ordinary-share values here" (codex cold-round 9).
+        if bool(d.get("needs_correction")):
+            return True
+        # needs_correction=false only proves the SNAPSHOT cross-check
+        # passed (provider EPS may already be ADR-adjusted) — it says
+        # nothing about the statements' outstanding_shares basis this
+        # guard protects. A known non-1:1 deposit ratio keeps the guard
+        # armed regardless (codex cold-round 10/11).
+        ratio = d.get("adr_ratio")
+        if (isinstance(ratio, (int, float)) and not isinstance(ratio, bool)
+                and math.isfinite(ratio) and ratio > 0 and ratio != 1):
+            return True
         return False
-    return isinstance(d, dict) and bool(d.get("needs_ratio_correction"))
+    return True
 
 
 def _is_frozen_anchor(data: dict) -> bool:

@@ -177,6 +177,35 @@ def classify_ticker(ticker: str) -> Dict:
     }
 
 
+def _fallback_anchor_should_write(anchor_path: Path, classification: Dict) -> bool:
+    """Decide whether the H-block-skipped fallback may (over)write the anchor.
+
+    Missing file → write. Existing file → preserved (a prior full fetch's
+    data-driven anchor is richer than the static table), EXCEPT the
+    guard-upgrade case (codex cold-round 4): an anchor written under an
+    older static table can carry ``needs_ratio_correction: false`` for a
+    ticker the table now marks True (BP/SHEL class) — preserving it would
+    keep the ratio guard disengaged on every H-skipped rerun. Overwrite is
+    allowed ONLY when the current classification says True and the existing
+    file is a frozen-anchor shape saying False (or is unreadable — rewrite
+    heals it). A DL3c adr-correct artifact sharing this path (no bool flag)
+    is never clobbered. The upgrade is monotonic toward fail-close: worst
+    case is a spurious valuation fail-close, never a silent wrong number.
+    """
+    if not anchor_path.exists():
+        return True
+    if not classification.get("needs_ratio_correction"):
+        return False
+    try:
+        with open(anchor_path, "r", encoding="utf-8") as f:
+            prior = json.load(f)
+    except (OSError, ValueError):
+        return True
+    return (isinstance(prior, dict)
+            and isinstance(prior.get("needs_ratio_correction"), bool)
+            and not prior["needs_ratio_correction"])
+
+
 def write_adr_anchor(classification: Dict, output_path: Path) -> None:
     """Write the ADR classification + corrected values to a JSON anchor file.
 
@@ -3178,6 +3207,27 @@ def _main_impl(
         category_statuses["eps_validation"] = {
             "status": "SKIPPED", "reason": "inputs not fetched",
         }
+        # The ratio-ADR guard anchor must not vanish with the H-block:
+        # extract_fcf / historical_multiples read adr_correction.json to
+        # fail-close on ratio-ADRs (per-ordinary-share vs per-ADR unit
+        # mismatch). Without this fallback, a company-category fetch failure
+        # on a USD-reporting ratio-ADR (BP/SHEL class) left NO anchor, the
+        # guard silently disengaged, and the valuation producers emitted
+        # 2-6x wrong per-share numbers with status ok. Write the static-
+        # table classification instead; overwrite policy (incl. the
+        # stale-false guard-upgrade) lives in _fallback_anchor_should_write.
+        adr_anchor_path = output_dir / "adr_correction.json"
+        adr_classification = _reconcile_anchor_with_profile(
+            adr_classification, profile, fallback_is_adr=is_adr,
+        )
+        if _fallback_anchor_should_write(adr_anchor_path, adr_classification):
+            write_adr_anchor(adr_classification, adr_anchor_path)
+            print(
+                f"    ADR anchor written (static fallback, H-block skipped): "
+                f"{adr_anchor_path} "
+                f"(tier={adr_classification['data_quality_tier']})",
+                file=sys.stderr,
+            )
     else:
         print("\n[H] Running EPS Data Validations...", file=sys.stderr)
 

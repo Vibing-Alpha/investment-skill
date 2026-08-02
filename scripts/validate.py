@@ -20,6 +20,7 @@ _VALID_ACTIONS = {"buy", "sell"}
 # R1 HIGH-1: a locally-narrowed {market, limit, stop} set rejected
 # schema-valid orders (stop_limit/moc/loc/gtc/stop_market) at the safety
 # gate — producer-consumer rule #2 (handle ALL values in the vocabulary).
+from scripts.schemas.decisions import MAX_ORDER_SHARES as _MAX_ORDER_SHARES
 from scripts.schemas.decisions import ORDER_TYPES as _VALID_TYPES
 
 
@@ -104,7 +105,14 @@ def _validate_order_vocab(
         shares = order.get("shares")
         # int|float: fractional shares are schema-valid (real broker feature
         # — see portfolio_log F11); bool is a subclass of int, reject it.
-        if isinstance(shares, bool) or not isinstance(shares, (int, float)) or shares <= 0:
+        # isfinite on FLOATS only: NaN passes a bare `<= 0` (NaN comparisons
+        # are all False) and would poison the cash projection; Python ints
+        # are always finite but math.isfinite raises OverflowError on ints
+        # too large for float, so gate the call by type. MAX_ORDER_SHARES
+        # (int-comparison-safe) keeps `shares * price` from overflowing.
+        if (isinstance(shares, bool) or not isinstance(shares, (int, float))
+                or (isinstance(shares, float) and not math.isfinite(shares))
+                or shares <= 0 or shares >= _MAX_ORDER_SHARES):
             violations.append({
                 "constraint": "invalid_shares",
                 "index": i,
@@ -113,6 +121,25 @@ def _validate_order_vocab(
                 ),
             })
             order_bad = True
+        # PRESENT-but-invalid explicit prices are rejected, NOT quote-
+        # substituted (codex cold-round 8): a limit buy with limit_price:
+        # inf is a corrupted, unknowable commitment — projecting it at the
+        # live quote understates the GTC fill exactly the way the R2
+        # HIGH-1 fix forbade. Absent/null keys keep the quote fallback.
+        for pkey in ("est_price", "limit_price", "price"):
+            pval = order.get(pkey)
+            if pval is not None and pkey in order and _usable_price(pval) is None:
+                violations.append({
+                    "constraint": "invalid_price",
+                    "index": i,
+                    "message": (
+                        f"order[{i}].{pkey}={pval!r} is present but not a "
+                        f"usable price (positive finite number below "
+                        f"{_MAX_ORDER_SHARES:.0e}) — fail-closed, no quote "
+                        f"substitution"
+                    ),
+                })
+                order_bad = True
         if order_bad:
             bad_indices.add(i)
     return violations, bad_indices
@@ -121,6 +148,28 @@ def _validate_order_vocab(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _usable_price(v):
+    """A price usable for projection/constraint math: positive FINITE
+    number (bool rejected). Returns the value, else None — callers route
+    None into their existing missing-price fail-close paths.
+
+    codex cold-round 6: NaN/inf quotes and order prices were the unfixed
+    twins of the share-count finiteness guards — a NaN quote poisoned
+    account value silently, and an open sell with price: inf produced
+    passed: true with cash_after: inf. Round 7: isfinite gated to floats
+    (an arbitrary-precision int raises OverflowError inside math.isfinite)
+    and magnitude bounded by the shared MAX_ORDER_SHARES ceiling so a
+    huge-int price can never reach float arithmetic downstream.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if not (0 < v < _MAX_ORDER_SHARES):
+        return None
+    return v
+
 
 def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
     """Projection price for an order — explicit order prices BEFORE the
@@ -134,25 +183,37 @@ def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
     estimate) → limit_price → price → current quote.
     """
     for key in ("est_price", "limit_price", "price"):
-        v = order.get(key)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+        v = _usable_price(order.get(key))
+        if v is not None:
             return v
-    return ticker_prices.get(order.get("ticker", ""), 0)
+    q = _usable_price(ticker_prices.get(order.get("ticker", "")))
+    return q if q is not None else 0
 
 
 def _get_shares(holding):
     """Extract share count from holding (supports int or {"shares": N}).
 
-    Returns None when ``holding`` is a dict that lacks a ``shares`` key —
-    callers MUST treat None as a missing-data failure (HIGH-14 fix), NOT
-    silently substitute 0 (which would make the holding invisible to
-    ratio constraints).
+    Returns None when the holding lacks a USABLE share count: missing
+    ``shares`` key, non-numeric/bool value, non-finite float, or magnitude
+    ≥ MAX_ORDER_SHARES (an arbitrary-precision YAML int would crash
+    ``shares * price`` projections with OverflowError — codex cold-round 5;
+    the bound comparison itself is int-safe). Callers MUST treat None as a
+    missing-data failure (HIGH-14 fix), NOT silently substitute 0 (which
+    would make the holding invisible to ratio constraints).
     """
     if isinstance(holding, dict):
         if "shares" not in holding:
             return None
-        return holding["shares"]
-    return holding
+        val = holding["shares"]
+    else:
+        val = holding
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    if isinstance(val, float) and not math.isfinite(val):
+        return None
+    if abs(val) >= _MAX_ORDER_SHARES:
+        return None
+    return val
 
 
 def _collect_missing_shares(
@@ -167,8 +228,10 @@ def _collect_missing_shares(
     violations: List[Dict[str, Any]] = []
     for ticker, holding in holdings.items():
         # _get_shares returns None for: dict without 'shares', dict with
-        # `shares: null`, and a bare `TICKER:` (None holding). All three are
-        # the same invisible-position hazard — the original key-presence
+        # `shares: null`, a bare `TICKER:` (None holding), and — codex
+        # cold-round 5 — non-numeric/bool/non-finite/absurd-magnitude
+        # values that would crash or poison the projections. All are the
+        # same invisible-position hazard — the original key-presence
         # check missed the null-VALUE forms (whole-project review
         # 2026-06-11, HIGH-14 resurrected via null).
         if _get_shares(holding) is None:
@@ -200,7 +263,9 @@ def _calc_account_value(
     """
     total = cash
     for ticker, holding in holdings.items():
-        price = ticker_prices.get(ticker, 0.0)
+        # Non-finite/junk quotes count as missing (0 contribution) — the
+        # missing-price violations elsewhere carry the fail-close verdict.
+        price = _usable_price(ticker_prices.get(ticker)) or 0.0  # fail-open-ok: docstring contract — missing prices skipped here, failed-closed via missing_price violations
         shares = _get_shares(holding)
         if shares is None:
             continue
@@ -372,14 +437,15 @@ def _check_position_limits(
 
     if max_single is not None:
         for ticker, shares in proj_holdings.items():
-            price = ticker_prices.get(ticker)
-            if not price or price <= 0:
+            price = _usable_price(ticker_prices.get(ticker))
+            if price is None:
                 violations.append({
                     "constraint": "missing_price",
                     "ticker": ticker,
                     "current": None,
                     "limit": max_single,
-                    "message": f"{ticker} — missing/zero price, fail-closed",
+                    "message": (f"{ticker} — missing/zero/non-finite price, "
+                                f"fail-closed"),
                 })
                 continue
             pct = _calc_position_pct(shares, price, account_value)
@@ -468,7 +534,12 @@ def _run_stress_tests(
         return _apply_orders(holdings, cash, order_list, ticker_prices)
 
     # --- base: proposed market orders only ---
-    market_orders = [o for o in proposed_orders if o.get("type", "").lower() == "market"]
+    # str(... or "") — an explicit null/non-string `type` must not crash the
+    # safety gate with AttributeError (open orders have no type-vocab gate).
+    market_orders = [
+        o for o in proposed_orders
+        if str(o.get("type") or "").lower() == "market"
+    ]
     _, base_cash = _project(market_orders)
     results["base"] = {
         "cash_after": round(base_cash, 2),
@@ -500,7 +571,7 @@ def _run_stress_tests(
     # --- extreme_down: all buys + stop sells trigger ---
     stops = [
         o for o in open_orders
-        if "stop" in o.get("type", "").lower() and _is_sell(o)
+        if "stop" in str(o.get("type") or "").lower() and _is_sell(o)
     ]
     extreme_orders = all_buys + stops
     extreme_holdings, extreme_cash = _project(extreme_orders)
@@ -514,8 +585,8 @@ def _run_stress_tests(
         crashed_value = _calc_account_value(extreme_holdings, ticker_prices, extreme_cash)
         if crashed_value > 0:
             for ticker, shares in extreme_holdings.items():
-                p = ticker_prices.get(ticker, 0)
-                if p <= 0:
+                p = _usable_price(ticker_prices.get(ticker))
+                if p is None:
                     continue
                 pct = _calc_position_pct(shares, p, crashed_value)
                 if pct > max_single:
@@ -646,8 +717,8 @@ def validate_portfolio(
             if normalized_constraints.get(k) is not None
         ]
         for ticker in list(proj_holdings.keys()):
-            price = ticker_prices.get(ticker)
-            if not price or price <= 0:
+            price = _usable_price(ticker_prices.get(ticker))
+            if price is None:
                 # _check_position_limits already emits missing_price when
                 # max_single_position is set; only add here for other
                 # ratio constraints (e.g. min_cash) to avoid double-report.
@@ -693,10 +764,41 @@ def validate_portfolio(
             continue
         side_known = _is_buy(o) or _is_sell(o)
         price_ok = _order_price(o, ticker_prices) > 0
-        if not side_known or not price_ok:
-            reason = ("has no recognizable buy/sell side" if not side_known
-                      else "cannot be priced (no est_price/limit_price/price "
-                           "and no quote)")
+        # PRESENT-but-invalid explicit price → unprojectable, no quote
+        # substitution (codex cold-round 8): a broker order carrying
+        # price: inf / NaN / absurd magnitude is a corrupted commitment —
+        # costing it at the live quote hides the corruption.
+        bad_price_key = next(
+            (k for k in ("est_price", "limit_price", "price")
+             if k in o and o.get(k) is not None
+             and _usable_price(o.get(k)) is None),
+            None,
+        )
+        # Shares gate (same fail-closed rule as side/price): a missing
+        # `shares` key would project as zero impact inside _apply_orders
+        # (silently understating a real broker commitment), and a null
+        # shares value would crash the projection with TypeError. Unknown
+        # commitment size → VIOLATION, not a guess.
+        o_shares_val = o.get("shares")
+        shares_ok = (isinstance(o_shares_val, (int, float))
+                     and not isinstance(o_shares_val, bool)
+                     and (not isinstance(o_shares_val, float)
+                          or math.isfinite(o_shares_val))
+                     and 0 < o_shares_val < _MAX_ORDER_SHARES)
+        if not side_known or not price_ok or bad_price_key or not shares_ok:
+            if not side_known:
+                reason = "has no recognizable buy/sell side"
+            elif bad_price_key:
+                reason = (f"carries {bad_price_key}="
+                          f"{o.get(bad_price_key)!r} — present but not a "
+                          f"usable price (fail-closed, no quote "
+                          f"substitution)")
+            elif not price_ok:
+                reason = ("cannot be priced (no est_price/limit_price/price "
+                          "and no quote)")
+            else:
+                reason = (f"has no usable share count (shares="
+                          f"{o_shares_val!r}; must be a positive number)")
             unprojectable_violations.append({
                 "constraint": "unprojectable_open_order",
                 "ticker": o.get("ticker"),

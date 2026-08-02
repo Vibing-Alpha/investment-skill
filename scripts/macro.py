@@ -64,6 +64,12 @@ TREASURY_5Y_AS_2Y_PROXY = TREASURY_5Y
 # index period (14), so the divergence lookback of 60 needs 14+60=74 closes.
 _MIN_INDICATOR_BARS = 74
 
+# NOTE (codex cold-round 14): there is deliberately NO disk-cache
+# freshness window — the live source is always tried first (even a
+# same-day cache can straddle a 14:00 ET FOMC announcement), and a disk
+# cache is used only after live failure, always marked PARTIAL with its
+# mtime-derived vintage.
+
 
 def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
     """Run-day indicator block from raw OHLCV — reuses scripts.indicators (DRY).
@@ -160,13 +166,19 @@ def _pct_return(closes, days: int = 63):
     return (finite[-1] / prior - 1) * 100.0
 
 
-def _bench_3m(raw, idx):
+def _bench_3m(raw, idx, anchor_iso):
     """3-month % return for a market index from its fetched 1y closes;
-    None when the index fetch is missing/insufficient (rs falls back to null)."""
+    None when the index fetch is missing/insufficient (rs falls back to null).
+
+    Anchored to the last completed ET session (same rationale as
+    _anchored_ohlcv): rs_vs_*_3m compares this to ticker returns computed
+    from anchored series — an unanchored benchmark would mix today's live
+    partial bar into one side of the subtraction."""
     triple = raw.get(("index", idx))
     # isinstance guard: index slots hold the OHLCV dict post-#2 refactor, but
     # the future-exception fallback still stores (None, [], status) — a LIST.
     ohlcv = triple[1] if triple and isinstance(triple[1], dict) else {}
+    ohlcv = _anchored_ohlcv(ohlcv, anchor_iso)
     # Adjusted-close basis, same merge as _compute_ticker_indicators: RS
     # facts compare ticker returns (adjclose-based) to this benchmark — a
     # raw-close benchmark understates SPY/QQQ by every distribution in the
@@ -209,6 +221,36 @@ def _anchored_series(ohlcv, anchor_iso):
         if d == anchor_iso:
             close_at = c
     return close_at, closes_thru
+
+
+def _anchored_ohlcv(ohlcv, anchor_iso):
+    """OHLCV dict filtered to bars dated <= anchor (drops the live partial bar).
+
+    Same clock hazard as _anchored_series (feedback 2026-06-11 #2), applied
+    to the FULL bar arrays: run-day ticker indicators (volume ratio, MACD,
+    RSI, price/volume classification) feed the authoritative #2/#3
+    entry/reduce gates in prompts/portfolio-decide.md, and during market
+    hours the live session bar carries a fraction-complete volume — a
+    genuinely volume-confirmed breakout at 10:30 ET reads "0.3x, no volume
+    confirmation" from the partial bar.
+
+    Bars whose timestamp is missing/unparseable are dropped (they cannot be
+    proven complete). No timestamp array at all → everything drops → the
+    74-bar indicator gate fails closed to None rather than serving an
+    unanchorable read.
+    """
+    ts = ohlcv.get("timestamp") or []
+    keep = []
+    for i, t in enumerate(ts):
+        d = _et_date_iso(t)
+        if d is not None and d <= anchor_iso:
+            keep.append(i)
+    out = dict(ohlcv)
+    for k in ("timestamp", "open", "high", "low", "close", "adjclose", "volume"):
+        arr = ohlcv.get(k)
+        if isinstance(arr, list):
+            out[k] = [arr[i] for i in keep if i < len(arr)]
+    return out
 
 
 def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
@@ -374,14 +416,41 @@ def _fetch_chart(ticker, range_param="1y", interval="1d"):
 
 
 def _load_rates_from_disk(reports_dir="reports"):
-    """Glob for the most recent 09_macro_rates.json and extract FED rate."""
+    """Glob for the most recent 09_macro_rates.json and extract FED rate.
+
+    The returned dict carries ``as_of_date`` (ISO) — the CACHE-FETCH
+    vintage, derived from the file's mtime — so the caller can enforce a
+    freshness bound. Two sources are deliberately NOT used (codex
+    cold-rounds 4/10): the date-DIR name, because a delta partial/no-op
+    run copies the prior ``09_macro_rates.json`` into today's run dir
+    (copy_data uses shutil.copy2, which preserves mtime exactly, so mtime
+    stays honest for copies); and the FED row's own ``date`` field,
+    because it is the rate's EFFECTIVE date (last FOMC change — e.g.
+    2026-06-01 inside a file fetched 2026-07-30), which would make every
+    fresh cache look weeks stale. Unknown vintage → ``as_of_date`` None
+    (caller treats age-unknown as stale).
+    """
     from scripts.schemas.macro_rates import load_macro_rates
 
     reports_path = Path(reports_dir)
-    # Sort by date directory name (YYYYMMDD), not full path (which sorts by ticker first)
+
+    def _mtime_or_zero(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    # Select by FILE MTIME (dir date as tie-break only): candidate
+    # selection and the freshness bound must use the same vintage key
+    # (codex cold-round 11). Sorting by date-dir name alone let today's
+    # delta COPY of a month-old rates file (mtime preserved by copy2)
+    # outrank yesterday's genuinely fresh fetch in another ticker's dir —
+    # the stale copy then failed the age bound while the fresh cache was
+    # never even considered.
     candidates = sorted(
         reports_path.glob("*/*/data/09_macro_rates.json"),
-        key=lambda p: p.parts[-3] if len(p.parts) >= 3 else "",
+        key=lambda p: (_mtime_or_zero(p),
+                       p.parts[-3] if len(p.parts) >= 3 else ""),
         reverse=True,
     )
     if not candidates:
@@ -401,7 +470,17 @@ def _load_rates_from_disk(reports_dir="reports"):
     fed = doc.find_current_rate("FED")
     if fed is None:
         return None
-    return {"fed_funds": fed.rate, "source": str(candidates[0])}
+    try:
+        mtime = candidates[0].stat().st_mtime
+        as_of_date = (datetime.fromtimestamp(mtime, tz=timezone.utc)
+                      .astimezone(_ET).date().isoformat())
+    except (OSError, OverflowError, ValueError):
+        as_of_date = None
+    return {
+        "fed_funds": fed.rate,
+        "source": str(candidates[0]),
+        "as_of_date": as_of_date,
+    }
 
 
 def _fetch_rates_live():
@@ -568,9 +647,17 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         }
         market_statuses[idx] = status
 
+    # Clock anchor (last COMPLETED ET session — feedback 2026-06-11 #2).
+    # Computed once here: the regime block, the benchmark 3m returns, and the
+    # per-ticker run-day indicators must all exclude the live partial bar.
+    anchor = last_closed_trading_day().isoformat()
+
     # Benchmark 3m returns for relative-strength facts (computed ONCE; spec
     # 2026-05-31-relative-strength-fact). SPY/QQQ closes were fetched @1y above.
-    bench_returns = {"SPY": _bench_3m(raw, "SPY"), "QQQ": _bench_3m(raw, "QQQ")}
+    bench_returns = {
+        "SPY": _bench_3m(raw, "SPY", anchor),
+        "QQQ": _bench_3m(raw, "QQQ", anchor),
+    }
 
     # ------------------------------------------------------------------
     # Assemble VIX
@@ -601,8 +688,9 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # All values anchored to the last COMPLETED ET session so the regime
     # classifier never mixes a live VIX with prior-close indices. The
     # live values stay in market/volatility above (display semantics);
-    # _classify_regime consumes ONLY this block when present.
-    anchor = last_closed_trading_day().isoformat()
+    # _classify_regime consumes ONLY this block when present. `anchor`
+    # was computed once above (shared with bench_returns + ticker
+    # indicators).
     regime_indices = {}
     for idx in MARKET_INDICES:
         triple = raw.get(("index", idx))
@@ -655,16 +743,44 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     rates = _copy.deepcopy(rates_fallback) if rates_fallback else None
     rates_status = {"status": "PASSED", "source": "fallback"} if rates else None
     if rates is None:
-        rates = _load_rates_from_disk(reports_dir)
-        if rates is not None:
-            rates_status = {"status": "PASSED", "source": "disk"}
-    if rates is None:
-        # ISS-144 (Loop14 cycle 1): _fetch_rates_live now returns a
-        # status side-channel so the macro envelope surfaces upstream
-        # rate-fetch outcomes (RATE_LIMIT / UPSTREAM_ERROR / etc.)
-        # alongside the chart_statuses mapping, instead of silently
-        # emitting `rates: {}` with no observability.
+        # Live FIRST (codex cold-rounds 1/14). Pre-fix, ANY disk cache
+        # short-circuited the live fetch and shipped as PASSED — but even
+        # a same-day cache can straddle an FOMC change (announcements are
+        # 14:00 ET), so a cached fed_funds must never preempt a healthy
+        # live source. One rates call per run is cheap; a plausible wrong
+        # policy rate feeding rate-sensitive principles is not.
+        #
+        # ISS-144 (Loop14 cycle 1): _fetch_rates_live returns a status
+        # side-channel so the macro envelope surfaces upstream rate-fetch
+        # outcomes (RATE_LIMIT / UPSTREAM_ERROR / etc.) alongside the
+        # chart_statuses mapping, instead of silently emitting `rates: {}`
+        # with no observability.
         rates, rates_status = _fetch_rates_live()
+    if rates is None:
+        # Live failed → newest disk cache (by mtime), ALWAYS marked
+        # PARTIAL with its vintage — cached-but-labeled beats nothing,
+        # and it must never masquerade as PASSED regardless of age.
+        disk_rates = _load_rates_from_disk(reports_dir)
+        if disk_rates is not None:
+            age_days = None
+            as_of = disk_rates.get("as_of_date")
+            if as_of:
+                try:
+                    from datetime import date as _date
+                    from scripts.delta.calendar import today_et
+                    age_days = (today_et() - _date.fromisoformat(as_of)).days
+                except ValueError:
+                    age_days = None
+            rates = disk_rates
+            rates_status = {
+                "status": "PARTIAL",
+                "source": "disk",
+                "error_detail": (
+                    f"live rates fetch failed; disk cache is "
+                    f"{'of unknown age' if age_days is None else f'{age_days} days old'} "
+                    f"(as_of {disk_rates.get('as_of_date')!r})"
+                ),
+            }
     if rates is None:
         rates = {}
         if rates_status is None:
@@ -732,9 +848,16 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         ticker_price_statuses[t] = status
         # null when the fetch failed or there are too few bars; otherwise the
         # raw block (its legs carry their own null/insufficient_data sentinels).
+        # Series anchored to the last completed session (_anchored_ohlcv):
+        # the indicator block's "current bar" is the last COMPLETED one, so
+        # volume_ratio_vs_ma20 / price_volume_relationship read completed
+        # volume, not the mid-session partial bar. `price` (the live quote)
+        # is intentionally NOT anchored — display + where-is-price-now-vs-
+        # established-bands semantics.
         if status.get("status") == "PASSED" and isinstance(ohlcv, dict):
             ticker_indicators[t] = _compute_ticker_indicators(
-                ohlcv, price, bench_returns=bench_returns)
+                _anchored_ohlcv(ohlcv, anchor), price,
+                bench_returns=bench_returns)
         else:
             ticker_indicators[t] = None
 
