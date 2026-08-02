@@ -608,9 +608,23 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         triple = raw.get(("index", idx))
         ohlcv_i = triple[1] if triple and isinstance(triple[1], dict) else {}
         close_at, closes_thru = _anchored_series(ohlcv_i, anchor)
+        # ma200 + distance off the 52w high: the strategy regime layer's
+        # primary gauges (index vs MA200; drawdown depth as trend-structure
+        # proxy). Anchored series only — the live `market` block mixes a
+        # pre-market quote with prior-close MAs (the clock hazard this
+        # block exists to prevent). 1y daily fetch ≈ 252 closes ≥ 200.
+        high_52w = round(max(closes_thru), 2) if closes_thru else None
+        off_52w_high_pct = (
+            round((close_at - high_52w) / high_52w * 100, 2)
+            if close_at is not None and high_52w
+            else None
+        )
         regime_indices[idx] = {
             "close": close_at,
             "ma50": _sma_rounded(closes_thru, 50),
+            "ma200": _sma_rounded(closes_thru, 200),
+            "high_52w": high_52w,
+            "off_52w_high_pct": off_52w_high_pct,
         }
     vix_close_at, vix_thru = _anchored_series(vix_ohlcv, anchor)
     regime_inputs = {

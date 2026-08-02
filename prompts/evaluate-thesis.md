@@ -20,7 +20,11 @@ and falsifiable invalidation criteria.
 - `valuation.json` — Fair value estimates, scenario analysis (bull/base/bear targets), convergence assessment
 - `technical.json` — Trend, momentum, volume profile, support/resistance, entry levels
 - `events.json` — Catalyst calendar, macro environment, event-driven signals
-- `strategy.yaml` — User investment preferences and principles (optional; defaults apply if absent)
+- `strategy.yaml` — user strategy file; consume ONLY its `mandate` block here
+  (`style` / `style_notes` / `edge` — the Step 3 lens) plus top-level
+  `output_language` (for the human summary, per the Output section). The
+  `principles:` field belongs to /portfolio, not this layer. (optional;
+  defaults apply if absent)
 
 ### events_reuse_context (optional, delta-era)
 
@@ -102,10 +106,15 @@ State what all three confirm and why they reinforce each other.
 work you do. Do NOT average the conflict away. Instead:
 1. Name the conflict explicitly (e.g., "deeply undervalued but in technical downtrend")
 2. Take a stance on which signal to trust more, and explain WHY
-3. State the impact on conviction — conflicts always lower conviction
+3. State the impact on conviction — conflicts lower conviction by default;
+   how much (and, for combinations the user's style declares expected rather
+   than conflicting, whether at all) is style-dependent — Step 3's lens governs
 4. Record the resolution in `conflicts_resolved`
 
-Common conflict patterns and resolution heuristics:
+Common conflict patterns and DEFAULT resolution heuristics (a Step 3 mandate
+lens may redefine which combinations even count as conflicts, and how they
+resolve — e.g. a momentum mandate treats "overvalued + strong uptrend" as its
+expected setup, judged on premium trajectory and structure, not as a conflict):
 - **Undervalued + technical breakdown**: Usually wait for technical stabilization —
   catching falling knives destroys capital even when valuation is right
 - **Overvalued + strong uptrend**: Momentum can persist longer than expected, but
@@ -115,11 +124,17 @@ Common conflict patterns and resolution heuristics:
 - **Weak BQ + cheap valuation**: Cheap for a reason — require very high margin of
   safety (40%+) or clear turnaround evidence before building a bull thesis
 
-### Step 3. Apply User Principle Overlay
+### Step 3. Apply User Mandate Overlay
 
 If `strategy.yaml` contains style preferences (`mandate.style`, `mandate.edge`),
 apply them as an interpretive LENS — they adjust how you weigh signals, not
-whether you report them. Note: the `principles:` field is consumed exclusively
+whether you report them. When `mandate.style_notes` is present, it is the
+authoritative elaboration of the style — read it in full and apply its stated
+weighing rules (e.g. regime-conditional entry modes, or how valuation stretch
+is consumed as sizing input rather than as an entry veto). If the style is
+regime-conditional and no market-regime input is provided at this layer
+(regime classification belongs to /portfolio), state the regime you assumed
+and its basis in `thesis.conviction_reasoning`. Note: the `principles:` field is consumed exclusively
 by `/portfolio`, not here.
 
 Examples:
@@ -132,8 +147,8 @@ Examples:
 If no strategy.yaml or no relevant preferences: judge freely based on
 signal strength alone.
 
-Important: user principles are LENS, not FILTER. They shape interpretation
-but never suppress evidence. A value investor still needs to know about the
+Important: the user mandate is a LENS, not a FILTER. It shapes interpretation
+but never suppresses evidence. A value investor still needs to know about the
 technical breakdown — they just weigh it differently.
 
 ### Step 4. Calculate ER, Max Downside, and CE
@@ -354,7 +369,7 @@ but do not need full source tags — those are in the JSON.
   the url + access-date binding; preserve it verbatim when quoting from the
   sub-analyses — `[Filing: 10-K/10-Q]`). No source = does not exist.
 - Conflicts must be surfaced and resolved explicitly, never averaged away
-- User principles are LENS, not FILTER — adjust weighting, never suppress evidence
+- The user mandate is a LENS, not a FILTER — adjust weighting, never suppress evidence
 - All scenario targets and probabilities must come from valuation.json, not invented
 - thesis_invalid_if conditions must be specific and measurable — no "if things get worse"
 - Do not duplicate upstream analysis — synthesize, don't summarize

@@ -427,8 +427,14 @@ Read the output JSON. This provides:
   together with the limit prices it affects** (thin OTC ADRs lag — a limit
   set off a stale quote does not fill).
 - `regime_inputs` — clock-anchored regime block (anchor_session + per-index
-  close/ma50 + VIX close/ma20, all at the last completed ET session). The
-  decision log's regime classification consumes THIS, not the live values.
+  close/ma50/ma200/high_52w/off_52w_high_pct + VIX close/ma20, all at the
+  last completed ET session). Two INDEPENDENT consumers read this block (never
+  the live values), with distinct vocabularies — do not conflate their labels:
+  (a) the decision log's deterministic audit tag (`portfolio_log._classify_regime`
+  → risk_on/risk_off/mixed; coarse, generic, identical for every user), and
+  (b) the strategy regime layer the user's principles may define (e.g. a
+  bull/sideways/bear entry-mode switch), which the decide agent classifies
+  per those principles' own criteria.
 
 ## Step 5: Make Decisions
 
@@ -441,10 +447,13 @@ language. JSON field names and source tags remain in English.
 Assemble the full context and reason through the decision framework:
 
 **Context provided to the decision:**
-1. Portfolio state (holdings + cash + watchlist + open orders). **Every
-   decision on a ticker with an in-flight open order must explicitly
-   reconcile it (keep / cancel / supersede) in its rationale** — the log
-   writer attaches the order snapshot to the decision and warns on
+1. Portfolio state — the FULL `portfolio-state.yaml` content (holdings +
+   cash + watchlist + open orders + any additional top-level fields, e.g.
+   `nav_peak_usd` / `nav_peak_as_of`, which the NAV-drawdown circuit-breaker
+   principle reads; enumerating only the four classic sections would starve
+   it). **Every decision on a ticker with an in-flight open order must
+   explicitly reconcile it (keep / cancel / supersede) in its rationale** —
+   the log writer attaches the order snapshot to the decision and warns on
    direction conflicts (e.g. `hold` beside a full-size open sell).
 2. Hard constraints (from compiled principles)
 3. Soft principles (numbered #1–#N, from compiled `soft_principles` — injected verbatim)
@@ -559,7 +568,24 @@ The user may:
 - Ask to analyze missing tickers → run the appropriate skill
 
 **Holdings-update protocol (the ONLY mutation of `portfolio-state.yaml`).** Only when the
-user reports actual fills and asks to update positions — never on your own initiative:
+user reports actual fills and asks to update positions — never on your own initiative.
+**Sole exception — the `nav_peak_usd` ratchet (bookkeeping, not position data):** when the
+user's principles define a NAV-peak-anchored rule (e.g. a drawdown circuit breaker) and
+run-day NAV (holdings × run-day macro prices + cash) exceeds the stored `nav_peak_usd`,
+update `nav_peak_usd` + `nav_peak_as_of` in the same run WITHOUT waiting for a fill
+report — monotonic increase only, touch no other field, SHOW the computation (prices
+used + arithmetic) in the run output, and re-run the Preflight `config_gate check
+--portfolio` after writing. Without this exception a no-fill run that makes a new NAV
+high leaves the stored peak stale and understates every later drawdown — silently
+suppressing the circuit breaker. The same exception covers the breaker's
+staleness-reconfirmation write: when the principle's fail-closed branch fires
+(`nav_peak_usd` OR `nav_peak_as_of` missing, or `nav_peak_as_of` past its
+staleness bound) and the user
+reconfirms the peak in-run, update `nav_peak_as_of` to the run date (and
+`nav_peak_usd` only UPWARD, if the user supplies a higher corrected value) — a
+user-confirmed bookkeeping write, not a fill; without it the stale-peak branch
+deadlocks (reconfirmation required but no authorized writer). Holdings / cash /
+open_orders remain strictly below:
 1. Show a **before/after diff** of the exact fields changing (e.g. `MU shares: 50 → 100`,
    `cash: 12000 → 3000`, **including `open_orders` — the broker's working GTC
    orders are part of the position sync, not an optional extra**) and have the

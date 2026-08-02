@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.4.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.5.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -586,6 +586,12 @@ Compose each dispatch prompt with **concrete absolute paths** (substitute the
 captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
 shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
 
+Do NOT include `strategy.yaml` (or any `principles:` / `mandate` content) in
+the Agent V / Agent T dispatches — the evidence layer is lens-free by design;
+the user lens applies only at Step 6 synthesis. A pre-lensed `technical.json`
+(e.g. `entry_favorability` conditioned on the user's entry discipline) would
+double-lens the synthesis and contaminate the objective evidence base.
+
 Both agents MUST first read
 `<captured-abs-ROOT>/.claude/skills/investment-thesis/gotchas.md` for their
 domain's known failure patterns — Agent V the valuation-producer fail-close
@@ -599,6 +605,16 @@ Spawn synthesis agent with `<captured-abs-ROOT>/prompts/evaluate-thesis.md`.
 If events was reused (Step 4 took the reuse path), include the
 `events_reuse_context` block per the prompt. Read `bq_analysis.json` from
 same-day or prior BQ dir.
+
+Include `<captured-abs-ROOT>/strategy.yaml` in the dispatch input list — the
+prompt's Step 3 user-mandate overlay reads `mandate.style` /
+`mandate.style_notes` / `mandate.edge` as an interpretive lens, and a subagent
+that isn't handed the path will skip an "optional" input (subagents inherit
+neither cwd nor variables, so the standardized-default output silently wins).
+The file is personal/gitignored and may be absent: if missing, state that in
+the dispatch and the agent judges by signal strength alone (the prompt's
+documented default). Do NOT paste the `principles:` field into the dispatch —
+that is /portfolio's input, not the thesis lens (prompt Step 3 note).
 
 The synthesis agent MUST write BOTH deliverables (the two `## Output`
 sections of the prompt) — do NOT let the dispatch

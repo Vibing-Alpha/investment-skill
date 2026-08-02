@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.5.0 — 2026-08-02
+
+- User-strategy lens now reliably reaches the thesis layer (mandate.style_notes authoritative; evidence layer stays lens-free); macro regime_inputs adds ma200/high_52w/off_52w_high_pct for regime classification; portfolio context carries full portfolio-state incl. NAV-peak circuit-breaker bookkeeping (ratchet + reconfirmation); thesis conflict heuristics are style-dependent defaults.
+
 ## v1.4.0 — 2026-07-31
 
 - New: run-degradation gate — a degraded data fetch now travels WITH the analysis instead of vanishing behind it: bq_analysis.json meta records validation_status + degraded_categories, the delta layer classifies a degraded BQ for re-run, and /portfolio flags or blocks decisions built on degraded data (blocked_by_data_integrity) instead of silently trading on incomplete inputs
