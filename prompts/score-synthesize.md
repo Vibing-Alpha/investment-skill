@@ -35,7 +35,8 @@ tier_context:
 **On `full` tier**: behave as pre-delta (all fields present in scores
 are fresh; you derive all synthesis outputs from scratch). EXCEPT
 `catalyst_calendar`: carry it from the dimension calendars (esp.
-`scores/forward.json`'s `catalyst_density.calendar`), preserving each
+`scores/forward.json`'s `evidence.catalyst_density.calendar` — the calendar
+lives under `evidence`, NOT at the root), preserving each
 item's `source` and `date_precision` verbatim. Synthesis does NOT
 WebSearch or read raw API files, so never re-tag a carried date — keep
 the forward earnings date's upstream `[WebSearch: ...]` source verbatim,

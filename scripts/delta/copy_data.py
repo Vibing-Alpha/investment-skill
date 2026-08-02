@@ -20,10 +20,35 @@ def copy_data_categories(
 ) -> List[Path]:
     """Copy each `{category}.json` (or glob matches for patterns like `05_filing_*`)
     from src_dir to dst_dir. Returns list of destination paths actually written.
+
+    Existing-destination guard (cold-round 5 — the data-file sibling of
+    copy_dimension_scores' probe-4B guard): a destination file that already
+    EXISTS is never overwritten. On a same-session rerun the resolver's
+    prior is YESTERDAY, so a blind copy would roll a same-session FRESH
+    fetch (e.g. this morning's full-tier 08_institutional) backward to the
+    prior day's copy. An existing dst is either that fresher fetch (keep)
+    or an identical earlier copy from the same prior (skip = no-op) —
+    skip-if-exists is safe in both cases and keeps the copy idempotent.
     """
+    import sys
+
     dst_dir.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
     seen: set[Path] = set()
+
+    def _copy_if_absent(src_file: Path) -> None:
+        dst_file = dst_dir / src_file.name
+        if dst_file.exists():
+            print(
+                f"[copy_data_categories] SKIP {src_file.name}: destination "
+                f"already exists (same-session fresh fetch or prior copy) — "
+                f"not rolling it backward.",
+                file=sys.stderr,
+            )
+            return
+        shutil.copy2(src_file, dst_file)
+        written.append(dst_file)
+
     for cat in categories:
         if "*" in cat:
             # Glob pattern (e.g. 05_filing_*). A single `{cat}.*` glob
@@ -34,39 +59,80 @@ def copy_data_categories(
                 if src_file in seen:
                     continue
                 seen.add(src_file)
-                dst_file = dst_dir / src_file.name
-                shutil.copy2(src_file, dst_file)
-                written.append(dst_file)
+                _copy_if_absent(src_file)
         else:
             src_file = src_dir / f"{cat}.json"
             if src_file.exists() and src_file not in seen:
                 seen.add(src_file)
-                dst_file = dst_dir / src_file.name
-                shutil.copy2(src_file, dst_file)
-                written.append(dst_file)
+                _copy_if_absent(src_file)
     return written
 
 
 def copy_dimension_scores(
     src_dir: Path, dst_dir: Path, dimensions: Iterable[str], source_date: str
-) -> None:
+) -> dict:
     """Copy dimension score JSONs with inline provenance stamp.
 
     Adds `_source_date` and `_reason` fields to the top level of each
     copied file so downstream readers know it was reused.
+
+    Probe 4B — fresh-destination guard: when the destination score already
+    exists WITHOUT a `_source_date`, it is a FRESH same-session recompute
+    (fresh agent output never carries the stamp). A later same-session
+    no_op/partial rerun resolves its prior to YESTERDAY (the resolver
+    excludes today) and would otherwise overwrite today's fresh scores
+    with day-old copies. Never downgrade fresh content — skip, log, and
+    report. Destinations that are themselves copies (stamped) stay
+    overwritable (idempotent re-copy).
+
+    Probe 4H — vintage preservation: when the SOURCE file already carries
+    `_source_date` (it was itself a copy), that original fresh vintage is
+    preserved verbatim; only a fresh source gets stamped with
+    `source_date` (the prior dir's date). Chained no_ops therefore no
+    longer launder provenance newer with every hop.
+
+    Returns {"copied": [...], "skipped_fresh": [...]} (dimension names).
     """
+    import sys
+
     dst_dir.mkdir(parents=True, exist_ok=True)
+    copied: List[str] = []
+    skipped_fresh: List[str] = []
     for dim in dimensions:
         src_file = src_dir / f"{dim}.json"
         if not src_file.exists():
             continue
+        dst_file = dst_dir / src_file.name
+        if dst_file.exists():
+            try:
+                with open(dst_file, "r", encoding="utf-8") as f:
+                    dst_data = json.load(f)
+                dst_is_fresh = (
+                    isinstance(dst_data, dict)
+                    and "_source_date" not in dst_data
+                )
+            except (json.JSONDecodeError, OSError):
+                dst_is_fresh = False  # unreadable dst → replace with the copy
+            if dst_is_fresh:
+                skipped_fresh.append(dim)
+                print(
+                    f"[copy_dimension_scores] SKIP {dim}: destination is a "
+                    f"fresh same-session score (no _source_date) — not "
+                    f"overwriting with a prior-run copy (probe 4B guard).",
+                    file=sys.stderr,
+                )
+                continue
         with open(src_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        data["_source_date"] = source_date
+        # 4H: preserve the original fresh vintage on chained copies.
+        if "_source_date" not in data:
+            data["_source_date"] = source_date
         data["_reason"] = "copied from prior run"
         # Atomic write (project convention — matches write_output in
         # every other CLI script).
-        write_output(data, str(dst_dir / src_file.name))
+        write_output(data, str(dst_file))
+        copied.append(dim)
+    return {"copied": copied, "skipped_fresh": skipped_fresh}
 
 
 import re

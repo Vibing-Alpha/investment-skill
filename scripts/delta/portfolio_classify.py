@@ -94,7 +94,15 @@ def _days_since_last_full_bq(
             full_date = datetime.date.fromisoformat(rm.et_trading_day)
         except (ValueError, TypeError):
             continue
-        return (today - full_date).days
+        delta = (today - full_date).days
+        if delta < 0:
+            # Probe 4C: a FUTURE-dated full run (clock skew / old-date
+            # rerun) must not anchor the freshness clock — a negative age
+            # read as "fresh" silently suppressed the 14/90-day re-score
+            # valves. The docstring always promised this filter; the code
+            # never implemented it. Walk on to an older (sane) full.
+            continue
+        return delta
     return None
 
 
@@ -296,6 +304,10 @@ def degradation_summary(bq_dir) -> dict:
 
 def classify(ticker: str, reports_root: Optional[Path] = None) -> str:
     """Return one of: fresh | stale_bq | stale_thesis | bq_only | none."""
+    # Probe 3A: canonicalize once — the resolver normalizes its own lookups,
+    # but the full-tier clock walk below keys the ticker dir directly.
+    from scripts.cli_utils import normalize_ticker
+    ticker = normalize_ticker(ticker)
     root = reports_root or DEFAULT_REPORTS_ROOT
     bq_dir = find_latest_prior(ticker, SKILL_BQ, reports_root=root, include_today=True)
     thesis_dir = find_latest_prior(ticker, SKILL_THESIS, reports_root=root, include_today=True)

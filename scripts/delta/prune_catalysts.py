@@ -24,7 +24,11 @@ def prune_past(
             undated.append(entry)
             continue
         try:
-            d = datetime.date.fromisoformat(raw_date)
+            # Probe 4I: truncate to the date prefix — the same [:10]
+            # normalization diff_catalysts_in_window uses. Pre-fix a
+            # `2026-04-18T12:00:00Z` datetime raised here, classified the
+            # entry "undated", and the PAST catalyst survived pruning.
+            d = datetime.date.fromisoformat(raw_date[:10])
         except (ValueError, TypeError):
             undated.append(entry)
             continue

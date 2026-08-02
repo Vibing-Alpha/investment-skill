@@ -472,7 +472,9 @@ def build_events_reuse_inputs(
         cur_catalysts, prior_catalysts, today_et(), window_days=window_days
     )
 
-    # Gate 5: days_since
+    # Gate 5: days_since. Negative (future-dated anchor) is NOT normalized
+    # here — decide_events_reuse's Gate 5 rejects it at the single decision
+    # point (probe 4C), and the raw value stays visible for audit.
     if anchor:
         try:
             anchor_date = datetime.date.fromisoformat(anchor)

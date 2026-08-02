@@ -165,6 +165,45 @@ def parse_bool_flag(value, flag_name, prefix):
     sys.exit(1)
 
 
+import re as _re
+
+# Canonical US-ticker symbology filter (probe 3A/3C/3D — ONE
+# implementation; scripts/screen.py aliases this). Accepts AAPL, BRK.B,
+# BRK-B, BF-B, TEST1. Rejects $AAPL, NVDA;, ../etc, unicode, glob junk
+# like AGENTS.MD (stem >5 chars), anything path-unsafe.
+TICKER_RE = _re.compile(r"^[A-Z][A-Z0-9]{0,4}(?:[.\-][A-Z])?$")
+
+
+def normalize_ticker(raw):
+    """Canonicalize a user-supplied ticker: strip + upper, then validate.
+
+    Probe 3A: portfolio-state.yaml is hand-edited — a lowercase /
+    whitespace-padded ticker exact-matched nothing in the resolver and
+    SILENTLY excluded the position from /portfolio and /monitor (worst
+    failure mode for a real-money tool). Probe 3B: the same missing
+    boundary let path-y strings (`AMD/../NVDA`, absolute paths) reach
+    resolver filesystem lookups via direct calls.
+
+    Returns the canonical form. Raises ValueError (loud, fail-closed) on
+    empty / non-str / path-unsafe / non-symbology input — callers at user
+    boundaries surface the message telling the user which entry to fix.
+    """
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"ticker must be a string, got {type(raw).__name__}"
+        )
+    t = raw.strip().upper()
+    if not t:
+        raise ValueError(f"empty ticker (from {raw!r})")
+    if not TICKER_RE.match(t):
+        raise ValueError(
+            f"invalid ticker {raw!r} (canonical form {t!r} does not match "
+            f"US symbology {TICKER_RE.pattern!r}) — fix the entry in "
+            "portfolio-state.yaml / the command argument"
+        )
+    return t
+
+
 def normalize_percent_fraction(value):
     """Coerce a constraint value to a [0.0, 1.0] decimal fraction.
 

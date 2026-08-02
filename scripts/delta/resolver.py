@@ -44,6 +44,27 @@ def find_latest_prior(
       to skip a specific dir). Takes precedence over include_today when set.
     """
     from scripts.delta.calendar import session_et as _session_et
+    from scripts.delta.calendar import today_et as _today_et
+
+    # Probe 3A/3B — canonicalize + validate the lookup key BEFORE it
+    # touches the filesystem. Ticker-shaped skills: strip/upper (so a
+    # hand-edited `amd` / ` AMD ` finds reports/AMD instead of silently
+    # resolving to None) + symbology guard (so `AMD/../NVDA`, absolute
+    # paths and empty strings raise instead of escaping reports/).
+    # research-industry passes a namespaced `industry/<slug>` — validated
+    # against the canonical slug grammar instead.
+    if skill == SKILL_INDUSTRY:
+        import re as _re
+        if not isinstance(ticker, str) or not _re.match(
+                r"^industry/[a-z0-9]+(?:-[a-z0-9]+)*$", ticker):
+            raise ValueError(
+                f"research-industry resolver key must be 'industry/<slug>' "
+                f"(slug = ^[a-z0-9]+(-[a-z0-9]+)*$), got {ticker!r}"
+            )
+    else:
+        from scripts.cli_utils import normalize_ticker
+        ticker = normalize_ticker(ticker)
+
     root = reports_root or DEFAULT_REPORTS_ROOT
     ticker_dir = root / ticker
     if not ticker_dir.exists():
@@ -63,16 +84,26 @@ def find_latest_prior(
 
     # Compute exclusion set: explicit exclude_date overrides; else
     # exclude today unless include_today=True.
+    session_str = _session_et().strftime("%Y%m%d")
     if exclude_date is not None:
         excluded = {exclude_date}
     elif not include_today:
-        excluded = {_session_et().strftime("%Y%m%d")}
+        excluded = {session_str}
     else:
         excluded = set()
 
+    # Probe 4A: a dir dated AFTER the current CALENDAR day is NEVER a
+    # valid prior — a skewed clock (or an old-date rerun) must not select
+    # a future-dated run and copy its content backward. The cutoff is
+    # calendar today (not session_et): legacy weekend/calendar-dated dirs
+    # that already exist on disk remain visible, while genuinely
+    # future-dated ones are excluded even under include_today.
+    today_str = _today_et().strftime("%Y%m%d")
     date_dirs = sorted(
         (p for p in ticker_dir.iterdir()
-         if p.is_dir() and _is_date_dirname(p.name) and p.name not in excluded),
+         if p.is_dir() and _is_date_dirname(p.name)
+         and p.name not in excluded
+         and p.name <= today_str),
         key=lambda p: p.name,
         reverse=True,
     )
@@ -228,8 +259,18 @@ def _cli():
         print(str(d) if d else "")
     elif args.cmd == "allocate-bq-run":
         from scripts.delta.calendar import session_et
+        from scripts.cli_utils import normalize_ticker
+        # Probe 3A: allocate on the CANONICAL form so lookup and allocation
+        # can never diverge by case/whitespace; invalid input is a clean
+        # FATAL, not a junk directory.
+        try:
+            canonical_ticker = normalize_ticker(args.ticker)
+        except ValueError as exc:
+            import sys as _sys
+            print(f"FATAL: {exc}", file=_sys.stderr)
+            _sys.exit(2)
         root = Path(args.reports_root) if args.reports_root else Path("reports")
-        path = root / args.ticker / session_et().strftime("%Y%m%d")
+        path = root / canonical_ticker / session_et().strftime("%Y%m%d")
         try:
             path.mkdir(parents=True, exist_ok=True)
             (path / "data").mkdir(exist_ok=True)

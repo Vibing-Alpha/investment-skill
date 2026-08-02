@@ -75,7 +75,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.6.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -135,8 +135,8 @@ If this block exits non-zero (invalid ticker), STOP and tell the user.
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"   # agent-substituted (e.g. AAPL) — substituted into every block, never exported across them
-echo "$TICKER" | grep -Eq '^[A-Z][A-Z.]{0,9}$' \
-  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2; exit 1; }
+echo "$TICKER" | grep -Eq '^[A-Z][A-Z0-9.-]{0,9}$' \
+  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z0-9.-]{0,9})" >&2; exit 1; }
 
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 # find-latest-prior excludes today's ET dir by default (safe-by-construction
@@ -197,7 +197,13 @@ print('TIER=full')
 "
 ```
 
-**Otherwise**, spawn a subagent with `<captured-abs-ROOT>/prompts/delta/classify-news.md`
+**Otherwise**: first clear any stale same-session classifier artifact —
+`rm -f "$REPORT_DIR/.classifier_output.json"` (cold-round 7: the session
+dir is reused, and if the classifier subagent fails to write, an earlier
+same-session output would silently drive the tier; with the file cleared,
+a missed write reads as classifier-absent → the tier decision fail-opens
+conservatively instead). Then spawn a subagent with
+`<captured-abs-ROOT>/prompts/delta/classify-news.md`
 as its instructions, passing articles from
 `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json` with
 `since_date = <prior run's et_trading_day>`. The rubric is at
@@ -320,6 +326,29 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
 #### Agent dispatch (full + partial only)
 
+First clear exactly the score files THIS tier will regenerate fresh — the
+session dir is reused, and a stale parseable file from an earlier
+same-session invocation would otherwise pass every non-empty gate if an
+agent fails to write (cold-round 7). Clear ONLY the fresh-dispatch set:
+on `partial`, `fundamental.json` is NOT cleared (it arrives via
+`copy_dimension_scores`, whose fresh-destination guard must keep a
+same-session fresh score in preference to yesterday's copy).
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+# full tier: also clear fundamental.json (Agent A regenerates it).
+# partial tier: clear forward/industry only.
+rm -f "$REPORT_DIR/scores/forward.json" "$REPORT_DIR/scores/industry.json"
+[ "<TIER>" = "full" ] && rm -f "$REPORT_DIR/scores/fundamental.json"
+```
+
+(`<TIER>` is the tier decided in Step 2 — substitute it like `<TICKER>`.
+This block belongs to the full/partial branch only; on no_op the score
+files are owned by the copy guards.)
+
 Spawn agents in parallel:
 
 ```
@@ -368,6 +397,21 @@ tier_context:
   low_signal_headlines: <from classifier>
   dimensions_copied: <list of dims copied this run>
 TIER_CONTEXT_YAML_EOF
+```
+
+Before spawning, clear THIS run's synthesis outputs (EVERY tier — the
+synthesis regenerates both files each run, incl. no_op light mode). The
+session dir is reused: a stale parseable pair from an earlier same-session
+invocation would pass the non-empty gates below even if the synthesis
+agent fails to write (cold-round 7). `prior_synthesis_path` (the no_op
+light-mode input) points at the PRIOR run's dir, never at these files:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+rm -f "$REPORT_DIR/synthesis.json" "$REPORT_DIR/summary.md"
 ```
 
 Spawn the synthesis agent with `<captured-abs-ROOT>/prompts/score-synthesize.md`.

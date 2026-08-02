@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.6.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -421,8 +421,11 @@ Read the output JSON. This provides:
   run. Authoritative for #2 entry timing and #3/#4 momentum reads (the thesis
   `entry_favorability` is a possibly-stale cross-reference). `null`, or a leg
   reading `insufficient_data`, means that read is unavailable — treat as unknown.
-- `chart_statuses.ticker_prices[T].price_as_of` / `stale_meta_quote` —
-  per-ticker price vintage. **Relay any `stale_meta_quote: true`, or a
+- `chart_statuses.ticker_prices[T].price_as_of` / `stale_meta_quote` /
+  `price_conflict_same_ts` — per-ticker price vintage + integrity. **Relay
+  any `stale_meta_quote: true`, any `price_conflict_same_ts: true` (the
+  meta quote and the chart bar disagree at the same timestamp — the price
+  used may be contested), or a
   `price_as_of` older than `regime_inputs.anchor_session`, to the user
   together with the limit prices it affects** (thin OTC ADRs lag — a limit
   set off a stale quote does not fill).

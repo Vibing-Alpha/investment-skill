@@ -270,14 +270,14 @@ def _market_universe_strategy(window: str) -> str:
     return "movers" if window == "1d" else "broad"
 
 
-import re as _re
-
 # Accepts: AAPL, BRK.B, BRK-B, BF-B, TEST1. Rejects: $AAPL, NVDA;, ../etc,
 # unicode, anything over 10 chars. Pinned because a permissive filter lets
 # malicious watchlist lines flow into MD reports / JSON output (display
 # injection) or into API URLs via batching. Tighter than isalpha() (which
 # rejects BRK-B) but safer than no filter (which YAML branch had).
-_TICKER_RE = _re.compile(r"^[A-Z][A-Z0-9]{0,4}(?:[.\-][A-Z])?$")
+# Probe 3A/3C: canonical single implementation now lives in cli_utils
+# (TICKER_RE) — shared with normalize_ticker and the macro CLI guard.
+from scripts.cli_utils import TICKER_RE as _TICKER_RE
 
 
 def _universe_watchlist(path: str) -> List[Dict]:

@@ -414,6 +414,92 @@ def fetch_yahoo_quote_result(
     )
 
 
+def fetch_treasury_yield_10y() -> AdapterResult:
+    """10Y treasury yield (percent, e.g. 4.25) from the ^TNX chart meta.
+
+    Probe 1D: extract_fcf's CAPM risk-free previously proxied the FED
+    overnight policy rate because the per-ticker `09_macro_rates.json`
+    carried no treasury yield at all. This adapter feeds a `us_10y` field
+    into that artifact (scripts.macro fetches its own ^TNX for the
+    portfolio path — the per-ticker fetch could not reuse that pool code).
+
+    Returns AdapterResult with data={"us_10y": <float percent>}; FAILED on
+    fetch error or a non-finite / out-of-sanity-range value (0-25%,
+    mirroring the schemas.macro_rates bound).
+    """
+    src = "yahoo_finance.fetch_treasury_yield_10y"
+    try:
+        raw = fetch_yahoo_quote("^TNX", range_param="5d", interval="1d")
+    except Exception as e:
+        return adapter_error_from_exception(e, source=src)
+
+    # Yield candidates are MATCHED (value, timestamp) pairs (third cold
+    # round: mixing the meta PRICE with a bar TIMESTAMP let a stale/
+    # divergent meta quote wear a fresh bar's date). Preference order:
+    # (regularMarketPrice, regularMarketTime), then (last non-None bar
+    # close, that bar's timestamp). A candidate missing either half is
+    # skipped whole.
+    def _num_ok(v):
+        return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(float(v)))
+
+    meta = raw.get("meta") if isinstance(raw, dict) else None
+    candidates = []
+    if isinstance(meta, dict):
+        candidates.append(
+            (meta.get("regularMarketPrice"), meta.get("regularMarketTime"))
+        )
+    quotes = ((raw.get("indicators") or {}).get("quote") or [{}])[0] \
+        if isinstance(raw, dict) else {}
+    ts_list = raw.get("timestamp") if isinstance(raw, dict) else None
+    bar_closes = quotes.get("close") or []
+    if isinstance(ts_list, list) and isinstance(bar_closes, list):
+        for i in range(min(len(ts_list), len(bar_closes)) - 1, -1, -1):
+            if bar_closes[i] is not None:
+                candidates.append((bar_closes[i], ts_list[i]))
+                break
+
+    # Among usable pairs, take the FRESHEST (max timestamp) — fourth cold
+    # round: preferring meta unconditionally let an older-but-not-stale
+    # meta quote override a newer daily bar close.
+    usable = [
+        (float(cand_y), float(cand_ts))
+        for cand_y, cand_ts in candidates
+        if _num_ok(cand_y) and 0.0 < float(cand_y) <= 25.0 and _num_ok(cand_ts)
+    ]
+    y = None
+    as_of_epoch = None
+    if usable:
+        y, as_of_epoch = max(usable, key=lambda p: p[1])
+    if y is None:
+        return AdapterResult.failed(
+            code=ErrorCode.SHAPE_MISMATCH,
+            source=src,
+            detail=("^TNX yield unusable: no candidate with BOTH a finite "
+                    "percent in (0, 25] AND a matching timestamp "
+                    f"(candidates={candidates!r})"),
+            retryable=False,
+        )
+    # Staleness gate: a quote older than 10 days (tolerates weekend/holiday
+    # clusters) must not pass as a current CAPM input → FAILED (extract_fcf
+    # then falls back to the FED rate WITH its proxy warning — safe).
+    as_of_dt = datetime.fromtimestamp(as_of_epoch, tz=timezone.utc)
+    as_of_iso = as_of_dt.isoformat()
+    age_days = (datetime.now(timezone.utc) - as_of_dt).days
+    if age_days > 10:
+        return AdapterResult.failed(
+            code=ErrorCode.SHAPE_MISMATCH,
+            source=src,
+            detail=(f"^TNX quote stale: as-of {as_of_iso} "
+                    f"is {age_days}d old (limit 10d)"),
+            retryable=False,
+        )
+    return AdapterResult.passed(
+        data={"us_10y": round(y, 3)},
+        meta={"source_hint": "yahoo_v8", "symbol": "^TNX", "as_of": as_of_iso},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Historical prices
 # ---------------------------------------------------------------------------

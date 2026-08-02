@@ -3,6 +3,16 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.0 — 2026-08-03
+
+- Fix live PEG-horizon defect: peer pegRatio (5y-expected basis) can no longer be crossed with 1y growth to imply a fair-value anchor; peers.py emits a per-field basis map + fetched_at
+- Price-basis consistency: ATR highs/lows adjusted onto the close basis (shared adjust_high_low); historical-multiples anchor uses raw close (removes the dividend-payer understatement) with price_basis disclosure
+- Discount rate: per-ticker fetch now emits us_10y (^TNX, freshness-gated); CAPM cost of equity prefers the 10Y treasury (FED fallback warns), sanity-only clamp [5%,25%] replaces the 15% cap that suppressed every high-beta name; reverse DCF carries bracket metadata and full sensitivity; FCF/share no longer pre-rounded
+- Delta time/provenance batch: calendar-today resolver cutoff, fresh-destination guards (scores/events/data categories), negative-age conservatism, inclusive materiality window, currency-aware estimates hash, NYSE half-day schedule, _source_date vintage preservation, [:10] catalyst pruning
+- Ticker normalization: hand-edited amd/' AMD ' now resolves instead of silently vanishing from /portfolio and /monitor; path-unsafe inputs fail loudly; SKILL regexes accept hyphenated share classes (BRK-B); FMP statement rows retain filing_date
+- Same-session rerun integrity: all always-fresh artifacts cleared before agent dispatch so a missed write fails loudly instead of silently re-serving the earlier same-session output; technical indicators always recomputed from the current price series
+- 9 cold-review rounds on the final code (last two consecutive CLEAN); full CI + audit + real-network smoke green
+
 ## v1.6.0 — 2026-08-02
 
 - fix (IMPORTANT — affects entry/reduce timing): /portfolio run-day technical indicators were computed from the LIVE partial session bar — a mid-session run read a genuinely volume-confirmed breakout as 'no volume confirmation' and could falsely arm a momentum-weakening reduce. Ticker indicators and benchmark relative-strength returns are now anchored to the last completed ET session; the live quote remains the display price

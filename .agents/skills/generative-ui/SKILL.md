@@ -91,7 +91,7 @@ Decide the mode from the user's argument — no shell state involved:
 - **Portfolio mode** — argument is empty, `portfolio`, `all`, `组合`, or `持仓`
   (case-insensitive): visualize the whole portfolio-state universe (holdings +
   watchlist). Run the Preflight below first.
-- **Single-ticker mode** — argument matches `^[A-Z][A-Z.]{0,9}$` (and isn't a mode
+- **Single-ticker mode** — argument matches `^[A-Z][A-Z0-9.-]{0,9}$` (and isn't a mode
   keyword): visualize that ticker. SKIP the Preflight heading below (ticker mode
   composes from already-gated artifacts) and go straight to its build block in Step 1.
 

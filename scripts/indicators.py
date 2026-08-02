@@ -31,11 +31,100 @@ from typing import Dict, List, Optional
 
 
 def _sanitize_closes(closes: List) -> List[float]:
-    """Remove non-numeric/None/NaN/Inf values from close prices."""
+    """Remove non-numeric/None/NaN/Inf/NON-POSITIVE values from closes.
+
+    Closes are PRICES — zero/negative is corrupt data, not a price (third
+    cold round: a 0.0 bar surviving this filter fabricated RSI=0.0 and a
+    MACD death-cross from one corrupt tick). All calc_* entry points route
+    through this filter, so the positivity contract is enforced once.
+    """
     return [
         c for c in closes
-        if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+        if isinstance(c, (int, float)) and not isinstance(c, bool)
+        and math.isfinite(c) and c > 0
     ]
+
+
+def _fin_pos(v) -> bool:
+    """Finite positive real number (bool rejected)."""
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and v > 0
+    )
+
+
+def merge_adjusted_closes(raw_closes: List, adj_closes: List) -> List:
+    """Per-bar close series on the adjusted basis, finite-positive preferred.
+
+    ONE implementation for every close-series construction (indicators CLI,
+    macro ticker path, macro benchmark path — producer-consumer rule 3).
+    Selection per bar (cold-round finding: a 0/negative close in either
+    column previously poisoned RSI/MACD/returns as if it were a real
+    price, and the two macro paths disagreed about which column to trust):
+
+    - adj and raw both finite-positive → adj (adjusted basis; the H/L
+      factor in adjust_high_low is computable for exactly these bars, so
+      the series stay basis-consistent).
+    - only one finite-positive → that one (a corrupt 0/neg/NaN column
+      falls back to the usable price).
+    - neither usable → raw as-is (None/garbage passes to the downstream
+      sanitizers, same terminal behavior as before).
+    """
+    out: List = []
+    n = max(len(raw_closes), len(adj_closes))
+    for i in range(n):
+        raw = raw_closes[i] if i < len(raw_closes) else None
+        adj = adj_closes[i] if i < len(adj_closes) else None
+        if _fin_pos(adj) and _fin_pos(raw):
+            out.append(adj)
+        elif _fin_pos(raw):
+            out.append(raw)
+        elif _fin_pos(adj):
+            out.append(adj)
+        else:
+            out.append(raw if raw is not None else adj)
+    return out
+
+
+def adjust_high_low(highs: List, lows: List, raw_closes: List, adj_closes: List):
+    """Scale each bar's high/low onto the adjusted-close basis.
+
+    Probe 1A: ATR consumed adj-preferred closes but RAW highs/lows — on a
+    split day the true range exploded by the split factor (21x-inflated
+    stops on a 10:1 split). The consistent series scales each bar's high/low
+    by that bar's own `adjclose / close` factor, so ATR/true-range runs on
+    ONE basis. ONE implementation for both the per-ticker indicators CLI and
+    macro's run-day `_compute_ticker_indicators` (producer-consumer rule 3).
+
+    Per-bar fallback: when the factor is uncomputable (missing adjclose,
+    zero/non-finite close, non-finite adjclose) the RAW high/low passes
+    through unchanged — same posture as the adj-or-raw close merge, so a
+    legacy bar without adjclose stays internally consistent (raw H/L against
+    raw close).
+
+    Returns (adj_highs, adj_lows) with the same lengths as highs/lows.
+    """
+    adj_h: List = []
+    adj_l: List = []
+    n = len(highs)
+    for i in range(n):
+        raw_c = raw_closes[i] if i < len(raw_closes) else None
+        adj_c = adj_closes[i] if i < len(adj_closes) else None
+        if _fin_pos(raw_c) and _fin_pos(adj_c):
+            factor = adj_c / raw_c
+            h = highs[i]
+            lo = lows[i] if i < len(lows) else None
+            adj_h.append(h * factor if _fin_pos(h) else h)
+            adj_l.append(lo * factor if _fin_pos(lo) else lo)
+        else:
+            adj_h.append(highs[i])
+            adj_l.append(lows[i] if i < len(lows) else None)
+    # lows may be longer than highs in malformed input; preserve tail as-is
+    if len(lows) > n:
+        adj_l.extend(lows[n:])
+    return adj_h, adj_l
 
 
 def _ema(values: List[float], period: int) -> List[float]:
@@ -595,9 +684,12 @@ def _valid_volume(v) -> bool:
 
 
 def _valid_close(c) -> bool:
-    """Close validity: numeric (non-bool), finite."""
+    """Close validity: numeric (non-bool), finite, POSITIVE (closes are
+    prices — fourth cold round: a 0/negative corrupt bar flipped the
+    price_volume_relationship classification; same contract as
+    _sanitize_closes)."""
     return (isinstance(c, (int, float)) and not isinstance(c, bool)
-            and math.isfinite(c))
+            and math.isfinite(c) and c > 0)
 
 
 def _empty_volume_result() -> Dict:
@@ -781,12 +873,21 @@ def _main():
         # bars emitted by legacy producers that don't carry adjclose.
         # `adj if adj is not None else close` (not `adj or close`) so a
         # legitimate adjclose=0 bar doesn't silently fall through to raw.
-        closes = [
-            bar["adjclose"] if bar.get("adjclose") is not None else bar["close"]
-            for bar in daily
-        ]
-        highs = [bar["high"] for bar in daily]
-        lows = [bar["low"] for bar in daily]
+        # Probe 1A: highs/lows must live on the SAME (adjusted) basis as the
+        # closes, or ATR true-range explodes at any basis break inside the
+        # window. Per-bar scaling by adjclose/close; uncomputable factor →
+        # raw passthrough (see adjust_high_low). Close selection via the
+        # shared merge (finite-positive preferred) so a corrupt 0/negative
+        # column can't poison the series or re-mix bases.
+        raw_closes = [bar["close"] for bar in daily]
+        adj_closes = [bar.get("adjclose") for bar in daily]
+        closes = merge_adjusted_closes(raw_closes, adj_closes)
+        highs, lows = adjust_high_low(
+            [bar["high"] for bar in daily],
+            [bar["low"] for bar in daily],
+            raw_closes,
+            adj_closes,
+        )
         # Missing volume → None, not 0. `0` pollutes MA20/MA5/OBV as if it
         # were a real zero-volume day. None is dropped by calc_volume's
         # pair-filter, preserving the "MA20 of last 20 valid paired bars"

@@ -80,6 +80,40 @@ _FIXED_HOLIDAYS = {
 # this value to warn / fail instead of producing wrong output.
 _HOLIDAY_COVERAGE_LAST_YEAR = 2030
 
+# Probe 4G: NYSE half-days close 13:00 ET, not 16:00 — without this table
+# a 14:00 invocation on Black Friday anchored to the PRECEDING session and
+# the half-day's data landed under the wrong date dir. Sessions: the day
+# after Thanksgiving, July 3 (when a weekday and July 4 is a market
+# weekday-holiday), Christmas Eve (when a weekday and not itself the
+# observed holiday). Maintained alongside _FIXED_HOLIDAYS (same yearly
+# ~5-minute task).
+_EARLY_CLOSES = {
+    # 2026: Jul 3 is the observed July-4 holiday (full close, in
+    # _FIXED_HOLIDAYS); Christmas Eve Thu 12-24; Black Friday 11-27.
+    datetime.date(2026, 11, 27): 13,
+    datetime.date(2026, 12, 24): 13,
+    # 2027: Dec 24 is the observed Christmas holiday; July 4 falls Sunday
+    # (observed Mon 7-5, no half-day). Only Black Friday.
+    datetime.date(2027, 11, 26): 13,
+    # 2028
+    datetime.date(2028, 7, 3): 13,
+    datetime.date(2028, 11, 24): 13,
+    # (Dec 24 2028 is a Sunday — no session)
+    # 2029
+    datetime.date(2029, 7, 3): 13,
+    datetime.date(2029, 11, 23): 13,
+    datetime.date(2029, 12, 24): 13,
+    # 2030
+    datetime.date(2030, 7, 3): 13,
+    datetime.date(2030, 11, 29): 13,
+    datetime.date(2030, 12, 24): 13,
+}
+
+
+def _close_hour_et(d: datetime.date) -> int:
+    """Market close hour (ET, 24h) for trading day d — 13 on half-days."""
+    return _EARLY_CLOSES.get(d, 16)
+
 
 def _now_utc() -> datetime.datetime:
     """Seam for testing."""
@@ -107,11 +141,22 @@ def last_closed_trading_day(now: datetime.datetime | None = None) -> datetime.da
     walk back to the most recent trading day.
     """
     now = now or _now_utc()
+    # Cold-round finding: a NAIVE datetime is silently interpreted in the
+    # host timezone by astimezone(), shifting the selected session on
+    # non-ET machines. All internal callers pass aware datetimes (_now_utc);
+    # reject naive input loudly rather than mis-anchor.
+    if now.tzinfo is None:
+        raise ValueError(
+            "last_closed_trading_day requires a timezone-aware datetime "
+            "(naive input would be read in the HOST timezone, mis-anchoring "
+            "the session on non-ET machines)"
+        )
     now_et = now.astimezone(ET)
     candidate = now_et.date()
 
-    # Today counts only if it's a trading day and we're past market close (16:00 ET)
-    if is_trading_day(candidate) and now_et.hour >= 16:
+    # Today counts only if it's a trading day and we're past market close
+    # (16:00 ET, or 13:00 on half-days — probe 4G).
+    if is_trading_day(candidate) and now_et.hour >= _close_hour_et(candidate):
         return candidate
 
     # Walk back

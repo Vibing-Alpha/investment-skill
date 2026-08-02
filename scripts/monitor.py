@@ -29,6 +29,13 @@ def evidence_id(kind: str, ticker: str, payload: str) -> str:
 
 
 def _f(v):
+    # bool rejected explicitly (second cold round): YAML `AAPL: true`
+    # otherwise coerced to shares=1.0 and `cash: false` to 0.0 — booleans
+    # are config typos, never monetary quantities. (config_gate's
+    # _is_finite_num already rejects bool on the /portfolio path; this
+    # covers monitor/viz standalone reads.)
+    if isinstance(v, bool):
+        return None
     try:
         return float(v) if v is not None else None
     except (TypeError, ValueError):
@@ -45,8 +52,33 @@ def load_universe(state_path: Path):
     holdings = data.get("holdings") or {}
     watchlist = data.get("watchlist") or []
     cash = data.get("cash")
+
+    # Probe 3A: portfolio-state.yaml is hand-edited — `amd` / ` AMD ` used
+    # to exact-match nothing in the resolver and SILENTLY vanish from the
+    # monitor. Normalize case/whitespace here (one canonical form for
+    # classify + dirs); a ticker that is invalid even after normalization
+    # fails LOUDLY naming the entry (never a silent exclusion).
+    from scripts.cli_utils import normalize_ticker
+
+    def _canon(t, where):
+        try:
+            return normalize_ticker(t)
+        except ValueError as e:
+            raise ValueError(
+                f"portfolio-state.yaml {where} entry {t!r}: {e}"
+            ) from e
+
     rows, seen = [], set()
     for t, h in holdings.items():
+        t = _canon(t, "holdings")
+        if t in seen:
+            # Cold-round finding: two holdings keys colliding after
+            # normalization (`amd:` + `AMD:`) would silently duplicate the
+            # position in every downstream read — a config error the user
+            # must resolve, not a merge we should guess at.
+            raise ValueError(
+                f"portfolio-state.yaml holdings: duplicate ticker {t!r} "
+                "after normalization — merge the duplicate entries")
         # int-shorthand (`NVDA: 100`) is a supported state shape in
         # validate._get_shares / portfolio_log — mirror it here (C12;
         # scripts/viz.py imports this with no config_gate preflight).
@@ -58,6 +90,7 @@ def load_universe(state_path: Path):
                      "shares": shares, "cost_basis": cb})
         seen.add(t)
     for t in watchlist:
+        t = _canon(t, "watchlist")
         if t in seen:
             continue
         rows.append({"ticker": t, "source": "watchlist", "shares": None, "cost_basis": None})
@@ -102,7 +135,24 @@ def load_vendor_aliases(state_path: Path) -> dict:
             raise ValueError(
                 f"symbol_aliases[{k!r}] malformed — need "
                 f"{{vendor: <non-empty str>}}, got {v!r}")
-        out[k] = v["vendor"].strip()
+        # Canonicalize the KEY the same way load_universe canonicalizes
+        # tickers (cold-round finding): a lowercase alias key would
+        # otherwise no longer match the normalized universe ticker and the
+        # alias would be silently bypassed — the exact wrong-symbol failure
+        # this feature closes. Invalid-as-ticker keys keep the loud error.
+        from scripts.cli_utils import normalize_ticker
+        try:
+            canon_k = normalize_ticker(k)
+        except ValueError as e:
+            raise ValueError(
+                f"symbol_aliases key {k!r} is not a valid ticker: {e}"
+            ) from e
+        if canon_k in out and out[canon_k] != v["vendor"].strip():
+            raise ValueError(
+                f"symbol_aliases keys collide after normalization "
+                f"({k!r} → {canon_k!r}) with conflicting vendors — "
+                "remove the duplicate entry")
+        out[canon_k] = v["vendor"].strip()
     # WARN (not raise) on alias keys matching no holding/watchlist ticker:
     # probably a typo (the intended ticker then fetches unaliased), but a
     # dormant alias for a recently-sold ticker is legitimate state — hard

@@ -3,7 +3,7 @@
 Reads 02_financial_data.json and computes trailing-twelve-month FCF/share.
 Replaces the fragile inline bash/Python in SKILL.md with a cross-platform script.
 
-Also extracts current price and WACC inputs (risk-free rate + ERP)
+Also extracts current price and CAPM cost-of-equity inputs (risk-free rate + ERP)
 from price and macro data, outputting everything the reverse DCF script needs.
 """
 
@@ -448,7 +448,7 @@ def extract_fcf_inputs(
 
         if not currency_ok:
             # Currency failure already recorded — skip remaining FCF work;
-            # WACC section below still runs so discount_rate is emitted.
+            # CAPM cost-of-equity section below still runs so discount_rate is emitted.
             pass
         elif len(cash_flows) < 4:
             # fresh-loop2 ISS-014: surface insufficient-quarter signal via
@@ -812,7 +812,11 @@ def extract_fcf_inputs(
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_SHARES_UNAVAILABLE
             else:
-                result["fcf_per_share"] = round(ttm_fcf / shares, 2)
+                # Probe 1E: 6dp JSON hygiene only — 2dp rounding here fed
+                # the ROUNDED value into reverse DCF (a -9% input error on
+                # sub-$1 FCF/share names). Display rounding is the report
+                # layer's job.
+                result["fcf_per_share"] = round(ttm_fcf / shares, 6)
                 result["ttm_fcf"] = round(ttm_fcf, 0)
                 result["shares"] = shares
                 result["fcf_per_share_tag"] = (
@@ -895,7 +899,7 @@ def extract_fcf_inputs(
         result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
         result["fcf_divergence_pct"] = None
 
-    # --- WACC from macro rates ---
+    # --- CAPM cost of equity (discount rate) from macro rates ---
     # Load via typed contract; any failure (OSError / JSON / Schema /
     # internal TypeError) → 10% default with exception type logged.
     try:
@@ -903,19 +907,29 @@ def extract_fcf_inputs(
 
         macro_doc = load_macro_rates(macro_path)
 
-        # Top-level flat fields (risk_free_rate, equity_risk_premium) are
-        # NOT part of the current producer contract — they existed as a
-        # legacy short-circuit. Drop them. Always derive risk-free from
-        # current_rates[bank=FED].rate / 100 (percent → decimal).
-        fed = macro_doc.find_current_rate("FED")
-        if fed is not None:
-            risk_free = fed.rate / 100.0
-            risk_free_source_tag = (
-                "[API: 09_macro_rates.current_rates[FED].rate / 100]"
-            )
+        # Probe 1D: the risk-free rate for CAPM is the 10Y TREASURY yield
+        # (`us_10y`, percent → decimal), not the FED overnight policy rate.
+        # Legacy artifacts predate the us_10y field — fall back to FED with
+        # an explicit proxy warning so the discount rate is never silently
+        # anchored on the wrong end of the curve.
+        if macro_doc.us_10y is not None:
+            risk_free = macro_doc.us_10y / 100.0
+            risk_free_source_tag = "[API: 09_macro_rates.us_10y / 100]"
         else:
-            risk_free = None
-            risk_free_source_tag = None
+            fed = macro_doc.find_current_rate("FED")
+            if fed is not None:
+                risk_free = fed.rate / 100.0
+                risk_free_source_tag = (
+                    "[API: 09_macro_rates.current_rates[FED].rate / 100]"
+                )
+                result["warnings"].append(
+                    "risk_free proxied by the FED overnight policy rate — "
+                    "us_10y treasury yield absent from 09_macro_rates.json "
+                    "(legacy artifact). CAPM normally anchors on the 10Y."
+                )
+            else:
+                risk_free = None
+                risk_free_source_tag = None
 
         # ERP is not part of the 09_macro_rates contract; always default.
         erp = 0.055
@@ -948,31 +962,47 @@ def extract_fcf_inputs(
                 beta_source = "default"
                 result["warnings"].append(
                     "No beta data available — using market-average 1.0. "
-                    "WACC may be understated for volatile stocks."
+                    "The CAPM cost of equity may be understated for volatile stocks."
                 )
 
-            # Simple CAPM: WACC ≈ risk_free + beta * ERP
+            # CAPM cost of equity: risk_free + beta * ERP. The per-share
+            # cash flow this discounts is a LEVERED (equity-holder) proxy,
+            # so cost of equity — not a debt-weighted WACC — is the
+            # defensible rate; the old "WACC" label was a misnomer
+            # (probe 1D).
             wacc = risk_free + beta * erp
-            # Clamp to reasonable range [6%, 15%]
+            # Sanity bounds [5%, 25%] — wide enough that no real-market
+            # CAPM result binds (the old 15% cap silently suppressed the
+            # discount rate for every high-beta name: real AMD beta 2.469
+            # → 17.2% capped to 15% → implied growth understated ~4pp).
+            # The bounds only catch garbage inputs (corrupt beta/rates).
             # Post-impl ISS-004 (fresh-loop1): if wacc is NaN/Inf (e.g.
-            # risk_free=Inf upstream slipped past), `max(0.06, min(0.15, Inf))`
-            # returns 0.15 silently. Guard math.isfinite explicitly so the
+            # risk_free=Inf upstream slipped past), max/min would return
+            # the bound silently. Guard math.isfinite explicitly so the
             # bad input surfaces as a missing discount_rate rather than a
             # spurious clamped value.
             if not math.isfinite(wacc):
                 result["warnings"].append(
-                    f"WACC computed as non-finite ({wacc!r}); "
+                    f"CAPM cost of equity computed as non-finite ({wacc!r}); "
                     f"discount_rate omitted. Components: "
                     f"risk_free={risk_free!r} beta={beta!r} erp={erp!r}"
                 )
-                # Skip the rest of the WACC emission block.
+                # Skip the rest of the emission block.
                 wacc = None
             else:
-                wacc = max(0.06, min(0.15, wacc))
+                clamped = max(0.05, min(0.25, wacc))
+                if clamped != wacc:
+                    result["warnings"].append(
+                        f"CAPM cost of equity {wacc:.4f} outside sanity "
+                        f"bounds [0.05, 0.25]; clamped to {clamped:.4f} — "
+                        "inputs (beta / rates) likely corrupt."
+                    )
+                wacc = clamped
             if wacc is not None:
                 result["discount_rate"] = round(wacc, 4)
                 result["discount_rate_tag"] = (
-                    "[Calc: risk_free + beta * ERP, clamped [0.06, 0.15]]"
+                    "[Calc: CAPM cost of equity = risk_free + beta * ERP, "
+                    "sanity-clamped [0.05, 0.25]]"
                 )
                 beta_tag_map = {
                     "cli_override": "[CLI: --beta override]",
@@ -989,7 +1019,7 @@ def extract_fcf_inputs(
                     "beta": round(beta, 3),
                     "beta_source": beta_source,
                     "beta_tag": beta_source_tag,
-                    "formula": "risk_free + beta * ERP",
+                    "formula": "CAPM cost of equity = risk_free + beta * ERP",
                 }
         else:
             # Post-impl ISS-025 (fresh-loop2): emit explicit warning when
@@ -1077,7 +1107,7 @@ def _main():
     )
     parser.add_argument(
         "--beta", type=float, default=None,
-        help="Override equity beta for CAPM WACC (default: read from price data, "
+        help="Override equity beta for the CAPM cost of equity (default: read from price data, "
              "fallback 1.0)",
     )
     parser.add_argument(

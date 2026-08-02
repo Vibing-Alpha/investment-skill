@@ -108,9 +108,10 @@ Volume is the lie detector of price action. A 5% rise on 3x volume has broad
 institutional participation; the same rise on 0.5x volume may reverse on the
 first real selling pressure.
 
-Read from `indicators.json`:
-- `volume_ratio_vs_ma20`: >1.5 = elevated, <0.7 = thin
-- `volume_ratio_5d_20d`: detects emerging volume trends
+Read from `indicators.json` (all of these live under the `volume.` block —
+see the structure list above; none are root-level keys):
+- `volume.volume_ratio_vs_ma20`: >1.5 = elevated, <0.7 = thin
+- `volume.volume_ratio_5d_20d`: detects emerging volume trends
 - `obv_trend`: `rising` (accumulation) | `falling` (distribution) | `flat` |
   `insufficient_data` (treat as unknown — do not infer direction)
 - `price_volume_relationship` (last 5 sessions vs prior 20-day baseline):

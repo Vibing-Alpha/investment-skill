@@ -155,8 +155,8 @@ vocabulary (letters + dot, 1-10 chars). If this block exits non-zero
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
-echo "$TICKER" | grep -Eq '^[A-Z][A-Z.]{0,9}$' \
-  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z.]{0,9})" >&2; exit 1; }
+echo "$TICKER" | grep -Eq '^[A-Z][A-Z0-9.-]{0,9}$' \
+  || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z0-9.-]{0,9})" >&2; exit 1; }
 
 # allocate-bq-run is session_et-anchored (not today_et) — the directory anchor
 # is the trading day whose close is being analyzed. Stable across ET midnight
@@ -257,7 +257,11 @@ If the printed `CANONICAL_ANCHOR` is empty (first run, pre-delta artifact,
 malformed meta): skip the classifier entirely (no prior to diff
 against); tier will be fresh-events.
 
-Otherwise spawn a subagent with
+Otherwise: first clear any stale same-session classifier artifact —
+`rm -f "$REPORT_DIR/.classifier_output.json"` (cold-round 7: a reused
+session dir + a missed classifier write would silently drive the reuse
+gates with the EARLIER invocation's counts; cleared, a missed write reads
+as classifier-absent → fail-open to rerun). Then spawn a subagent with
 `<captured-abs-ROOT>/prompts/delta/classify-news.md` as its instructions,
 passing articles from `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json`
 with `since_date = <the printed CANONICAL_ANCHOR>`. The rubric is at
@@ -364,7 +368,14 @@ GATES_PASSED=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_
     --gates-passed "$GATES_PASSED"
 ```
 
-If `rerun`: spawn the events agent with
+If `rerun`: FIRST clear the stale destination — `rm -f
+"$REPORT_DIR/events.json"` (cold-round 7: the session dir is reused, so
+if the events agent fails to write, an earlier same-session events.json
+would otherwise be stamped and validated as freshly regenerated; with the
+file cleared, a missed write fails the stamp step loudly instead). The
+rerun decision means the gates ruled the existing content stale — unlike
+the reuse branch, whose fresh-destination guard protects this file. Then
+spawn the events agent with
 `<captured-abs-ROOT>/prompts/evaluate-events.md` on today's probe data
 (output: `<captured-abs-ROOT>/<REPORT_DIR>/events.json` — compose the
 dispatch prompt with concrete absolute paths; the subagent inherits
@@ -483,14 +494,15 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 
-# indicators.json is normally produced by /score-business; (re)compute only
-# if absent — e.g. the Step 1 BQ-declined probe-only path does not run it,
-# yet the technical agent requires it.
-if [ ! -f "$REPORT_DIR/data/indicators.json" ]; then
-  "$PYBIN" -m scripts.indicators \
-    --price-json "$REPORT_DIR/data/01_price_data.json" \
-    --output "$REPORT_DIR/data/indicators.json"
-fi
+# indicators.json: ALWAYS recompute from the CURRENT price artifact
+# (cold-round 5). Every BQ probe refreshes 01_price_data.json, but only a
+# full-tier /score-business recomputes indicators — an `if absent` gate
+# here let indicators computed from an OLDER price series survive beside
+# the refreshed prices (real AMD divergence: RSI 46.5 vs 45.2, ATR stop
+# 445 vs 436). The computation is pure + instant; recompute is always safe.
+"$PYBIN" -m scripts.indicators \
+  --price-json "$REPORT_DIR/data/01_price_data.json" \
+  --output "$REPORT_DIR/data/indicators.json"
 
 # Clear THIS run's valuation producer outputs first. $REPORT_DIR is reused for
 # the whole session date, so a same-day rerun can leave stale artifacts. Without
@@ -557,23 +569,25 @@ if pts:
 "
 
 # Reverse DCF — orchestrator-produced per delta spec §7.1; runs LAST (reads
-# fcf_inputs.json). Guard mirrors the valuation prompt's skip rules
-# (prompts/evaluate-valuation.md §Null FCF guard / §Currency error guard):
-# skip on status==error (extract_fcf fail-close) OR null / non-positive
-# fcf_per_share (negative FCF has no implied-growth meaning). ISS-009's
-# non-USD caller-chain risk is satisfied implicitly: post-DL3c a non-error
-# status means fcf_per_share is USD (native or FX-converted); an unsupported
-# currency would have fail-closed to status==error and been skipped here.
-# When this skips, the valuation agent emits a `reverse_dcf: {status: skipped}`
-# stub instead of reading a non-existent file.
+# fcf_inputs.json). Skip ONLY on status==error (extract_fcf fail-close) or a
+# null fcf_per_share / non-positive price — in those cases the valuation
+# agent emits the `reverse_dcf: {status: skipped}` stub per the prompt's
+# §Null FCF guard. A finite NON-POSITIVE fcf_per_share is passed THROUGH to
+# the producer, which self-skips and writes a structured
+# `{status: skipped, reason: invalid_fcf_input}` artifact (cold-round 3:
+# gating it out here left NO artifact and NO specified stub for that case —
+# the agent had nothing contractual to read). ISS-009's non-USD caller-chain
+# risk is satisfied implicitly: post-DL3c a non-error status means
+# fcf_per_share is USD (native or FX-converted); an unsupported currency
+# would have fail-closed to status==error and been skipped here.
 "$PYBIN" -c "
 import json, subprocess, sys
 with open('$REPORT_DIR/data/fcf_inputs.json', encoding='utf-8') as f:
     inp = json.load(f)
-fcf = inp.get('fcf_per_share') or 0
+fcf = inp.get('fcf_per_share')
 price = inp.get('current_price') or 0
 dr = inp.get('discount_rate', 0.10)
-if inp.get('status') != 'error' and fcf > 0 and price > 0:
+if inp.get('status') != 'error' and fcf is not None and price > 0:
     subprocess.run([sys.executable, '-m', 'scripts.reverse_dcf',
                     '--price', str(price), '--fcf-per-share', str(fcf),
                     '--discount-rate', str(dr),
@@ -586,7 +600,25 @@ Dec-FYE names (INTC/MU/VSH) per the comment above; `reverse_dcf` is then
 skipped (no valid FCF/share). This is correct DL4 behavior, NOT a retry-able
 failure — the valuation agent flags the 2Y-range / DCF lenses UNAVAILABLE.
 
-**Step 5b — analysis agents.** Run both on today's data:
+**Step 5b — analysis agents.** First clear THIS run's agent outputs — the
+session dir is reused, and a stale parseable `valuation.json` /
+`technical.json` from an earlier same-session invocation would satisfy the
+post-dispatch non-empty gates even if an agent fails to write (cold-round
+5). These two are ALWAYS freshly produced per run (no reuse path — unlike
+`events.json`, which must NOT be cleared: its reuse/fresh-guard flow owns
+that file). Same rationale for `investment_thesis.json` +
+`thesis_summary.md` cleared here ahead of the Step 6 synthesis gates:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+rm -f "$REPORT_DIR/valuation.json" "$REPORT_DIR/technical.json" \
+      "$REPORT_DIR/investment_thesis.json" "$REPORT_DIR/thesis_summary.md"
+```
+
+Then run both agents on today's data:
 
 ```
 Agent V: <captured-abs-ROOT>/prompts/evaluate-valuation.md → <captured-abs-ROOT>/<REPORT_DIR>/valuation.json

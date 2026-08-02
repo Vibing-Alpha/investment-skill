@@ -589,11 +589,25 @@ def _is_fmp_quarterly_row(r: Dict) -> bool:
 def _fmp_statement_common(r: Dict) -> Dict:
     """Shared identity/metadata fields every converted statement row carries."""
     currency = r.get("reportedCurrency")
+    # Probe 2A: preserve the statement's filing date (FMP `fillingDate`,
+    # note the double-L; sometimes carries a time suffix). Before this,
+    # NO producer wrote statement-row filing_date, so historical_multiples'
+    # filing-date price anchor had never run — every window fell to the
+    # rp+45d heuristic (mild look-ahead for 10-Ks). FDS sends no
+    # filing_date on statements (verified live 2026-08-02); the heuristic
+    # remains the fallback for the FDS cohort.
+    filing_raw = r.get("fillingDate") or r.get("filingDate") or ""
+    filing_sliced = filing_raw[:10] if isinstance(filing_raw, str) else ""
+    filing_date = (
+        filing_sliced if filing_sliced and _is_valid_yyyy_mm_dd(filing_sliced)
+        else None
+    )
     return {
         "ticker": r.get("symbol"),
         "report_period": r.get("date"),
         "fiscal_period": _fmp_fiscal_period(r.get("calendarYear"), r.get("period")),
         "period": "quarterly",
+        "filing_date": filing_date,
         # Faithful native-currency tag (USD / JPY / …). NEVER hardcoded —
         # the DL3c gate downstream relies on this being the true statement
         # currency to decide USD-direct vs FX-convert vs fail-close.

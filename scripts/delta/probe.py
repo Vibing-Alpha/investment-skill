@@ -27,7 +27,15 @@ THESIS_FRESHNESS_SLA_DAYS = 7
 
 # ---- Estimates hash (Gate 2 + partial-tier trigger) ----
 
-_ESTIMATES_HASHED_FIELDS = ("count", "period", "estimates", "yfinance_analyst")
+# Probe 4F: quote_currency / statement_currency joined the hash — a
+# currency/unit CORRECTION with unchanged numbers previously hashed
+# identically and was classified "unchanged" (stale valuation reuse).
+# Both sides are recomputed from artifacts each run (_estimates_changed),
+# so widening the field set causes no spurious one-time trigger.
+_ESTIMATES_HASHED_FIELDS = (
+    "count", "period", "estimates", "yfinance_analyst",
+    "quote_currency", "statement_currency",
+)
 
 
 def hash_estimates(estimates: dict) -> str:
@@ -35,7 +43,8 @@ def hash_estimates(estimates: dict) -> str:
 
     Fields hashed: count, period, estimates[] (fiscal_period, period,
     revenue, earnings_per_share), yfinance_analyst (price_targets,
-    recommendations). Absent fields hash as JSON null for stability.
+    recommendations), quote_currency, statement_currency. Absent fields
+    hash as JSON null for stability.
     """
     subset = {}
     for f in _ESTIMATES_HASHED_FIELDS:
@@ -202,8 +211,10 @@ def decide_events_reuse(
     else:
         gates_failed.append("schema")
 
-    # Gate 5: 7-day hard ceiling
-    if inputs.days_since_last_events_run <= THESIS_FRESHNESS_SLA_DAYS:
+    # Gate 5: 7-day hard ceiling. Probe 4C: negative age = a FUTURE-dated
+    # anchor (clock skew / old-date rerun) — a time anomaly, not freshness;
+    # `<= 7` alone read it as fresh. Fail the gate → conservative rerun.
+    if 0 <= inputs.days_since_last_events_run <= THESIS_FRESHNESS_SLA_DAYS:
         gates_passed.append("ceiling_7d")
     else:
         gates_failed.append("ceiling_7d")

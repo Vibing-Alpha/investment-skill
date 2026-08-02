@@ -172,6 +172,8 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
             else:
                 medians[field] = round((s[n // 2 - 1] + s[n // 2]) / 2, 2)
 
+    import datetime as _dt
+
     result = {
         "peers": peers,                                       # unchanged: ALL fetched
         "medians": medians,                                   # NOW: USD-only
@@ -181,7 +183,25 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
         "tickers_requested": tickers,
         "tickers_succeeded": list(peers.keys()),
         "data_source": "yfinance",
-        "basis": "TTM (trailing twelve months)",
+        # Per-FIELD basis (probe 1G): a single global "TTM" string mislabeled
+        # forward_pe (forward consensus) and peg (yfinance pegRatio uses a
+        # 5-YEAR expected-growth horizon). The horizon must be visible at the
+        # consumer so peer-median PEG is never crossed with a 1-year growth
+        # rate (that mismatch produced AMD's $368.7 horizon-inflated anchor).
+        "basis": {
+            "pe": "TTM",
+            "ps": "TTM",
+            "pb": "MRQ book value",
+            "ev_ebitda": "TTM",
+            "ev_revenue": "TTM",
+            "forward_pe": "FWD (next-FY consensus EPS)",
+            "peg": "yfinance pegRatio — 5y expected growth horizon "
+                   "(do NOT combine with a 1y growth rate)",
+        },
+        # As-of provenance (probe 5C): yfinance denominators (book value,
+        # growth estimates) can jump far more than market cap across days;
+        # without a stamp the jump is indistinguishable from stale reuse.
+        "fetched_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
     if errors:
         result["errors"] = errors

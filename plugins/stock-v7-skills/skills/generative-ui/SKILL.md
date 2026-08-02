@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.6.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Step 0: Pick the mode
@@ -91,7 +91,7 @@ Decide the mode from the user's argument — no shell state involved:
 - **Portfolio mode** — argument is empty, `portfolio`, `all`, `组合`, or `持仓`
   (case-insensitive): visualize the whole portfolio-state universe (holdings +
   watchlist). Run the Preflight below first.
-- **Single-ticker mode** — argument matches `^[A-Z][A-Z.]{0,9}$` (and isn't a mode
+- **Single-ticker mode** — argument matches `^[A-Z][A-Z0-9.-]{0,9}$` (and isn't a mode
   keyword): visualize that ticker. SKIP the Preflight heading below (ticker mode
   composes from already-gated artifacts) and go straight to its build block in Step 1.
 

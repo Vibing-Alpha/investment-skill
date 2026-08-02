@@ -143,6 +143,14 @@ Classify net institutional behavior from 13F data:
   the Overall Event Bias (§5). (`stable` requires a PRESENT, non-empty feed
   that you actually COMPARED against a baseline and found unchanged.)
 
+**Coverage flags (REQUIRED read).** The artifact root carries producer
+coverage metadata — `holder_count_partial`, `dropped_stale_rows`,
+`stale_cutoff_applied`. When `holder_count_partial: true` or
+`dropped_stale_rows > 0`, the panel you classified is INCOMPLETE (stale
+vintages were dropped / the holder count was truncated): say so in the
+institutional-flow note (e.g. "panel partial: N stale rows dropped") and do
+not present the classification as a full-ownership read.
+
 **Read the panel's shape before reading its numbers.** The file carries
 `row_count`, `holder_count`, `report_periods`, `single_vintage` and
 `latest_report_period` alongside `holdings`. Three consequences:

@@ -78,7 +78,8 @@ the latest fundamentals:
   total_equity`, `EV/EBITDA = (current_market_cap + net_debt) / TTM_EBITDA`,
   `P/E = current_price / TTM_EPS`.
 
-If `01_price_data.json` carries a `market_cap_reconciliation` block (status
+If `01_price_data.json` carries a `snapshot.market_cap_reconciliation`
+block (nested under `snapshot`, NOT at the root; status
 `corrected`/`filled`), the producer fixed the lagged cap AND propagated the
 fix into `metrics_snapshot` — which then carries its own
 `market_cap_reconciliation` block. **Read that block's `fields_rescaled`
@@ -187,6 +188,30 @@ isolation is meaningless — context is everything.
    (PEG=4.0). Apply PEG normalization or growth-adjusted EV/EBITDA where
    earnings-based methods are used.
 
+   **PEG growth-horizon consistency (HARD RULE).** A PEG is only comparable to
+   another PEG computed on the SAME growth horizon. `peer_multiples.json`'s
+   `peg` values come from yfinance `pegRatio`, which uses a **5-year expected
+   growth** denominator (the producer's `basis.peg` entry states this; a
+   LEGACY artifact may carry a single `basis` string instead — the 5y-horizon
+   fact and this rule apply identically there). Your
+   own PEG built from `06_analyst_estimates` FY+1/FY+2 consensus is a
+   **1-year-growth** PEG. These are DIFFERENT metrics:
+   - NEVER derive an implied fair value by multiplying the peer-median PEG by
+     a growth rate on a different horizon (e.g. peer PEG × 1y EPS growth ×
+     next-FY EPS). When near-term growth exceeds the 5y CAGR — the usual case
+     for cyclical accelerations — this inflates the anchor severely (a real
+     run produced a ~2× overstated upper anchor this way).
+   - If you cannot source a subject 5y expected-growth rate from the provided
+     artifacts (there is no such field in `06_analyst_estimates`), the peer
+     PEG comparison is **qualitative only**: state where the subject's
+     own-horizon PEG sits vs peers as context, set the peg method's
+     `implied_fair_value.at_peer_median` to `null`, and note
+     `"peg horizon mismatch: peers are 5y-expected basis, subject growth is
+     1y consensus — no implied fair value"` in that method's block.
+   - A PEG-derived price anchor must never be labeled the "most defensible"
+     peer anchor while its horizons are mixed; prefer the plain forward-P/E
+     peer band (same-basis) for the peer-relative anchor.
+
 ### Basis Annotation
 
 Every multiple must state its calculation basis — "P/E" alone is ambiguous.
@@ -244,6 +269,22 @@ risk-free rate and equity risk premium inputs are reasonable.
 verbatim into `valuation.json`. `implied_growth_rate_pct` is already
 emitted as a percent (suffix `_pct`), so copy it verbatim too.
 
+**`bracket` field (REQUIRED read).** When `reverse_dcf.json` carries
+`bracket != "in_range"`, the numeric `implied_growth_rate_pct` is the SEARCH
+BOUND, not a point estimate: `above_upper_bound` means implied growth is a
+FLOOR (">50%"), `below_lower_bound` a ceiling ("<-20%"). Present it as an
+inequality, never as a point value, and never compare it to consensus as if
+exact. `sensitivity_brackets` flags sensitivity legs with the same caveat.
+
+**FCF selection disclosure (REQUIRED).** Read `fcf_inputs.json`'s
+`fcf_selection_reason` and `fcf_divergence_pct`. When the reason is
+`ni_sign_anchor` or `fallback_min_abs`, the two FCF measurement paths
+materially disagreed and a heuristic picked one — the reverse-DCF
+`interpretation` MUST state which path was used, the divergence percent, and
+that the implied growth rate inherits this base-FCF uncertainty; set the
+reverse-DCF-derived conviction accordingly (never `high` confidence on a
+heuristic-picked base).
+
 ### Reverse DCF Limitations
 
 The implied growth rate is only as meaningful as the base FCF is representative.
@@ -280,6 +321,17 @@ with null would raise a non-zero CLI error. The null signals that
 - `fcf_selection_reason == "shares_unavailable"` — state machine
   picked a valid TTM but the balance sheet is missing or
   `outstanding_shares` is non-positive, so per-share conversion failed
+- `fcf_selection_reason == "insufficient_quarters_for_aligned_window"` —
+  the DL4 aligned-quarter gate could not build 4 consecutive aligned
+  quarters across income/cash-flow/balance (gapped or non-consecutive
+  statements), so no TTM was formed
+
+A finite NON-POSITIVE `fcf_per_share` (cash-burning TTM) is a different
+case: the orchestration still invokes `scripts.reverse_dcf`, which
+self-skips and writes `reverse_dcf.json` with
+`{status: "skipped", reason: "invalid_fcf_input"}` — read that artifact
+and carry its status/reason verbatim (a negative FCF base has no
+implied-growth meaning; say so in the narrative).
 
 Instead, emit the reverse_dcf section of your valuation output as:
 

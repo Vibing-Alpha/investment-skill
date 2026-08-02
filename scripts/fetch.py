@@ -2841,6 +2841,15 @@ def _main_impl(
             "fed_history": rates_historical.get("rates", []),
             "fed_history_count": rates_historical.get("count", 0),
         }
+        # Probe 1D: 10Y treasury yield for the CAPM risk-free. Failure is
+        # tolerated (extract_fcf falls back to the FED policy rate with a
+        # documented proxy warning) — the treasury leg must never fail the
+        # whole macro-rates category.
+        from scripts.sources.yahoo_finance import fetch_treasury_yield_10y
+        t10y_result = fetch_treasury_yield_10y()
+        if isinstance(t10y_result.data, dict) and \
+                t10y_result.data.get("us_10y") is not None:
+            macro_rates_data["us_10y"] = t10y_result.data["us_10y"]
         # ISS-103 (Loop8): combined-status matrix. Pre-fix top-level
         # "status" tracked only the snapshot result; historical FAILED
         # was demoted to extra_key. Now apply same matrix as earnings
@@ -2857,6 +2866,9 @@ def _main_impl(
         macro_extra = {
             "historical_status": hist_status,
             "banks_count": len(rates_snapshot.get("rates", [])),
+            # Info-only: treasury leg failure never downgrades the category
+            # (extract_fcf has a documented FED-proxy fallback).
+            "treasury_10y_status": t10y_result.status,
         }
         if rates_hist_result.error is not None:
             macro_extra["historical_error_code"] = rates_hist_result.error.code.value

@@ -52,10 +52,47 @@ def write_reuse_path(
     rewrite + reuse_meta stamping. Writes:
     - $REPORT_DIR/events.json
     - $REPORT_DIR/.events_reuse.json (audit for run_meta)
+
+    Fresh-destination guard (third cold round — the events analog of
+    copy_dimension_scores' probe-4B guard): a FRESH same-session
+    events.json (present, parseable, meta WITHOUT reuse_meta — the events
+    agent never stamps reuse_meta) is never overwritten with an older
+    prior copy. A second same-session thesis invocation that passes the
+    reuse gates would otherwise resolve yesterday's dir and silently
+    downgrade today's fresh events. The audit records status "fresh"
+    (truthful: the file on disk IS fresh) with an explanatory note.
     """
     from scripts.delta.calendar import today_et
     from scripts.delta.copy_data import rewrite_stale_date_fields
     from scripts.delta.prune_catalysts import prune_past
+    from scripts.cli_utils import write_output as _atomic_write_guard
+
+    dst_path = report_dir / "events.json"
+    if dst_path.exists():
+        try:
+            cur = json.loads(dst_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            cur = None  # unreadable dst → replace with the reuse copy
+        if (isinstance(cur, dict)
+                and isinstance(cur.get("meta"), dict)
+                and "reuse_meta" not in cur["meta"]):
+            print(
+                "[reuse_events] SKIP: destination events.json is a fresh "
+                "same-session output (no reuse_meta) — not overwriting with "
+                "a prior-run copy (fresh-destination guard).",
+                file=sys.stderr,
+            )
+            _atomic_write_guard(
+                {
+                    "status": "fresh",
+                    "gates_failed": [],
+                    "override_reason": None,
+                    "note": ("same-session fresh events kept — reuse skipped "
+                             "by the fresh-destination guard"),
+                },
+                str(report_dir / ".events_reuse.json"),
+            )
+            return
 
     if now_utc is None:
         now_utc = datetime.datetime.now(datetime.timezone.utc)

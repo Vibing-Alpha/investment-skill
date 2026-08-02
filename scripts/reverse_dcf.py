@@ -121,71 +121,116 @@ def solve_implied_growth(
                        "undefined otherwise)]"),
         }
 
+    # Solver-control sanity (cold-round finding): max_iterations=0 would
+    # emit the bracket MIDPOINT as a confident in-range answer without a
+    # single iteration; projection_years<1 degenerates the DCF. Same
+    # skipped-shape contract as the input guards above.
+    if (isinstance(max_iterations, bool) or not isinstance(max_iterations, int)
+            or max_iterations < 1
+            or isinstance(projection_years, bool)
+            or not isinstance(projection_years, int) or projection_years < 1
+            or isinstance(tolerance, bool)
+            or not isinstance(tolerance, (int, float))
+            or not math.isfinite(tolerance) or tolerance <= 0):
+        return {
+            "implied_growth_rate_pct": None,
+            "status": "skipped",
+            "reason": "invalid_solver_controls",
+            "source": ("[Calc: skipped in reverse_dcf — max_iterations and "
+                       "projection_years must be integers >= 1, tolerance a "
+                       "finite positive number]"),
+        }
+
     # Binary search bounds: -20% to +50% growth
-    lo, hi = -0.20, 0.50
+    GROWTH_LO, GROWTH_HI = -0.20, 0.50
 
-    # Check bounds
-    val_lo = _dcf_value(base_fcf_per_share, lo, discount_rate, terminal_growth, projection_years)
-    val_hi = _dcf_value(base_fcf_per_share, hi, discount_rate, terminal_growth, projection_years)
+    def _solve(dr):
+        """Solve implied growth at discount rate `dr`.
 
-    if current_price < val_lo:
-        return {
-            "implied_growth_rate_pct": round(lo * 100, 1),
-            "note": f"Price below minimum DCF (growth < {lo*100:.0f}%)",
-            "discount_rate_used": discount_rate,
-            "terminal_growth_used": terminal_growth,
-        }
-    if current_price > val_hi:
-        return {
-            "implied_growth_rate_pct": round(hi * 100, 1),
-            "note": f"Price above maximum DCF (growth > {hi*100:.0f}%)",
-            "discount_rate_used": discount_rate,
-            "terminal_growth_used": terminal_growth,
-        }
+        Returns (rate_decimal, bracket) where bracket disambiguates an
+        endpoint value from a converged root (probe 1F): pre-fix an
+        out-of-bracket price returned the SEARCH ENDPOINT (e.g. 50.0) as
+        the numeric implied growth with only a prose note — downstream
+        consumers copied the number as if it were a point estimate.
+        bracket ∈ {"in_range", "below_lower_bound", "above_upper_bound"}.
+        """
+        val_lo = _dcf_value(base_fcf_per_share, GROWTH_LO, dr, terminal_growth, projection_years)
+        val_hi = _dcf_value(base_fcf_per_share, GROWTH_HI, dr, terminal_growth, projection_years)
+        if current_price < val_lo:
+            return GROWTH_LO, "below_lower_bound"
+        if current_price > val_hi:
+            return GROWTH_HI, "above_upper_bound"
+        lo, hi = GROWTH_LO, GROWTH_HI
+        for _ in range(max_iterations):
+            mid = (lo + hi) / 2
+            val_mid = _dcf_value(base_fcf_per_share, mid, dr, terminal_growth, projection_years)
+            if abs(val_mid - current_price) < tolerance:
+                break
+            if val_mid < current_price:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2, "in_range"
 
-    # Binary search
-    for _ in range(max_iterations):
-        mid = (lo + hi) / 2
-        val_mid = _dcf_value(base_fcf_per_share, mid, discount_rate, terminal_growth, projection_years)
+    implied_rate, bracket = _solve(discount_rate)
 
-        if abs(val_mid - current_price) < tolerance:
-            break
-        if val_mid < current_price:
-            lo = mid
-        else:
-            hi = mid
-
-    implied_rate = (lo + hi) / 2
-
-    # Sensitivity: what if WACC is ±1%?
+    # Sensitivity: what if the discount rate is ±1%? Computed for EVERY
+    # outcome INCLUDING at-bound base results (third cold round: an
+    # at-bound base previously returned without sensitivity, silently
+    # dropping ±1% legs that were in-range and informative).
     sensitivity = {}
+    sensitivity_brackets = {}
     for wacc_delta in [-0.01, 0.0, 0.01]:
         adj_dr = discount_rate + wacc_delta
         if adj_dr <= terminal_growth:
             continue
-        # Re-solve for this WACC
-        s_lo, s_hi = -0.20, 0.50
-        for _ in range(max_iterations):
-            s_mid = (s_lo + s_hi) / 2
-            s_val = _dcf_value(base_fcf_per_share, s_mid, adj_dr, terminal_growth, projection_years)
-            if abs(s_val - current_price) < tolerance:
-                break
-            if s_val < current_price:
-                s_lo = s_mid
-            else:
-                s_hi = s_mid
+        s_rate, s_bracket = _solve(adj_dr)
         wacc_label = f"wacc_{adj_dr*100:.1f}pct"
-        sensitivity[wacc_label] = round((s_lo + s_hi) / 2 * 100, 1)
+        sensitivity[wacc_label] = round(s_rate * 100, 1)
+        if s_bracket != "in_range":
+            # Probe 1F: sensitivity endpoints previously converged to the
+            # bound with NO out-of-range metadata at all.
+            sensitivity_brackets[wacc_label] = s_bracket
 
-    return {
+    if bracket in ("below_lower_bound", "above_upper_bound"):
+        if bracket == "below_lower_bound":
+            bound_pct = round(GROWTH_LO * 100, 1)
+            note = (f"Price below minimum DCF (growth < {GROWTH_LO*100:.0f}%) — "
+                    "the numeric field is the search bound (a CEILING on "
+                    "implied growth), not a point estimate")
+        else:
+            bound_pct = round(GROWTH_HI * 100, 1)
+            note = (f"Price above maximum DCF (growth > {GROWTH_HI*100:.0f}%) — "
+                    "the numeric field is the search bound (a FLOOR on "
+                    "implied growth), not a point estimate")
+        out = {
+            "implied_growth_rate_pct": bound_pct,
+            "bracket": bracket,
+            "note": note,
+            "discount_rate_used": discount_rate,
+            "terminal_growth_used": terminal_growth,
+            "sensitivity": sensitivity,
+        }
+        if sensitivity_brackets:
+            out["sensitivity_brackets"] = sensitivity_brackets
+        return out
+
+    out = {
         "implied_growth_rate_pct": round(implied_rate * 100, 1),
+        "bracket": bracket,
         "discount_rate_used": discount_rate,
         "terminal_growth_used": terminal_growth,
         "projection_years": projection_years,
-        "base_fcf_per_share": round(base_fcf_per_share, 2),
+        # 6dp echo (second cold round): the SOLVE uses full precision; a 2dp
+        # echo reported 0.0 for sub-cent FCF/share while solving on the real
+        # value — the disclosure must match the input actually used.
+        "base_fcf_per_share": round(base_fcf_per_share, 6),
         "current_price": round(current_price, 2),
         "sensitivity": sensitivity,
     }
+    if sensitivity_brackets:
+        out["sensitivity_brackets"] = sensitivity_brackets
+    return out
 
 
 def _main():

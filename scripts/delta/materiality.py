@@ -67,8 +67,16 @@ def article_date_usable(published_at) -> bool:
 def prepare_classifier_input(
     articles: List[dict], since_date: str
 ) -> dict:
-    """Filter articles to those with `published_at > since_date` (strict)
-    and package for the classifier prompt. Spec §6.3.
+    """Filter articles to those with `published_at >= since_date`
+    (INCLUSIVE) and package for the classifier prompt. Spec §6.3.
+
+    Probe 4E: the window was strict (`>`), but timestamps are truncated to
+    dates — an article published later ON the prior run's own date (e.g. a
+    23:00Z material contract after a morning run) was deterministically
+    dropped by every subsequent run. Inclusive is the conservative fix:
+    since_date advances each run, so an article participates in at most 2
+    consecutive runs; the worst case is one extra `partial` for a material
+    article the prior run already saw — never a silently missed one.
     """
     since_dt = datetime.date.fromisoformat(since_date)
     filtered = []
@@ -79,7 +87,7 @@ def prepare_classifier_input(
         if not article_date_usable(pub):
             continue
         pub_dt = datetime.date.fromisoformat(pub[:10])
-        if pub_dt > since_dt:  # strict: exclude since_date itself
+        if pub_dt >= since_dt:  # inclusive — see probe 4E note above
             filtered.append(a)
     return {"since_date": since_date, "articles": filtered}
 
@@ -114,6 +122,25 @@ def validate_classifier_output(raw: dict) -> ClassifierOutput:
         raise ValueError(
             f"classifier_input_health.fetch_timestamp_today must be bool, "
             f"got {type(h['fetch_timestamp_today']).__name__}"
+        )
+
+    # Second cold round: counts must be REAL integers (a float 0.9 was
+    # silently truncated to 0 by int()), and material_count must agree with
+    # the list it claims to count — a classifier reporting count=0 beside a
+    # non-empty material_list would otherwise steer the tier to no_op while
+    # the evidence says otherwise. Cross-field consistency is checked HERE
+    # (inside the LLM's own output); it cannot validate the LLM's claims
+    # about its INPUT (health echo) — that remains the documented contract.
+    for count_key in ("material_count", "low_signal_count"):
+        v = raw[count_key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(
+                f"{count_key} must be an integer, got {type(v).__name__}"
+            )
+    if raw["material_count"] != len(raw["material_list"]):
+        raise ValueError(
+            f"material_count={raw['material_count']} disagrees with "
+            f"len(material_list)={len(raw['material_list'])}"
         )
 
     return ClassifierOutput(

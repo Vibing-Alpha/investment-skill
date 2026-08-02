@@ -83,16 +83,24 @@ def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
     from scripts.indicators import (
         calc_macd, calc_bollinger, calc_atr, calc_rsi,
         calc_rsi_series, detect_rsi_divergence, calc_volume,
-        _sanitize_closes,
+        _sanitize_closes, adjust_high_low,
     )
+    from scripts.indicators import merge_adjusted_closes
     raw_close = list(ohlcv.get("close", []))
     adj = list(ohlcv.get("adjclose", []))
-    closes = []
-    for i, c in enumerate(raw_close):
-        a = adj[i] if i < len(adj) else None
-        closes.append(a if a is not None else c)
-    highs = list(ohlcv.get("high", []))
-    lows = list(ohlcv.get("low", []))
+    # Shared merge (cold-round finding): finite-positive preferred, same
+    # basis criterion as adjust_high_low — one implementation across the
+    # indicators CLI, this run-day path, and _bench_3m.
+    closes = merge_adjusted_closes(raw_close, adj)
+    # Probe 1A: same basis-consistency as scripts.indicators — highs/lows are
+    # scaled onto the adjusted basis so run-day ATR doesn't explode on a
+    # ticker with a split inside the chart window.
+    highs, lows = adjust_high_low(
+        list(ohlcv.get("high", [])),
+        list(ohlcv.get("low", [])),
+        raw_close,
+        adj,
+    )
     volumes = list(ohlcv.get("volume", []))
 
     # Gate on FINITE closes: _sanitize_closes also strips Inf/NaN, and the
@@ -146,23 +154,25 @@ def _sma_rounded(closes, period):
 
 
 def _pct_return(closes, days: int = 63):
-    """Percent return over `days` trading bars, computed on the finite-numeric
-    close series only (None/NaN/Inf dropped; a legitimate 0.0 close is kept).
+    """Percent return over `days` trading bars, computed on the
+    finite-POSITIVE close series only (None/NaN/Inf/0/negative dropped —
+    closes are prices).
 
-    Returns None when fewer than days+1 finite closes exist, or when the prior
-    bar is 0 (div-by-zero guard — also: a zero prior-close data error makes
-    _pct_return None → here) — never raises.
+    Returns None when fewer than days+1 usable closes exist — never raises.
     [Calc: (c[-1] / c[-1-days] - 1) * 100]
     """
+    # Finite POSITIVE only (fourth cold round): closes are prices — one
+    # corrupt 0/negative bar previously emitted an extreme numeric return
+    # (e.g. -17500%) instead of dropping the bar. Same contract as
+    # indicators._sanitize_closes.
     finite = [
         c for c in closes
-        if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+        if isinstance(c, (int, float)) and not isinstance(c, bool)
+        and math.isfinite(c) and c > 0
     ]
     if len(finite) <= days:
         return None
     prior = finite[-1 - days]
-    if prior == 0:
-        return None
     return (finite[-1] / prior - 1) * 100.0
 
 
@@ -183,14 +193,14 @@ def _bench_3m(raw, idx, anchor_iso):
     # facts compare ticker returns (adjclose-based) to this benchmark — a
     # raw-close benchmark understates SPY/QQQ by every distribution in the
     # window, biasing rs_vs_*_3m (cold review 2026-06-11 R1 HIGH-4).
+    from scripts.indicators import merge_adjusted_closes, _fin_pos
     raw_close = list(ohlcv.get("close") or [])
     adj = list(ohlcv.get("adjclose") or [])
-    closes = []
-    for i, c in enumerate(raw_close):
-        a = adj[i] if i < len(adj) else None
-        merged = a if a is not None else c
-        if merged is not None:
-            closes.append(merged)
+    # Shared merge + finite-positive filter (cold-round finding): a corrupt
+    # 0-value benchmark bar previously produced a -100% benchmark return →
+    # a fabricated +100% rs_vs_* fact. Unusable bars are dropped, matching
+    # the ticker path's treatment.
+    closes = [c for c in merge_adjusted_closes(raw_close, adj) if _fin_pos(c)]
     return _pct_return(closes, 63)
 
 
@@ -914,6 +924,25 @@ def _main():
     )
     args = parser.parse_args()
 
+    # Probe 3C: the portfolio SKILL substitutes {ALL_TICKERS} UNQUOTED into
+    # --tickers — a glob-expanded `*` (AGENTS.md, CHANGELOG.md, …) or a
+    # word-split "BRK B" would silently fetch the wrong symbol set and the
+    # real ticker would simply lack a price downstream. Validate every arg
+    # against the canonical symbology and fail LOUDLY pre-fetch.
+    from scripts.cli_utils import normalize_ticker
+    canonical_tickers = []
+    for raw_t in args.tickers:
+        try:
+            canonical_tickers.append(normalize_ticker(raw_t))
+        except ValueError as exc:
+            parser.error(
+                f"--tickers argument {raw_t!r} is not a valid ticker "
+                f"({exc}). If this came from portfolio-state.yaml, fix that "
+                "entry; a glob/word-split artifact means the orchestration "
+                "substituted an unquoted list."
+            )
+    args.tickers = canonical_tickers
+
     vendor_aliases = {}
     if args.vendor_aliases not in (None, ""):
         # User-editable money-path config: any shape other than a
@@ -930,6 +959,23 @@ def _main():
             parser.error(
                 "--vendor-aliases must be a JSON object mapping state keys "
                 "to non-empty vendor symbol strings")
+        # Cold-round finding: --tickers args are canonicalized below, so the
+        # alias KEYS must canonicalize identically or a lowercase key
+        # silently bypasses its alias (wrong-listing fetch). Values are
+        # vendor symbols (foreign suffixes allowed) — left as-is.
+        canon_aliases = {}
+        for k, v in vendor_aliases.items():
+            try:
+                ck = normalize_ticker(k)
+            except ValueError as exc:
+                parser.error(
+                    f"--vendor-aliases key {k!r} is not a valid ticker: {exc}")
+            if ck in canon_aliases and canon_aliases[ck] != v.strip():
+                parser.error(
+                    f"--vendor-aliases keys collide after normalization "
+                    f"({k!r} → {ck!r}) with conflicting vendors")
+            canon_aliases[ck] = v.strip()
+        vendor_aliases = canon_aliases
 
     result = fetch_macro_snapshot(tickers=args.tickers,
                                   vendor_aliases=vendor_aliases)

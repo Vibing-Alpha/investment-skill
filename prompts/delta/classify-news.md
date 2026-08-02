@@ -29,9 +29,13 @@ classifier).
 
 You will receive:
 - `since_date`: ISO date (YYYY-MM-DD)
-- `articles`: list of `{title, source, published_at, summary}` objects,
-  pre-filtered to `published_at > since_date` (strict, per spec §6.3 —
-  articles published exactly on since_date are excluded)
+- `articles`: list of `{title, source, published_at, summary}` objects.
+  The window is `published_at >= since_date` (INCLUSIVE, spec §6.3 as
+  amended by probe 4E — timestamps are date-truncated, so a strict `>`
+  permanently dropped material news published later on the prior run's
+  own date). If the list was not pre-filtered, apply the window yourself:
+  IGNORE articles dated strictly BEFORE since_date; KEEP articles dated
+  on since_date or later.
 
 ## Output
 

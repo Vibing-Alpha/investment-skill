@@ -46,6 +46,10 @@ class MacroRatesDoc:
     current_rates: tuple[CentralBankRate, ...]
     fed_history: tuple[CentralBankRate, ...] = ()
     fed_history_count: Optional[int] = None
+    # Probe 1D: 10Y treasury yield in PERCENT (e.g. 4.25), fetched from
+    # ^TNX. Optional — legacy artifacts predate it; extract_fcf falls back
+    # to the FED overnight policy rate (with a proxy warning) when absent.
+    us_10y: Optional[float] = None
 
     def find_current_rate(self, bank: str) -> Optional[CentralBankRate]:
         for r in self.current_rates:
@@ -141,8 +145,28 @@ def load_macro_rates(path) -> MacroRatesDoc:
                               f"{count_raw} disagrees with len(fed_history)="
                               f"{len(history)}")
 
+    us_10y_raw = raw.get("us_10y")
+    if us_10y_raw is not None:
+        if isinstance(us_10y_raw, bool) or not isinstance(us_10y_raw, (int, float)):
+            raise SchemaError(_ARTIFACT, "us_10y",
+                              f"expected number or absent, got {type(us_10y_raw).__name__}")
+        if not math.isfinite(us_10y_raw):
+            raise SchemaError(_ARTIFACT, "us_10y",
+                              f"must be finite, got {us_10y_raw}")
+        # Strictly positive (cold-round finding): the ^TNX producer requires
+        # (0, 25] — a 0.0 here is a zeroed/corrupt value, and treating it as
+        # a real risk-free would silently understate the CAPM discount rate.
+        # (Bank policy rates above legitimately allow 0.0 — SNB.)
+        if us_10y_raw <= 0 or us_10y_raw > _RATE_MAX_PCT:
+            raise SchemaError(_ARTIFACT, "us_10y",
+                              f"{us_10y_raw} outside (0, {_RATE_MAX_PCT}] — "
+                              "zero/negative treasury yield is corrupt data, "
+                              "or a unit-scale bug (decimal-as-percent / bps)")
+        us_10y_raw = float(us_10y_raw)
+
     return MacroRatesDoc(
         current_rates=current,
         fed_history=history,
         fed_history_count=count_raw,
+        us_10y=us_10y_raw,
     )

@@ -52,6 +52,7 @@ class PriceAnchor:
     price: float
     anchor_date: str   # YYYY-MM-DD of the chosen bar
     lag_days: int      # bar.time - target_date (always >= 0 in v1)
+    price_basis: str = "raw_close"  # raw_close | adjclose_fallback
 
 
 def forward_anchor_price(
@@ -65,6 +66,20 @@ def forward_anchor_price(
     DL4 invariant 5: NO backward-skewed picks. A weekly bar dated 2026-03-15
     against a target_date of 2026-03-22 is NEVER used. Returned anchor
     satisfies anchor_date >= target_date AND lag_days <= max_lag_days.
+
+    Price basis (probe 1B): prefer the raw `close`, adjclose only as a
+    fallback for legacy bars that lost the raw close. Verified data
+    semantics (ANET across its 2024-12 4:1 split): the Yahoo v8 chart
+    `close`/`high`/`low` are ALREADY retroactively split-adjusted onto
+    today's share basis, and FDS/FMP balance-sheet `outstanding_shares`
+    are likewise retroactively split-adjusted — so `close × shares` is
+    split-consistent by construction. `adjclose` additionally back-adjusts
+    DIVIDENDS, which the share count does not mirror: an adjclose anchor
+    systematically understated every dividend payer's historical prices
+    (hence every historical multiple) by the cumulative distribution since
+    that bar. Raw close is the dividend-honest choice on the same split
+    basis. `price_basis` on the anchor discloses which path produced the
+    price.
     """
     if not weekly_bars:
         return None
@@ -80,8 +95,13 @@ def forward_anchor_price(
         target = _parse_date(target_date)
     except (ValueError, TypeError):
         return None
-    best_bar = None
-    best_lag = None
+    # Collect ALL forward candidates within the lag window, sorted by lag,
+    # then take the FIRST one whose price is actually usable. Second cold
+    # round: pre-fix the search committed to the nearest DATED bar before
+    # checking its price — a null/corrupt nearest bar then dropped the
+    # whole quarter even when a valid bar sat a few days later inside
+    # max_lag_days.
+    candidates: list[tuple[int, Mapping]] = []
     for bar in weekly_bars:
         if not isinstance(bar, Mapping):
             continue
@@ -100,34 +120,49 @@ def forward_anchor_price(
         lag = (bar_date - target).days
         if lag < 0:
             continue  # forward search — skip pre-target bars
-        if best_lag is None or lag < best_lag:
-            best_lag = lag
-            best_bar = bar
-    if best_bar is None or best_lag > max_lag_days:
-        return None
-    price_val = best_bar.get("adjclose")
-    if price_val is None:
+        if lag > max_lag_days:
+            continue
+        candidates.append((lag, bar))
+    candidates.sort(key=lambda t: t[0])
+
+    for best_lag, best_bar in candidates:
+        # Probe 1B: prefer the RAW close. The multiples pair this price with
+        # AS-REPORTED period shares/equity/TTM income — the same vintage the
+        # raw close trades on. `adjclose` is back-adjusted for LATER splits
+        # (and subtracts dividends), so an adjclose anchor made every
+        # pre-split quarter's market cap (hence P/E, P/S, P/B, EV/*) wrong
+        # by the split factor, and biased every dividend payer. adjclose
+        # remains only as a fallback for legacy bars that lost the raw close.
         price_val = best_bar.get("close")
-    if price_val is None:
-        return None
-    # Post-impl ISS-059 (zero-context round 8 MEDIUM): coerce price_val to
-    # float so the `PriceAnchor.price: float` dataclass annotation is honest.
-    # Pre-fix this returned the raw `bar.get("adjclose")` value which could
-    # be a numeric string from yfinance cache corruption / mixed JSON
-    # encoding, causing downstream `pa.price <= 0` to raise TypeError. The
-    # legacy `_find_closest_price` had the same gap; harden at this single
-    # entry point rather than every call site. Reject bool (since
-    # `isinstance(True, (int, float))` is True in Python).
-    if isinstance(price_val, bool):
-        return None
-    if not isinstance(price_val, (int, float)):
-        try:
-            price_val = float(price_val)
-        except (TypeError, ValueError):
-            return None
-    if not math.isfinite(price_val):
-        return None
-    return PriceAnchor(price=float(price_val), anchor_date=best_bar["time"], lag_days=best_lag)
+        price_basis = "raw_close"
+        if price_val is None:
+            price_val = best_bar.get("adjclose")
+            price_basis = "adjclose_fallback"
+        if price_val is None:
+            continue
+        # Post-impl ISS-059 (zero-context round 8 MEDIUM): coerce price_val
+        # to float so the `PriceAnchor.price: float` dataclass annotation is
+        # honest. Pre-fix this returned the raw `bar.get("adjclose")` value
+        # which could be a numeric string from yfinance cache corruption /
+        # mixed JSON encoding, causing downstream `pa.price <= 0` to raise
+        # TypeError. Harden at this single entry point rather than every
+        # call site. Reject bool (isinstance(True, (int, float)) is True).
+        if isinstance(price_val, bool):
+            continue
+        if not isinstance(price_val, (int, float)):
+            try:
+                price_val = float(price_val)
+            except (TypeError, ValueError):
+                continue
+        if not math.isfinite(price_val):
+            continue
+        return PriceAnchor(
+            price=float(price_val),
+            anchor_date=best_bar["time"],
+            lag_days=best_lag,
+            price_basis=price_basis,
+        )
+    return None
 
 
 def _median(values: List[float]) -> float:
@@ -695,7 +730,9 @@ def compute_historical_multiples(
         total_debt = _num(bs.get("total_debt"))
         cash = _num(bs.get("cash_and_equivalents"))
 
-        # Forward-anchored price lookup (DL4 §3.3 — never a pre-target bar)
+        # Forward-anchored price lookup (DL4 §3.3 — never a pre-target bar).
+        # Probe 1B: raw-close preferred — dividend-honest on the same
+        # (retroactively split-adjusted) basis the provider share counts use.
         pa = forward_anchor_price(target_date_str, weekly, max_lag_days=14)
         # Post-impl ISS-035 (fresh-loop3): if outstanding_shares was None
         # we have no way to compute any per-share or capitalization
@@ -761,6 +798,10 @@ def compute_historical_multiples(
                 "anchor_date": pa.anchor_date,
                 "lag_days": pa.lag_days,
                 "target_source": target_source,
+                # probe 1B: which basis produced `price` — raw_close
+                # (dividend-honest, split-consistent with provider share
+                # counts) | adjclose_fallback (legacy bars).
+                "price_basis": pa.price_basis,
             },
             "fiscal_period": anchor_q.fiscal_period,  # fail-open-ok: metadata passthrough only, not used as a gate
             "price": round(price, 2),

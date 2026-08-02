@@ -90,7 +90,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"   # agent-substituted (e.g. AAPL) — substituted into every block, not exported across them
-echo "$TICKER" | grep -Eq '^[A-Z][A-Z.]{0,9}$' \
+echo "$TICKER" | grep -Eq '^[A-Z][A-Z0-9.-]{0,9}$' \
   || { echo "FATAL: invalid ticker format: '$TICKER'" >&2; exit 1; }
 
 # Most recent run dir that holds this ticker's analysis (include today).
