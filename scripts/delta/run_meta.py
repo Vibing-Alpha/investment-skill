@@ -11,6 +11,7 @@ analysis artifact. Fields need no source tags.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -113,6 +114,48 @@ class RunMeta:
         return rm
 
 
+def _load_preserving(meta_path: Path, ticker: str) -> RunMeta:
+    """Writer-side load (rounds 18/26): NEVER hand back a blank record
+    over unparseable prior state.
+
+    load_or_none's fail-lenient None is correct for the read-only
+    resolver; a WRITER that then saves would atomically erase every
+    section the current schema can't instantiate. On load failure with a
+    present file, the raw sections + warnings are grafted verbatim (plain
+    dicts pass through asdict()) so the subsequent single-section update
+    cannot destroy them. Used by BOTH the `write` and `warn` subcommands
+    (one implementation — the warn path originally lacked it and erased
+    completed sections while appending one warning).
+    """
+    from scripts.delta.calendar import session_et
+
+    existing = RunMeta.load_or_none(meta_path)
+    if existing is not None:
+        return existing
+    rm = RunMeta(ticker=ticker, et_trading_day=session_et().isoformat())
+    if not meta_path.exists():
+        return rm
+    try:
+        _raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _raw = None
+    if isinstance(_raw, dict):
+        print(
+            f"[WARN] run_meta: existing {meta_path} did not load under "
+            f"the current schema — preserving its sections verbatim "
+            f"instead of overwriting (resolver treats them as no-prior).",
+            file=sys.stderr,
+        )
+        rm.bq = _raw.get("bq") if isinstance(_raw.get("bq"), dict) else None
+        rm.thesis = (_raw.get("thesis")
+                     if isinstance(_raw.get("thesis"), dict) else None)
+        rm.industry = (_raw.get("industry")
+                       if isinstance(_raw.get("industry"), dict) else None)
+        if isinstance(_raw.get("warnings"), list):
+            rm.warnings = [w for w in _raw["warnings"] if isinstance(w, str)]
+    return rm
+
+
 def _cli():
     """CLI for run_meta write subcommand.
 
@@ -156,7 +199,13 @@ def _cli():
         help="Number of candidate_tickers in industry_analysis.json (industry only)",
     )
     w.add_argument("--run-id", default=None, help="Timestamp-based run id; defaults to now UTC")
-    w.add_argument("--completed", action="store_true", default=True)
+    # Round-20 F3: store_true with default=True made this flag inert —
+    # completed could NEVER be written as False, so a failed same-day
+    # rerun kept the morning run's completed=true beside its own invalid
+    # artifact. BooleanOptionalAction adds --no-completed for the
+    # orchestration failure paths.
+    w.add_argument("--completed", action=argparse.BooleanOptionalAction,
+                   default=True)
     w.add_argument("--cost-json", default=None, help="Path to {tokens, duration_s} dict")
     w.add_argument("--probe-json", default=None, help="Path to probe data dict (BQ only)")
     w.add_argument("--events-reuse-json", default=None, help="Events reuse decision (thesis only)")
@@ -213,9 +262,12 @@ def _cli():
     if args.cmd == "warn":
         warn_dir = Path(args.run_dir)
         warn_path = warn_dir / "run_meta.json"
-        existing = RunMeta.load_or_none(warn_path)
-        if existing is None:
-            existing = RunMeta(ticker=args.ticker, et_trading_day=session_et().isoformat())
+        # Round-26: same writer-side preservation as `write` — this path
+        # previously blank-created on any legacy-shape load failure and
+        # atomically erased every completed section while appending one
+        # warning (repro: soft-budget summary.md warn after a fresh BQ
+        # write beside a legacy thesis section).
+        existing = _load_preserving(warn_path, args.ticker)
         for w_msg in args.warning:
             existing.add_warning(w_msg)
         existing.save(warn_path)
@@ -224,12 +276,15 @@ def _cli():
     run_dir = Path(args.run_dir)
     meta_path = run_dir / "run_meta.json"
 
-    # Load or create
-    existing = RunMeta.load_or_none(meta_path)
-    if existing is None:
-        rm = RunMeta(ticker=args.ticker, et_trading_day=session_et().isoformat())
-    else:
-        rm = existing
+    # Load or create. Round-18 F2: load_or_none's fail-lenient semantics
+    # (None on any parse/shape/version mismatch) are correct for the
+    # RESOLVER (read-only — treat as no-prior), but the WRITER must not
+    # clobber what it could not parse: a legacy-shaped completed thesis
+    # section beside a fresh BQ run was silently destroyed by the blank
+    # RunMeta + single-section overwrite. Preserve the raw sections and
+    # warnings; the resolver keeps treating them as no-prior (conservative)
+    # until a matching-schema run rewrites them.
+    rm = _load_preserving(meta_path, args.ticker)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     run_id = args.run_id or now.strftime("%Y%m%dT%H%M%SZ")

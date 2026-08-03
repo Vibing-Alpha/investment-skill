@@ -125,8 +125,29 @@ def today_et() -> datetime.date:
     return _now_utc().astimezone(ET).date()
 
 
+_coverage_warned = False
+
+
 def is_trading_day(d: datetime.date) -> bool:
     """True iff d is a weekday AND not a known US market holiday."""
+    # Round-23: beyond the maintained table, weekday holidays silently
+    # classify as OPEN sessions (a 2031 MLK Monday read as a trading day
+    # → thesis staleness understated → false 'fresh'). The constant
+    # existed but nothing checked it — warn loudly (once per process) so
+    # the yearly table extension can't be silently forgotten.
+    global _coverage_warned
+    if d.year > _HOLIDAY_COVERAGE_LAST_YEAR and not _coverage_warned:
+        _coverage_warned = True
+        import sys
+        print(
+            f"[WARN] delta.calendar: {d.isoformat()} is beyond the "
+            f"holiday-calendar coverage (last maintained year "
+            f"{_HOLIDAY_COVERAGE_LAST_YEAR}) — weekday holidays will be "
+            f"misclassified as open sessions and staleness checks can "
+            f"understate age. Extend _FIXED_HOLIDAYS + _EARLY_CLOSES "
+            f"(yearly ~5-minute task).",
+            file=sys.stderr,
+        )
     if d.weekday() >= 5:  # Sat=5, Sun=6
         return False
     if d in _FIXED_HOLIDAYS:

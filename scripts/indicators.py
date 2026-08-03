@@ -161,16 +161,24 @@ def calc_macd(
     """
     # Validate parameters: fast < slow, all positive
     if not (0 < fast < slow) or signal < 1:
+        # Round-17 review: null numbers must not ship DIRECTIONAL
+        # labels ('flat'/'below' read as a valid bearish state downstream).
         return {
             'macd_line': None, 'signal_line': None, 'histogram': None,
-            'crossover': 'none', 'hist_trend': 'flat', 'zero_side': 'below',
+            'crossover': 'insufficient_data',
+            'hist_trend': 'insufficient_data',
+            'zero_side': 'insufficient_data',
         }
     closes = _sanitize_closes(closes)
     # Minimum: slow + signal - 1 (SMA-seeded EMA needs slow points, then signal-1 more for signal EMA)
     if len(closes) < slow + signal - 1:
+        # Round-17 review: null numbers must not ship DIRECTIONAL
+        # labels ('flat'/'below' read as a valid bearish state downstream).
         return {
             'macd_line': None, 'signal_line': None, 'histogram': None,
-            'crossover': 'none', 'hist_trend': 'flat', 'zero_side': 'below',
+            'crossover': 'insufficient_data',
+            'hist_trend': 'insufficient_data',
+            'zero_side': 'insufficient_data',
         }
 
     ema_fast = _ema(closes, fast)
@@ -185,9 +193,13 @@ def calc_macd(
     ]
 
     if len(macd_line_series) < signal:
+        # Round-17 review: null numbers must not ship DIRECTIONAL
+        # labels ('flat'/'below' read as a valid bearish state downstream).
         return {
             'macd_line': None, 'signal_line': None, 'histogram': None,
-            'crossover': 'none', 'hist_trend': 'flat', 'zero_side': 'below',
+            'crossover': 'insufficient_data',
+            'hist_trend': 'insufficient_data',
+            'zero_side': 'insufficient_data',
         }
 
     signal_series = _ema(macd_line_series, signal)
@@ -230,9 +242,13 @@ def calc_macd(
     zero_side = 'above' if macd_val > 0 else 'below'
 
     return {
-        'macd_line': round(macd_val, 4),
-        'signal_line': round(signal_val, 4),
-        'histogram': round(hist_val, 4),
+        # Price-valued outputs at 6dp (probe-2 review round-7 — same rule
+        # as Bollinger/ATR): 4dp collapsed sub-cent securities' MACD to
+        # signed zero while the categorical fields (zero_side/hist_trend)
+        # were computed from the unrounded values — contradictory state.
+        'macd_line': round(macd_val, 6),
+        'signal_line': round(signal_val, 6),
+        'histogram': round(hist_val, 6),
         'crossover': crossover,
         'hist_trend': hist_trend,
         'zero_side': zero_side,
@@ -260,23 +276,32 @@ def calc_bollinger(
     If insufficient history, squeeze=False.
     """
     if num_std <= 0:
+        # Round-17 review: null bands must not assert squeeze=False /
+        # position='lower_half' — that reads as a valid below-midline
+        # state. squeeze=None + sentinel = unknown.
         return {
             'upper': None, 'middle': None, 'lower': None,
-            'width_pct': None, 'pct_b': None, 'squeeze': False,
-            'position': 'lower_half',
+            'width_pct': None, 'pct_b': None, 'squeeze': None,
+            'position': 'insufficient_data',
         }
     closes = _sanitize_closes(closes)
     if period < 2:
+        # Round-17 review: null bands must not assert squeeze=False /
+        # position='lower_half' — that reads as a valid below-midline
+        # state. squeeze=None + sentinel = unknown.
         return {
             'upper': None, 'middle': None, 'lower': None,
-            'width_pct': None, 'pct_b': None, 'squeeze': False,
-            'position': 'lower_half',
+            'width_pct': None, 'pct_b': None, 'squeeze': None,
+            'position': 'insufficient_data',
         }
     if len(closes) < period:
+        # Round-17 review: null bands must not assert squeeze=False /
+        # position='lower_half' — that reads as a valid below-midline
+        # state. squeeze=None + sentinel = unknown.
         return {
             'upper': None, 'middle': None, 'lower': None,
-            'width_pct': None, 'pct_b': None, 'squeeze': False,
-            'position': 'lower_half',
+            'width_pct': None, 'pct_b': None, 'squeeze': None,
+            'position': 'insufficient_data',
         }
 
     # Safe coercion -- reject bool, coerce string, reject non-finite
@@ -305,7 +330,7 @@ def calc_bollinger(
         # 'lower_half' — consumers then mis-read a flat/collapsed band
         # as an indicator gap and/or a below-band condition. Report the
         # collapsed bands explicitly and neutral position.
-        middle_r = round(middle, 2)
+        middle_r = round(middle, 6)  # price level — 6dp so sub-$1 names keep structure (probe-2 D3)
         return {
             'upper': middle_r, 'middle': middle_r, 'lower': middle_r,
             'width_pct': 0.0, 'pct_b': 0.5, 'squeeze': True,
@@ -346,9 +371,12 @@ def calc_bollinger(
         position = 'lower_half'
 
     return {
-        'upper': round(upper, 2),
-        'middle': round(middle, 2),
-        'lower': round(lower, 2),
+        # Price levels at 6dp (probe-2 D3): 2dp collapsed every band and
+        # stop to the same cent for sub-$0.10 names — internally plausible
+        # (width_pct stayed nonzero) but the dollar levels were unusable.
+        'upper': round(upper, 6),
+        'middle': round(middle, 6),
+        'lower': round(lower, 6),
         'width_pct': round(width_pct, 2),
         'pct_b': round(pct_b, 4),
         'squeeze': squeeze,
@@ -391,8 +419,13 @@ def calc_atr(
         }
 
     def _fin(v):
+        # Positive-only (probe-2 review round-10, same contract as
+        # _sanitize_closes/_valid_close): prices are positive — a 0.0
+        # sentinel bar previously became prev_valid_close and fabricated
+        # a ~full-price reopening 'gap' TR, moving the 2xATR stop by
+        # double-digit percentage points from ONE corrupt bar.
         return (isinstance(v, (int, float)) and not isinstance(v, bool)
-                and math.isfinite(v))
+                and math.isfinite(v) and v > 0)
 
     n = min(len(highs), len(lows), len(closes))
     if period < 1 or n < period:
@@ -438,17 +471,18 @@ def calc_atr(
         price = next((c for c in reversed(closes) if _fin(c)), None)
     if price is None or price <= 0:
         return {
-            'atr_14': round(atr, 4), 'atr_pct': None,
+            'atr_14': round(atr, 6), 'atr_pct': None,
             'stop_1x': None, 'stop_1_5x': None, 'stop_2x': None,
         }
     atr_pct = atr / price * 100
 
     return {
-        'atr_14': round(atr, 4),
+        'atr_14': round(atr, 6),
         'atr_pct': round(atr_pct, 2),
-        'stop_1x': round(price - atr, 2),
-        'stop_1_5x': round(price - 1.5 * atr, 2),
-        'stop_2x': round(price - 2.0 * atr, 2),
+        # Price levels at 6dp (probe-2 D3) — see the Bollinger note.
+        'stop_1x': round(price - atr, 6),
+        'stop_1_5x': round(price - 1.5 * atr, 6),
+        'stop_2x': round(price - 2.0 * atr, 6),
     }
 
 
@@ -721,6 +755,18 @@ def calc_volume(
     if len(volumes) != len(closes):
         return _empty_volume_result()
 
+    # Probe-2 review round-15 F3: a NEWEST bar whose volume is missing
+    # (Yahoo preserves unknown volume as None) must not silently promote
+    # the PRIOR session's volume to "current" — the pair-filter below
+    # compresses the tail, so volumes[-1] of the filtered list is a stale
+    # bar wearing the current label (repro: [100]*25+[None] with the real
+    # final volume 10000 → current_volume=100, ratio 1.0, 'neutral'
+    # instead of 16.8x 'bullish_confirmation'). Current-labeled fields
+    # fail closed; historical aggregates over valid bars remain.
+    latest_volume_missing = bool(
+        volumes and _valid_close(closes[-1]) and not _valid_volume(volumes[-1])
+    )
+
     # Pair-filter: keep bars where BOTH sides are valid.
     pairs = [
         (float(v), float(c))
@@ -781,6 +827,21 @@ def calc_volume(
                 price_volume_rel = 'low_conviction_decline'
             else:
                 price_volume_rel = 'neutral'
+
+    if latest_volume_missing:
+        # obv_trend / volume_ma20 are statements about known history and
+        # stay; everything claiming to describe the CURRENT session fails
+        # closed (producer-consumer rule #4: unknown ≠ last-known-good).
+        return {
+            'current_volume': None,
+            'volume_ma20': (int(round(vol_ma20))
+                            if vol_ma20 is not None else None),
+            'volume_ratio_vs_ma20': None,
+            'volume_ratio_5d_20d': None,
+            'obv_trend': obv_trend,
+            'price_volume_relationship': 'insufficient_data',
+            'volume_note': 'latest_session_volume_missing',
+        }
 
     return {
         'current_volume': int(round(current_vol)),

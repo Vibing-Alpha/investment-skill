@@ -42,6 +42,14 @@ from scripts.sources.fx_rates import SUPPORTED_FX_CURRENCIES
 # (mirrors extract_fcf.py lines 52-58 convention).
 
 
+# Probe-2 D5: absurdity cap for emitted multiples — anything above this is a
+# denominator-fragile artifact of a near-zero TTM denominator, withheld with a
+# disclosure warning rather than presented as a real valuation reading. Sits
+# far above every real corpus extreme (thin-denominator precedents run
+# 500-1000x).
+_ABSURD_MULTIPLE_CAP = 10_000
+
+
 def _parse_date(s: str) -> datetime:
     """Parse YYYY-MM-DD date string."""
     return datetime.strptime(s, "%Y-%m-%d")
@@ -429,6 +437,13 @@ def compute_historical_multiples(
                     "total_debt",
                     "cash_and_equivalents",
                     "shareholders_equity",
+                    # Round-17 F1: consumed on the EV cash side since
+                    # round-13 — omitting it here added a LOCAL-currency
+                    # amount to converted USD cash on non-USD issuers
+                    # (row already retagged USD, so nothing downstream
+                    # could catch it). Absent/non-finite rows skip
+                    # conversion harmlessly (fx_apply Step-7 guard).
+                    "current_investments",
                 ),
             },
             ticker=ticker,
@@ -585,6 +600,10 @@ def compute_historical_multiples(
         except (TypeError, ValueError):
             return True
 
+    negative_equity_windows: list = []   # probe-2 D4
+    fragile_denominator_notes: list = []  # probe-2 D5
+    ev_windows_with_investments = 0      # probe-2 round-15 F4
+    ev_windows_without_investments = 0   # probe-2 round-15 F4
     for w in valid_windows:
         anchor_q = w[3]
         period_key = anchor_q.report_period
@@ -729,6 +748,20 @@ def compute_historical_multiples(
         equity = _num(bs.get("shareholders_equity"))
         total_debt = _num(bs.get("total_debt"))
         cash = _num(bs.get("cash_and_equivalents"))
+        # Probe-2 review round-13: short-term investments belong on the EV
+        # cash side — the metrics_snapshot net-cash basis includes them, so
+        # omitting them here compared historical multiples on one net-debt
+        # basis against current values on another (cash-rich issuers most
+        # affected). Optional-additive: absent/non-numeric → 0 (preserves
+        # behavior for artifacts lacking the field; the missing_cash gate
+        # stays keyed on cash_and_equivalents).
+        _ci = bs.get("current_investments")
+        _ci_included = (
+            _ci is not None and not isinstance(_ci, bool)
+            and isinstance(_ci, (int, float)) and math.isfinite(_ci)
+        )
+        if _ci_included:
+            cash += _ci
 
         # Forward-anchored price lookup (DL4 §3.3 — never a pre-target bar).
         # Probe 1B: raw-close preferred — dividend-honest on the same
@@ -774,6 +807,16 @@ def compute_historical_multiples(
             enterprise_value = None
         else:
             enterprise_value = market_cap + total_debt - cash
+            # Probe-2 round-15 F4: track the EV cash-side basis per window
+            # so a provider dropping current_investments for SOME quarters
+            # (mixed net-debt bases inside one 2Y band) is disclosed
+            # instead of silently shifting the band (MU repro: 20B
+            # investments → None moves EV/EBITDA 11.70 → 12.19 under
+            # status ok).
+            if _ci_included:
+                ev_windows_with_investments += 1
+            else:
+                ev_windows_without_investments += 1
 
         # NOTE on bool handling: balance-sheet `outstanding_shares`,
         # `shareholders_equity`, `total_debt`, `cash_and_equivalents`
@@ -829,6 +872,12 @@ def compute_historical_multiples(
         if not missing_equity and equity > 0:
             book_per_share = equity / shares
             entry["multiples"]["pb"] = round(price / book_per_share, 2)
+        elif not missing_equity and equity <= 0:
+            # Probe-2 D4: legitimate negative shareholders_equity
+            # (buyback-heavy issuers). P/B is correctly withheld, but
+            # silently — record the window so the artifact DISCLOSES the
+            # exclusion reason instead of presenting an unexplained gap.
+            negative_equity_windows.append(period_key)
 
         # EV/EBITDA (TTM) — true EBITDA = EBIT + D&A per ISS-006.
         # Gate on EV availability (debt + cash present) + EBIT and D&A
@@ -853,6 +902,22 @@ def compute_historical_multiples(
         if (enterprise_value is not None
                 and not missing_revenue and ttm_revenue > 0):
             entry["multiples"]["ev_revenue"] = round(enterprise_value / ttm_revenue, 2)
+
+        # Probe-2 D5: denominator-fragile ratios. A tiny-but-positive TTM
+        # denominator (recently break-even cyclicals / restructurings)
+        # passed the `> 0` gates and emitted the exact arithmetic value —
+        # e.g. EV/EBITDA of 7.6e11x with status ok and no qualification.
+        # Withhold anything above the absurdity cap and disclose; the cap
+        # (10,000x) sits far above every real extreme in the corpus
+        # (POET/CRDO/NET-class thin denominators run 500-1000x).
+        for _mname in list(entry["multiples"].keys()):
+            _mval = entry["multiples"][_mname]
+            if _mval > _ABSURD_MULTIPLE_CAP:
+                fragile_denominator_notes.append(
+                    f"{_mname} withheld for {period_key}: {_mval:.4g}x — "
+                    f"denominator-fragile (near-zero TTM denominator)"
+                )
+                del entry["multiples"][_mname]
 
         # fresh-loop2 ISS-017: gate empty-multiples entry. Pre-fix a
         # window that had valid price+shares but ALL denominators
@@ -956,6 +1021,7 @@ def compute_historical_multiples(
     # Add current snapshot multiples from metrics_snapshot if available
     ms = financial_data.get("metrics_snapshot", {})
     current_from_api: dict = {}
+    snapshot_ratio_exclusions: list = []  # probe-2 review round-4
     # Shape guard — same "malformed but valid-JSON" rationale as the root +
     # 3-statement-family guards above. A metrics_snapshot drifted to a
     # list/string would AttributeError at `ms.get(...)` OUTSIDE the error
@@ -1035,6 +1101,18 @@ def compute_historical_multiples(
         rounded = round(v, 2)
         if rounded == 0 and v != 0:
             continue
+        # Probe-2 review round-4: apply the SAME honesty gates the
+        # historical windows enforce. A provider snapshot ratio that is
+        # non-positive (negative earnings/book behind a 'P/E of -20') or
+        # above the absurdity cap previously rode into current_from_api
+        # under status ok while the prompt treats non-positive
+        # denominators as method exclusions.
+        if rounded <= 0 or rounded > _ABSURD_MULTIPLE_CAP:
+            snapshot_ratio_exclusions.append(
+                f"current_from_api.{short} withheld: provider value "
+                f"{rounded} is non-positive or denominator-fragile"
+            )
+            continue
         current_from_api[short] = rounded
 
     # fresh-loop2 ISS-003: envelope consistency with extract_fcf.py.
@@ -1058,6 +1136,68 @@ def compute_historical_multiples(
         and newest_reported_period > latest_aligned_report_period
     )
     out_warnings = list(fx_warnings_to_propagate)
+    # Probe-2 D4/D5 disclosures — both downgrade status so the valuation
+    # prompt's "read status + warnings" rule surfaces them.
+    if negative_equity_windows:
+        out_warnings.append(
+            f"P/B suppressed for {len(negative_equity_windows)} window(s) "
+            f"({', '.join(negative_equity_windows)}): shareholders_equity "
+            f"<= 0 — negative-book issuer (buyback-heavy balance sheet). "
+            f"Exclude P/B in method_screen with this reason; the absence "
+            f"is a method exclusion, not a data gap."
+        )
+        if status == "ok":
+            status = "ok_with_warnings"
+    if fragile_denominator_notes:
+        out_warnings.extend(fragile_denominator_notes)
+        if status == "ok":
+            status = "ok_with_warnings"
+    # Probe-2 round-15 F4: disclose the EV cash-side basis. "mixed" (the
+    # provider supplied current_investments for some quarters only) warps
+    # the band's internal consistency and warrants a warning; a uniform
+    # basis is just declared.
+    ev_cash_basis: Optional[str] = None
+    if ev_windows_with_investments and ev_windows_without_investments:
+        ev_cash_basis = "mixed"
+        out_warnings.append(
+            f"EV cash side is MIXED across the band: "
+            f"{ev_windows_with_investments} window(s) include "
+            f"current_investments, {ev_windows_without_investments} lack "
+            f"it — EV multiples are not on one net-debt basis; compare "
+            f"against current values with caution."
+        )
+        if status == "ok":
+            status = "ok_with_warnings"
+    elif ev_windows_with_investments:
+        ev_cash_basis = "cash_plus_short_term_investments"
+    elif ev_windows_without_investments:
+        ev_cash_basis = "cash_only"
+    # Probe-2 round-15 F5: per-window `target_source` tags marked the
+    # rp+45d filing-date heuristic, but the valuation consumer reads
+    # top-level status/warnings — surface the count so look-ahead-biased
+    # anchors (non-accelerated issuers filing on day 60+) are visible on
+    # the decision path.
+    _estimated_anchor_windows = [
+        q.get("report_period") for q in quarterly_data
+        if (q.get("price_anchor") or {}).get("target_source")
+        in ("report_period_plus_45d_estimated", "report_period_unparseable")
+    ]
+    if _estimated_anchor_windows:
+        out_warnings.append(
+            f"{len(_estimated_anchor_windows)} of {len(quarterly_data)} "
+            f"window(s) anchor price on an ESTIMATED knowledge date "
+            f"(report_period+45d heuristic; no filing_date on any "
+            f"statement row): {', '.join(str(p) for p in _estimated_anchor_windows[:8])}"
+            f"{'…' if len(_estimated_anchor_windows) > 8 else ''} — the "
+            f"45d lag understates 10-K filing lags (60-90d), so these "
+            f"points can carry look-ahead bias; discount band confidence."
+        )
+        if status == "ok":
+            status = "ok_with_warnings"
+    if snapshot_ratio_exclusions:
+        out_warnings.extend(snapshot_ratio_exclusions)
+        if status == "ok":
+            status = "ok_with_warnings"
     if _ms_shape_warning:
         out_warnings.append(_ms_shape_warning)
         if status == "ok":
@@ -1107,6 +1247,7 @@ def compute_historical_multiples(
         "quarterly_detail": quarterly_data,
         "quarters_used": len(quarterly_data),
         "skipped_windows": skipped_serialized,
+        **({"ev_cash_basis": ev_cash_basis} if ev_cash_basis else {}),
         **lag_fields,
         **api_basis_sibling,
         **cert_block_to_add,

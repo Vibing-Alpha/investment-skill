@@ -126,7 +126,7 @@ def _validate_order_vocab(
         # inf is a corrupted, unknowable commitment — projecting it at the
         # live quote understates the GTC fill exactly the way the R2
         # HIGH-1 fix forbade. Absent/null keys keep the quote fallback.
-        for pkey in ("est_price", "limit_price", "price"):
+        for pkey in ("est_price", "limit_price", "stop_price", "price"):
             pval = order.get(pkey)
             if pval is not None and pkey in order and _usable_price(pval) is None:
                 violations.append({
@@ -179,13 +179,34 @@ def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
     ``limit_price`` (portfolio_log._enrich_orders costs orders with it), but
     the validator projected from est_price/price only — a GTC limit buy
     above the current quote stress-tested at the quote, understating the
-    cash its fill consumes. Order of preference: est_price (explicit
-    estimate) → limit_price → price → current quote.
+    cash its fill consumes.
+
+    Probe-2 review: ``stop_price`` joined the chain — the stress docstring
+    always PROMISED "stops use their own price field", but a stop order
+    carrying only stop_price projected at the current quote: a breakout
+    stop BUY above market (the strategy's core entry type) understated its
+    fill cost and certified an insolvent order.
+
+    Round-7: DIRECTION-AWARE conservative selection over the explicit
+    price fields (est_price / limit_price / stop_price / price). A fixed
+    preference chain let an optimistic est_price=90 override a binding
+    limit_price=100 on a BUY, certifying an order whose legal fill is
+    insolvent. Buys project at the MAX explicit price (worst-case cost);
+    sells at the MIN (worst-case proceeds). Side-ambiguous orders keep
+    the legacy chain order; no explicit price → current quote.
     """
-    for key in ("est_price", "limit_price", "price"):
-        v = _usable_price(order.get(key))
-        if v is not None:
-            return v
+    explicit = [
+        v for v in (
+            _usable_price(order.get(k))
+            for k in ("est_price", "limit_price", "stop_price", "price")
+        ) if v is not None
+    ]
+    if explicit:
+        if _is_buy(order):
+            return max(explicit)
+        if _is_sell(order):
+            return min(explicit)
+        return explicit[0]
     q = _usable_price(ticker_prices.get(order.get("ticker", "")))
     return q if q is not None else 0
 
@@ -569,8 +590,12 @@ def _run_stress_tests(
     }
 
     # --- extreme_down: all buys + stop sells trigger ---
+    # Probe-2 A2: "all stops trigger" (portfolio-safety risk floor) must
+    # include PROPOSED stop sells, not just working broker ones — a
+    # prompt-valid proposed stop/stop_limit/stop_market sell was previously
+    # invisible to extreme_down/defensive.
     stops = [
-        o for o in open_orders
+        o for o in (list(proposed_orders) + list(open_orders))
         if "stop" in str(o.get("type") or "").lower() and _is_sell(o)
     ]
     extreme_orders = all_buys + stops
@@ -701,11 +726,60 @@ def validate_portfolio(
         missing_price_violations=missing_price_violations,
         oversell_violations=oversell_violations,
     )
-    proj_account = _calc_account_value(proj_holdings, ticker_prices, proj_cash)
+    # Base (immediate) state — market orders only. Computed HERE so the
+    # missing-price scan below covers base-held positions too (probe-2
+    # review round-3: a contingent full sell of an UNPRICED holding removed
+    # it from the all-fills projection, and the base min_cash check then
+    # valued the account without it — an unknowable ratio passed).
+    base_market_orders = [
+        o for o in sanitized_orders
+        if str(o.get("type") or "").lower() == "market"
+    ]
+    base_holdings, base_cash = _apply_orders(
+        holdings, cash, base_market_orders, ticker_prices,
+    )
+    # Probe-2 review round-6: the base state needs its own fill-aware
+    # valuation — a market buy projected at est_price above the quote left
+    # cash at the fill proxy while the shares were valued at the QUOTE,
+    # so min_cash/max_single_position compared mismatched bases at the
+    # immediate state.
+    base_constraint_prices = dict(ticker_prices)
+    for o in base_market_orders:
+        if not _is_buy(o):
+            continue
+        t = o.get("ticker")
+        p = _order_price(o, ticker_prices)
+        if t and _usable_price(p) is not None:
+            cur = base_constraint_prices.get(t)
+            if cur is None or p > cur:
+                base_constraint_prices[t] = p
+
+    # Probe-2 review round-3: CONSTRAINT valuation prices. A buy order
+    # priced ABOVE the current quote (breakout stop/limit) consumes cash at
+    # its order price but was valued at the quote — the resulting position
+    # passed max_single_position while its fill necessarily exceeds it.
+    # For ratio checks, value each bought ticker at the highest buy price
+    # in play (conservative: the constraint must hold AT THE FILL).
+    constraint_prices = dict(ticker_prices)
+    for o in sanitized_orders:
+        if not _is_buy(o):
+            continue
+        t = o.get("ticker")
+        p = _order_price(o, ticker_prices)
+        if t and _usable_price(p) is not None:
+            cur = constraint_prices.get(t)
+            if cur is None or p > cur:
+                constraint_prices[t] = p
+
+    proj_account = _calc_account_value(proj_holdings, constraint_prices, proj_cash)
+    base_account = _calc_account_value(
+        base_holdings, base_constraint_prices, base_cash)
 
     # HIGH-14: If any ratio-based constraint is active, holdings that
     # lack a price cannot be evaluated — fail-closed before running
-    # the ratio checks.
+    # the ratio checks. Scan the UNION of the all-fills and base-state
+    # holdings (round-3: a position present only at base must fail-close
+    # the ratio checks too).
     ratio_active = any(
         normalized_constraints.get(k) is not None
         for k in ("min_cash", "max_single_position", "max_sector")
@@ -716,13 +790,15 @@ def validate_portfolio(
             k for k in ("min_cash", "max_single_position", "max_sector")
             if normalized_constraints.get(k) is not None
         ]
-        for ticker in list(proj_holdings.keys()):
+        for ticker in sorted(set(proj_holdings) | set(base_holdings)):
             price = _usable_price(ticker_prices.get(ticker))
             if price is None:
                 # _check_position_limits already emits missing_price when
-                # max_single_position is set; only add here for other
-                # ratio constraints (e.g. min_cash) to avoid double-report.
-                if normalized_constraints.get("max_single_position") is None:
+                # max_single_position is set AND the ticker is in the
+                # all-fills holdings; only add here for the other cases
+                # to avoid double-report.
+                if (normalized_constraints.get("max_single_position") is None
+                        or ticker not in proj_holdings):
                     holding_price_violations.append({
                         "constraint": "missing_price",
                         "ticker": ticker,
@@ -738,12 +814,42 @@ def validate_portfolio(
     violations: List[Dict[str, Any]] = []
     violations.extend(
         _check_position_limits(
-            proj_holdings, proj_account, ticker_prices, normalized_constraints
+            proj_holdings, proj_account, constraint_prices,
+            normalized_constraints
         )
     )
     violations.extend(
         _check_cash_floor(proj_cash, proj_account, normalized_constraints)
     )
+
+    # Probe-2 review: hard constraints must ALSO hold at the BASE state
+    # (market orders only — the set that executes immediately; projected
+    # above, before the missing-price scan). The all-fills projection
+    # assumes every proposed order fills, so a contingent far-from-market
+    # limit/stop sell could "resolve" a LIVE breach on paper (repro: 0%
+    # cash beside min_cash=20%, healed by a 2x-above-market limit sell →
+    # passed:true). Canonical rule (rules/portfolio-safety.md): a
+    # hard-constraint breach requires an IMMEDIATE market sell — a
+    # contingent order does not clear it. Only breaches NOT already
+    # reported by the all-fills check are added (no duplicates when both
+    # states breach).
+    already = {(v.get("constraint"), v.get("ticker")) for v in violations}
+    for bv in (
+        _check_position_limits(
+            base_holdings, base_account, base_constraint_prices,
+            normalized_constraints
+        )
+        + _check_cash_floor(base_cash, base_account, normalized_constraints)
+    ):
+        if (bv.get("constraint"), bv.get("ticker")) in already:
+            continue
+        bv["message"] = (
+            f"{bv.get('message')} [UNRESOLVED AT IMMEDIATE STATE: only "
+            f"market orders execute now — a contingent limit/stop order "
+            f"does not clear a live hard-constraint breach; propose an "
+            f"immediate market sell]"
+        )
+        violations.append(bv)
 
     # Cold review 2026-06-11 R2 HIGH-2 / R3 HIGH-1 / R4 HIGH-1: pre-scan
     # open_orders BEFORE stress projection. A PRESENT broker order the
@@ -769,7 +875,7 @@ def validate_portfolio(
         # price: inf / NaN / absurd magnitude is a corrupted commitment —
         # costing it at the live quote hides the corruption.
         bad_price_key = next(
-            (k for k in ("est_price", "limit_price", "price")
+            (k for k in ("est_price", "limit_price", "stop_price", "price")
              if k in o and o.get(k) is not None
              and _usable_price(o.get(k)) is None),
             None,
@@ -878,6 +984,127 @@ def validate_portfolio(
             "current cash). Sync broker open orders into the state file "
             "for meaningful stress coverage."
         )
+
+    # Probe-2 A1 + round-24 F1 — policy floors at the ALL-FILLS state.
+    # The hard checks above validate the PROPOSED projection; working
+    # broker orders enter only the stress scenarios, which check solvency
+    # (cash >= 0), not the policy floors. Split semantics:
+    # - breach that ALREADY exists with working orders alone → WARNING
+    #   (the user's own standing commitments; the validator surfaces the
+    #   fill-state, it does not retroactively veto them);
+    # - breach CREATED (or first crossed) by adding the proposed orders →
+    #   VIOLATION (round-24: a proposed limit/stop buy whose fill jointly
+    #   breaches min_cash/max_holdings/max_single_position previously
+    #   returned passed=true with only a warning).
+    all_fill_buys = (
+        [o for o in sanitized_orders if _is_buy(o)]
+        + [o for o in projectable_open_orders if _is_buy(o)]
+    )
+    if all_fill_buys:
+        fill_holdings, fill_cash = _apply_orders(
+            holdings, cash, all_fill_buys, ticker_prices,
+        )
+        # Fill-aware valuation (probe-2 review round-4): value bought
+        # tickers at their highest buy price in play — a working stop buy
+        # above the quote otherwise inflated the denominator less than its
+        # cash outflow and the min_cash warning silently vanished.
+        fill_prices = dict(constraint_prices)
+        for o in projectable_open_orders:
+            if not _is_buy(o):
+                continue
+            t = o.get("ticker")
+            p = _order_price(o, ticker_prices)
+            if t and _usable_price(p) is not None:
+                cur = fill_prices.get(t)
+                if cur is None or p > cur:
+                    fill_prices[t] = p
+        fill_account = _calc_account_value(fill_holdings, fill_prices, fill_cash)
+
+        # Baseline: working-order buys only (no proposed) — decides
+        # whether a combined-state breach pre-exists or is newly created.
+        open_fill_buys = [o for o in projectable_open_orders if _is_buy(o)]
+        base_holdings_of, base_cash_of = _apply_orders(
+            holdings, cash, open_fill_buys, ticker_prices,
+        )
+        base_prices_of = dict(ticker_prices)
+        for o in open_fill_buys:
+            t = o.get("ticker")
+            p = _order_price(o, ticker_prices)
+            if t and _usable_price(p) is not None:
+                cur = base_prices_of.get(t)
+                if cur is None or p > cur:
+                    base_prices_of[t] = p
+        base_account_of = _calc_account_value(
+            base_holdings_of, base_prices_of, base_cash_of,
+        )
+
+        def _breach_or_warn(constraint, preexisting, message):
+            if preexisting:
+                warnings.append(message + " (pre-existing from working "
+                                "orders alone — review them)")
+            else:
+                all_violations.append({
+                    "constraint": constraint,
+                    "ticker": None,
+                    "message": message + " — the breach is created by the "
+                               "proposed orders; resize or drop them.",
+                })
+
+        min_cash = normalized_constraints.get("min_cash")
+        if (min_cash is not None and fill_account > 0
+                and fill_cash / fill_account < min_cash):
+            pre = (base_account_of > 0
+                   and base_cash_of / base_account_of < min_cash)
+            _breach_or_warn(
+                "min_cash_all_fills", pre,
+                f"all-fills state breaches min_cash: if every proposed + "
+                f"working buy fills, cash is {fill_cash / fill_account:.1%} "
+                f"of account (floor {min_cash:.0%})",
+            )
+        max_holdings = normalized_constraints.get("max_holdings")
+        if max_holdings is not None:
+            n_positions = sum(
+                1 for t, s in fill_holdings.items()
+                if isinstance(s, (int, float)) and s > 0
+            )
+            if n_positions > max_holdings:
+                n_base = sum(
+                    1 for t, s in base_holdings_of.items()
+                    if isinstance(s, (int, float)) and s > 0
+                )
+                _breach_or_warn(
+                    "max_holdings_all_fills", n_base > max_holdings,
+                    f"all-fills state breaches max_holdings: if every "
+                    f"proposed + working buy fills, the portfolio holds "
+                    f"{n_positions} positions (limit {max_holdings})",
+                )
+        # Probe-2 review round-5: max_single_position at the all-fills
+        # state, valued at fill prices — a working breakout stop buy
+        # previously passed the cap because its position was valued at the
+        # quote while its cash left at the fill proxy.
+        max_single = normalized_constraints.get("max_single_position")
+        if max_single is not None and fill_account > 0:
+            for t, sh in fill_holdings.items():
+                fp = _usable_price(fill_prices.get(t))
+                if fp is None or not isinstance(sh, (int, float)) or sh <= 0:
+                    continue
+                pct = (sh * fp) / fill_account
+                if pct > max_single:
+                    pre = False
+                    if base_account_of > 0:
+                        bsh = base_holdings_of.get(t)
+                        bfp = _usable_price(base_prices_of.get(t))
+                        if (bfp is not None and isinstance(bsh, (int, float))
+                                and bsh > 0):
+                            pre = (bsh * bfp) / base_account_of > max_single
+                    _breach_or_warn(
+                        "max_single_position_all_fills", pre,
+                        f"all-fills state breaches max_single_position: if "
+                        f"every proposed + working buy fills, {t} is "
+                        f"{pct:.1%} of account (limit {max_single:.0%}) at "
+                        f"fill prices",
+                    )
+
     all_violations.extend(unprojectable_violations)
 
     return {
@@ -885,6 +1112,13 @@ def validate_portfolio(
         "violations": all_violations,
         "warnings": warnings,
         "stress_test": stress_test,
+        # Probe-2 A3: exact echo of the order set this artifact validated.
+        # portfolio_log compares it against the decisions blob's
+        # orders_proposed before writing — without the echo, a transcription
+        # drift between Step 6 (validate) and Step 8 (log) could record a
+        # DIFFERENT order set as "stress-tested".
+        "orders_validated": [dict(o) for o in (proposed_orders or [])
+                             if isinstance(o, dict)],
     }
 
 

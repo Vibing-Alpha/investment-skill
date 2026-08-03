@@ -138,6 +138,13 @@ def _extract_thesis_snapshot(
     bq_path = None
     if bq_dir is not None and bq_dir.name <= thesis_dir.name:
         bq_path = bq_dir / "bq_analysis.json"
+    elif (thesis_dir / "bq_analysis.json").exists():
+        # Probe-2 review round-12: when the LATEST BQ is newer than the
+        # selected thesis, the thesis dir's own paired bq_analysis.json is
+        # the matching vintage — previously this state silently dropped
+        # the bq field from the durable snapshot (recorded as plain
+        # no_path) although the matching BQ sat on disk.
+        bq_path = thesis_dir / "bq_analysis.json"
 
     bq_score = None
     bq_doc = None  # F16: keep the loaded BQ doc for cert reconciliation below
@@ -164,6 +171,15 @@ def _extract_thesis_snapshot(
 
     snap = {
         "bq": bq_score,
+        # Probe-2 review round-13: the structured integrity state that
+        # GATED the recommendation (portfolio-decide reads
+        # degraded_categories / validation_status as the entry/add gate)
+        # must survive into the durable record. None values are dropped by
+        # the trailing None-strip below.
+        "bq_validation_status": (bq_doc.meta.validation_status
+                                 if bq_doc is not None else None),
+        "bq_degraded_categories": (list(bq_doc.meta.degraded_categories)
+                                   if bq_doc is not None else None),
         "conviction": thesis.thesis_conviction,
         "er": thesis.expected_return,
         "ce": thesis.capital_efficiency,
@@ -350,13 +366,17 @@ def _classify_regime(macro: Dict[str, Any]) -> tuple[str, str]:
     above_ma50 = 0
     missing_indices: List[str] = []
     anchor_note = ""
+    # Round-20 F2: a numeric 0.0 close (provider missing-value drift) is
+    # NOT a price — it read as "subdued VIX" / "index below MA50" and
+    # flipped the deterministic regime. Non-finite-positive = missing.
+    from scripts.indicators import _fin_pos
     ri = macro.get("regime_inputs")
     if isinstance(ri, dict):
         ri_indices = ri.get("indices") or {}
         for idx in indices:
             m = ri_indices.get(idx) or {}
             p, ma50 = m.get("close"), m.get("ma50")
-            if p is None or ma50 is None:
+            if not _fin_pos(p) or not _fin_pos(ma50):
                 missing_indices.append(idx)
                 continue
             if p > ma50:
@@ -371,14 +391,14 @@ def _classify_regime(macro: Dict[str, Any]) -> tuple[str, str]:
         for idx in indices:
             m = market.get(idx, {})
             p, ma50 = m.get("price"), m.get("ma50")
-            if p is None or ma50 is None:
+            if not _fin_pos(p) or not _fin_pos(ma50):
                 missing_indices.append(idx)
                 continue
             if p > ma50:
                 above_ma50 += 1
         vix = vol.get("vix")
         vix_ma20 = vol.get("vix_ma20")
-    vix_unknown = vix is None or vix_ma20 is None
+    vix_unknown = not _fin_pos(vix) or not _fin_pos(vix_ma20)
     vix_elevated = (not vix_unknown) and vix > vix_ma20 * 1.2
 
     if vix_unknown or missing_indices:
@@ -434,6 +454,15 @@ def _compute_portfolio_before(
             shares = h
         cb = h.get("cost_basis") if isinstance(h, dict) else None
         px = prices.get(t)
+        # Round-21 F1: negative/NaN/Inf/bool prices are provider bugs, not
+        # prices — a -1.0 quote produced market_value=-10 / pnl=-102% with
+        # missing_prices=[]. Explicit 0 stays legitimate (delisted-at-zero,
+        # test_h1_zero_price_legitimate_preserved).
+        if (px is not None
+                and (isinstance(px, bool)
+                     or not isinstance(px, (int, float))
+                     or not math.isfinite(px) or px < 0)):
+            px = None
         if px is None:
             missing_prices.append(t)
             mv = None
@@ -715,6 +744,42 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
                     f"is background context only, append [context-only] to that clause.",
                     file=sys.stderr,
                 )
+    # Probe-2 review round-9a: ONE decision per ticker. The decide.md
+    # contract is one entry per ticker; conflicting duplicates (exit AND
+    # hold for the same position) previously persisted into the canonical
+    # log and downstream review state.
+    _seen_decision_tickers: Dict[str, str] = {}
+    for i, d in enumerate(_as_list("decisions")):
+        if not isinstance(d, dict):
+            continue
+        t = d.get("ticker")
+        if not isinstance(t, str):
+            continue
+        if t in _seen_decision_tickers:
+            errors.append(
+                f"decisions[{i}]: duplicate decision for {t!r} "
+                f"(earlier action={_seen_decision_tickers[t]!r}, this "
+                f"action={d.get('action')!r}) — one decision per ticker"
+            )
+        else:
+            _seen_decision_tickers[t] = str(d.get("action"))
+
+    # Probe-2 review round-9b: bind each order's DIRECTION to its linked
+    # decision's action. An `exit` decision beside a linked BUY order
+    # previously persisted (and validate.py sees only orders, never
+    # decisions). Mapping: buy/add decisions may link buy orders;
+    # reduce/exit decisions may link sell orders; hold/skip decisions may
+    # link no orders at all.
+    _DECISION_TO_ORDER_ACTIONS = {
+        "buy": {"buy"}, "add": {"buy"},
+        "reduce": {"sell"}, "exit": {"sell"},
+        "hold": set(), "skip": set(),
+    }
+    _decision_action_by_ticker = {
+        d.get("ticker"): d.get("action")
+        for d in _as_list("decisions") if isinstance(d, dict)
+    }
+
     from scripts.schemas.decisions import MAX_ORDER_SHARES
     for i, o in enumerate(_as_list("orders_proposed")):
         if not isinstance(o, dict):
@@ -737,6 +802,44 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
                 f"orders_proposed[{i}] ({o.get('ticker', '?')}): "
                 f"action={action!r} not in {sorted(ORDER_ACTIONS)}"
             )
+        # round-9b direction binding (see map above the loop);
+        # round-10: the linked TICKER must equal the ORDER's ticker (a
+        # cross-ticker link laundered a contradicting order past the
+        # direction gate), and the bare-ticker link form ("AMD", no
+        # action suffix) resolves through the same direction map instead
+        # of bypassing it.
+        linked = o.get("linked_decision")
+        if isinstance(linked, str) and linked:
+            if "." in linked:
+                l_ticker, _, l_action = linked.rpartition(".")
+            else:
+                l_ticker, l_action = linked, None
+            o_ticker = o.get("ticker")
+            if isinstance(o_ticker, str) and l_ticker != o_ticker:
+                errors.append(
+                    f"orders_proposed[{i}] ({o_ticker}): "
+                    f"linked_decision={linked!r} references a DIFFERENT "
+                    f"ticker ({l_ticker!r}) — an order must link its own "
+                    f"ticker's decision"
+                )
+            d_action = _decision_action_by_ticker.get(l_ticker)
+            allowed = _DECISION_TO_ORDER_ACTIONS.get(str(d_action))
+            if (d_action is not None and l_action is not None
+                    and l_action != d_action):
+                errors.append(
+                    f"orders_proposed[{i}] ({o.get('ticker', '?')}): "
+                    f"linked_decision={linked!r} action suffix "
+                    f"{l_action!r} does not match the {l_ticker} "
+                    f"decision's action {d_action!r}"
+                )
+            if (allowed is not None and action in ORDER_ACTIONS
+                    and action not in allowed):
+                errors.append(
+                    f"orders_proposed[{i}] ({o.get('ticker', '?')}): "
+                    f"order action {action!r} contradicts linked decision "
+                    f"{l_ticker}.{d_action} (allowed order actions: "
+                    f"{sorted(allowed) or 'none — hold/skip links no orders'})"
+                )
         # F4 (codex 2026-05-22): validate `type` against ORDER_TYPES at the
         # producer boundary too — previously only the schema loader caught
         # drift, so write-time errors propagated all the way to read-time.
@@ -767,7 +870,7 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
         # cold-round 8): an est_price of inf would pass into decisions.json
         # while the validator costs the order at the finite quote — a
         # contradictory audit record. Absent/null keys stay legal.
-        for pkey in ("est_price", "limit_price", "price"):
+        for pkey in ("est_price", "limit_price", "stop_price", "price"):
             pval = o.get(pkey)
             if pkey in o and pval is not None:
                 if (isinstance(pval, bool) or
@@ -1321,6 +1424,52 @@ def _sort_follow_ups(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     )
 
 
+def _orders_match_validation(blob_orders, validated_orders):
+    """(ok, why) — do the blob's orders_proposed and the validator's
+    orders_validated echo describe the SAME order set?
+
+    Probe-2 A3 (+ cold-round follow-up): identity fields are (ticker,
+    action, type, shares, limit_price, stop_price, est_price, price) —
+    the PRICE fields are load-bearing because validate.py projects with
+    est_price → limit_price → price → quote, so an est_price changed
+    after validation changes every stress number. Compared as an
+    order-insensitive multiset with None-sensitive equality — both lists
+    came from the same Step-5 output, so any divergence is a
+    transcription/adjustment drift that invalidates the stress results.
+    Never raises (log path must stay up).
+    """
+    def _key(o):
+        if not isinstance(o, dict):
+            return ("<non-dict>",)
+        return (
+            str(o.get("ticker")),
+            str(o.get("action")),
+            str(o.get("type")),
+            repr(o.get("shares")),
+            repr(o.get("limit_price")),
+            repr(o.get("stop_price")),
+            repr(o.get("est_price")),
+            repr(o.get("price")),
+        )
+
+    a = sorted(_key(o) for o in (blob_orders or []))
+    b = sorted(_key(o) for o in (validated_orders or []))
+    if a == b:
+        return True, ""
+    if len(a) != len(b):
+        return False, f"count differs: blob={len(a)} validated={len(b)}"
+    for ka, kb in zip(a, b):
+        if ka != kb:
+            fields = ("ticker", "action", "type", "shares",
+                      "limit_price", "stop_price", "est_price", "price")
+            diffs = [f for f, va, vb in zip(fields, ka, kb) if va != vb]
+            return False, (
+                f"first divergence at {ka[0]}: fields {diffs} "
+                f"(blob={ka} validated={kb})"
+            )
+    return False, "order sets differ"
+
+
 def cmd_write(args: argparse.Namespace) -> int:
     from scripts.cli_utils import write_pair_atomic
     from scripts.delta.calendar import today_et
@@ -1537,6 +1686,45 @@ def cmd_write(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
+    # Probe-2 review round-14 F2: a decision's declared target_weight_pct
+    # was never reconciled against the orders that claim to implement it —
+    # "reduce to 40%" beside a sell that leaves 45% recorded both numbers
+    # with no cross-check. Advisory WARN, not a refusal: staged rebalancing
+    # across runs is legitimate; the gap just has to be visible.
+    from scripts.validate import _apply_orders, _calc_account_value, \
+        _usable_price
+    _twp_orders = [o for o in orders if isinstance(o, dict)]
+    _twp_tickers_with_orders = {
+        o.get("ticker") for o in _twp_orders if o.get("ticker")
+    }
+    _twp_holdings, _twp_cash = _apply_orders(
+        state.get("holdings", {}) or {},
+        float(state.get("cash", 0) or 0),  # fail-open-ok: $0 cash is a legit state (fully invested)
+        _twp_orders, prices,
+    )
+    _twp_total = _calc_account_value(_twp_holdings, prices, _twp_cash)
+    if _twp_total > 0:
+        for d in decisions:
+            t = d.get("ticker")
+            tgt = d.get("target_weight_pct")
+            if (t not in _twp_tickers_with_orders
+                    or isinstance(tgt, bool)
+                    or not isinstance(tgt, (int, float))):
+                continue
+            px = _usable_price(prices.get(t))
+            if px is None:
+                continue  # missing-price gate elsewhere owns this
+            achieved = _twp_holdings.get(t, 0) * px / _twp_total * 100
+            if abs(achieved - float(tgt)) > 5.0:
+                print(
+                    f"[WARN] portfolio_log: {t} decision declares "
+                    f"target_weight_pct={tgt} but the proposed orders "
+                    f"project to ~{achieved:.1f}% of post-order equity "
+                    f"(>5pp gap) — size the order to the target or state "
+                    f"the staged plan in the rationale.",
+                    file=sys.stderr,
+                )
+
     stress = None
     if args.stress_test:
         stress_path = pathlib.Path(args.stress_test)
@@ -1557,6 +1745,36 @@ def cmd_write(args: argparse.Namespace) -> int:
                   f"{args.stress_test}: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
             return 2
+        # Probe-2 A3: bind the validator artifact to THIS blob's order set.
+        # The artifact previously carried no echo of what it validated, so
+        # a transcription drift between Step 6 (validate) and Step 8 (log)
+        # could record a DIFFERENT order set as "stress-tested". Legacy
+        # artifacts without the echo get a WARN (can't verify), a present
+        # echo that mismatches is a hard refusal.
+        if isinstance(v, dict):
+            echo = v.get("orders_validated")
+            if echo is None:
+                print(
+                    "[WARN] portfolio_log: stress-test artifact carries no "
+                    "orders_validated echo (legacy validator output) — "
+                    "cannot verify it validated THIS order set. Re-run "
+                    "scripts.validate to regenerate.",
+                    file=sys.stderr,
+                )
+            else:
+                ok, why = _orders_match_validation(
+                    blob.get("orders_proposed", []) or [], echo
+                )
+                if not ok:
+                    print(
+                        f"portfolio_log: REFUSED — the stress-test artifact "
+                        f"validated a DIFFERENT order set than this blob's "
+                        f"orders_proposed ({why}). Re-run scripts.validate "
+                        f"on the final orders before logging.",
+                        file=sys.stderr,
+                    )
+                    return 2
+
         # Cold review 2026-06-11 R4 HIGH-2: a validator artifact that says
         # passed:false must not be persisted as the durable "proposed"
         # record — Step 6's adjust-and-revalidate loop exists to resolve it
@@ -1575,19 +1793,26 @@ def cmd_write(args: argparse.Namespace) -> int:
         stress = v.get("stress_test") if isinstance(v, dict) else None
         if stress:
             # Canonical scenario completeness (cold review 2026-06-11 R2
-            # HIGH-4): a partial artifact would read as "fully
-            # stress-checked" in the log. WARN-only — the validator in this
-            # repo always emits all five; absence means producer drift.
+            # HIGH-4, escalated by probe-2 round-25 F1): a partial
+            # artifact would read as "fully stress-checked" in the
+            # persisted log while the stderr warning evaporates with the
+            # session — the missing scenario is exactly where a negative-
+            # cash breach could hide. The validator in this repo always
+            # emits all five; absence means producer drift → REFUSE, same
+            # posture as the FAILED-validation refusal above.
             _CANON_SCENARIOS = ("base", "all_buy", "all_sell",
                                 "extreme_down", "defensive")
             missing_scen = [s for s in _CANON_SCENARIOS if s not in stress]
             if missing_scen:
                 print(
-                    f"portfolio_log: WARNING — stress_test artifact is "
-                    f"missing canonical scenario(s): {missing_scen}; the "
-                    f"log's stress section is PARTIAL.",
+                    f"portfolio_log: REFUSED — stress_test artifact is "
+                    f"missing canonical scenario(s): {missing_scen}. A "
+                    f"partial stress section must not persist as a "
+                    f"fully-checked record; re-run scripts.validate to "
+                    f"regenerate the artifact.",
                     file=sys.stderr,
                 )
+                return 2
             stress["hard_constraint_violations"] = len(v.get("violations", []))
             # Carry validator warnings (e.g. degenerate stress scenarios on
             # empty open_orders — feedback 2026-06-11 #3c) into the log so
@@ -1757,9 +1982,18 @@ def cmd_write(args: argparse.Namespace) -> int:
         while archive_json.exists():   # duplicate id → never overwrite an archive
             archive_json = out_dir / f"decisions.{prior_run_id}-{n}.json"
             n += 1
-        json_path.replace(archive_json)
+        # Round-25 F2: COPY, don't rename — the old flow renamed the
+        # canonical away and only then wrote the replacement, so an I/O
+        # failure in that window (disk full at mkstemp/write) left NO
+        # decisions.json at all; cmd_review searches only */decisions.json
+        # and would silently fall back to an older date or "first run".
+        # Copy-then-atomic-replace keeps a canonical on disk at every
+        # instant; a crash after the copy merely leaves a duplicate
+        # archive next run (the while-loop suffixes it).
+        import shutil
+        shutil.copy2(json_path, archive_json)
         if md_path.exists():
-            md_path.replace(archive_json.with_suffix(".md"))
+            shutil.copy2(md_path, archive_json.with_suffix(".md"))
         print(f"portfolio_log: archived prior same-day run -> {archive_json.name}")
 
     # Pair write: stages both tmps first, replaces JSON (canonical) then

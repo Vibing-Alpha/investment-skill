@@ -512,8 +512,84 @@ def compute_freshness_note(validation):
     return ". ".join(parts) if parts else None
 
 
-def build_scores(score_files, weights):
+def _recompute_overall_from_subscores(dim_doc):
+    """(status, value): status ∈ {"ok", "absent", "malformed"}.
+
+    "ok" → value = Σ(score×weight)/W for comparison against `overall`.
+    "absent" → no sub_scores (legacy shape) — verification skipped.
+    "malformed" → sub_scores present but unusable, INCLUDING a weight sum
+    far from 100 (probe-2 review round-3: every scoring prompt weights to
+    exactly 100, and normalizing an incomplete SUBSET let a dropped
+    30%-weight component vanish while the renormalized overall still
+    verified — silent analysis loss). Caller excludes the dimension.
+    """
+    subs = dim_doc.get("sub_scores")
+    if subs is None or "sub_scores" not in dim_doc:
+        return "absent", None   # legacy shape — key truly missing
+    if not isinstance(subs, dict) or not subs:
+        # Probe-2 review round-7: a PRESENT-but-empty (or non-dict)
+        # sub_scores block is emitted state that lost its rubric — not a
+        # legacy shape. Treating it as absent bypassed verification.
+        return "malformed", None
+    total_w = 0.0
+    acc = 0.0
+    for entry in subs.values():
+        if not isinstance(entry, dict):
+            return "malformed", None
+        s, w = entry.get("score"), entry.get("weight")
+        for v in (s, w):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not math.isfinite(v):
+                return "malformed", None
+        # Probe-2 review round-5: rubric DOMAIN — every prompt scores
+        # sub-components 1-10 with positive weights; an out-of-domain
+        # value (0, -3, 40) is corrupt output even when the arithmetic
+        # self-verifies.
+        if not (1.0 <= s <= 10.0) or not (0.0 < w <= 100.0):
+            return "malformed", None
+        acc += s * w
+        total_w += w
+    # Weights must cover the whole rubric (prompts sum to 100; small
+    # drift tolerated). A large shortfall means a component is MISSING.
+    if not (95.0 <= total_w <= 105.0):
+        return "malformed", None
+    return "ok", acc / total_w
+
+
+def _identity_mismatch(dim_name, dim_doc, expected_ticker=None):
+    """Self-declared identity check for a scores/<dim>.json payload.
+
+    Returns a reason string when the payload contradicts its slot —
+    round-12: declared ``dimension`` != filename dim (misrouted agent
+    write); round-16: declared ``ticker`` != this run's ticker (a
+    structurally valid MSFT payload in an AAPL run's forward.json was
+    weighted into AAPL's canonical BQ, then STRIP_KEYS removed the only
+    evidence). Returns None when the identity is consistent or absent
+    (legacy payloads without the fields stay accepted). ONE
+    implementation shared by build_scores (warns + excludes) and
+    build_dimensions (drops — the warning already fired).
+    """
+    if not isinstance(dim_doc, dict):
+        return None
+    declared_dim = dim_doc.get("dimension")
+    if isinstance(declared_dim, str) and declared_dim and \
+            declared_dim != dim_name:
+        return f"declares dimension={declared_dim!r}"
+    declared_ticker = dim_doc.get("ticker")
+    if (expected_ticker and isinstance(declared_ticker, str)
+            and declared_ticker
+            and declared_ticker.upper() != str(expected_ticker).upper()):
+        return (f"declares ticker={declared_ticker!r} but this run is for "
+                f"{expected_ticker!r}")
+    return None
+
+
+def build_scores(score_files, weights, expected_ticker=None):
     """Compute weighted BQ score from dimension scores.
+
+    ``expected_ticker`` (round-16): when given, a score file whose
+    self-declared ``ticker`` differs is excluded (cross-ticker agent
+    write) — same gate as the round-12 dimension-identity check.
 
     Fail-closed on empty input or fully-mismatched dimension names — main()
     guards with a ≥2 dimensions gate but defensive callers may pass junk.
@@ -545,11 +621,55 @@ def build_scores(score_files, weights):
         # NaN/Inf still flow to the finite post-condition below, which
         # fail-closes the whole score (documented behavior, unchanged).
         dim_doc = score_files[dim_name]
+        # Probe-2 review round-12: verify the artifact's SELF-DECLARED
+        # identity before weighting it. A misrouted agent write (a valid
+        # industry payload landing in forward.json) previously got
+        # weighted as forward AND kept as industry — duplicated analysis
+        # changing the canonical BQ. The identity fields are stripped
+        # later (STRIP_KEYS), so this is the only place they can gate.
+        mismatch = _identity_mismatch(dim_name, dim_doc, expected_ticker)
+        if mismatch:
+            print(
+                f"{PREFIX}: WARNING — scores/{dim_name}.json {mismatch} "
+                f"(misrouted agent write); excluded from weighted average — "
+                f"re-dispatch the {dim_name} agent",
+                file=sys.stderr,
+            )
+            continue
         overall_val = dim_doc.get("overall") if isinstance(dim_doc, dict) else None
         if isinstance(overall_val, bool) or not isinstance(overall_val, (int, float)):
             print(
                 f"{PREFIX}: WARNING — dimension '{dim_name}' has no numeric "
                 f"'overall' (got {overall_val!r}), excluded from weighted average",
+                file=sys.stderr,
+            )
+            continue
+        # Probe-2 B1: verify the LLM-authored `overall` against its own
+        # sub_scores (every scoring prompt defines overall =
+        # Σ(score×weight)/100). A plausible-but-wrong dimension total
+        # previously flowed straight into the canonical BQ. Mismatch — or
+        # a MALFORMED sub_scores block, including an incomplete weight set
+        # (round-3: a dropped 30%-weight component renormalized cleanly) —
+        # is treated exactly like a malformed dimension (warn + exclude →
+        # structured staging abort on full tier — same fail-closed contract
+        # as the declined <3-dim widening below). Only a genuinely ABSENT
+        # sub_scores block (legacy shape) skips verification.
+        sub_status, recomputed = _recompute_overall_from_subscores(dim_doc)
+        if sub_status == "malformed":
+            print(
+                f"{PREFIX}: WARNING — dimension '{dim_name}' has a "
+                f"malformed/incomplete sub_scores block (bad values or "
+                f"weights not summing to ~100); excluded from weighted "
+                f"average — re-dispatch the {dim_name} agent",
+                file=sys.stderr,
+            )
+            continue
+        if sub_status == "ok" and abs(recomputed - overall_val) > 0.06:
+            print(
+                f"{PREFIX}: WARNING — dimension '{dim_name}' overall "
+                f"{overall_val} disagrees with its sub_scores (recomputed "
+                f"{recomputed:.2f}); excluded from weighted average — "
+                f"re-dispatch the {dim_name} agent",
                 file=sys.stderr,
             )
             continue
@@ -594,10 +714,18 @@ def build_scores(score_files, weights):
     }
 
 
-def build_dimensions(score_files):
-    """Copy score files into dimensions, stripping redundant keys."""
+def build_dimensions(score_files, expected_ticker=None):
+    """Copy score files into dimensions, stripping redundant keys.
+
+    Round-16: payloads failing the identity gate are dropped here too —
+    excluding a misrouted/cross-ticker payload from the weighted score
+    while copying its full detail into ``dimensions.*`` would still feed
+    the wrong company's analysis to /portfolio's dimension reads.
+    """
     dimensions = {}
     for dim_name, data in score_files.items():
+        if _identity_mismatch(dim_name, data, expected_ticker):
+            continue
         dimensions[dim_name] = {
             k: v for k, v in data.items() if k not in STRIP_KEYS
         }
@@ -660,9 +788,12 @@ def _load_strategy_weights(strategy_path=None):
         dimensions (no missing / extra keys)
       - values are numeric, non-negative, and sum to ~1.0
 
-    Otherwise returns a copy of DEFAULT_WEIGHTS. Any I/O or parse error
-    falls back to defaults (fail-open on this optional override —
-    corrupt user config should not block the BQ pipeline).
+    ABSENT override intent (no file / no scoring section / no
+    dimension_weights key) → DEFAULT_WEIGHTS. PRESENT-but-invalid
+    override (parse error, wrong keys, bad values, bad sum) →
+    SystemExit (probe-2 round-15 F1: a typo'd override silently scored
+    with defaults — e.g. intended 0.8/0.1/0.1 on scores 10/1/1 persists
+    4.2 instead of 8.2, and only ephemeral stderr knew).
     """
     try:
         import yaml
@@ -684,23 +815,25 @@ def _load_strategy_weights(strategy_path=None):
         with open(p, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as e:
-        print(
-            f"{PREFIX}: strategy.yaml could not be parsed ({type(e).__name__}: {e}); "
-            f"falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+        # Probe-2 review round-15 F1: an unparseable strategy.yaml may hide
+        # an explicit weights override — silently scoring with defaults
+        # persists a plausible-but-wrong overall. Fail-closed.
+        raise SystemExit(
+            f"{PREFIX}: strategy.yaml could not be parsed "
+            f"({type(e).__name__}: {e}) — cannot determine whether a "
+            f"dimension_weights override exists. Fix the YAML (or remove "
+            f"the file to use DEFAULT_WEIGHTS)."
         )
-        return dict(DEFAULT_WEIGHTS)
     scoring = data.get("scoring")
     if scoring is None:
         # No scoring section — no override intent, silent default.
         return dict(DEFAULT_WEIGHTS)
     if not isinstance(scoring, dict):
-        print(
+        raise SystemExit(
             f"{PREFIX}: strategy.yaml.scoring is not a mapping "
-            f"(got {type(scoring).__name__}); falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+            f"(got {type(scoring).__name__}) — fix it or remove the "
+            f"scoring section to use DEFAULT_WEIGHTS."
         )
-        return dict(DEFAULT_WEIGHTS)
     if "dimension_weights" not in scoring:
         # scoring section exists but no dimension_weights key — questionable
         # but could just mean user set other scoring knobs. Log to be audible.
@@ -712,20 +845,17 @@ def _load_strategy_weights(strategy_path=None):
         return dict(DEFAULT_WEIGHTS)
     w = scoring.get("dimension_weights")
     if not isinstance(w, dict):
-        print(
-            f"{PREFIX}: strategy.yaml.scoring.dimension_weights is not a mapping "
-            f"(got {type(w).__name__}); falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+        raise SystemExit(
+            f"{PREFIX}: strategy.yaml.scoring.dimension_weights is not a "
+            f"mapping (got {type(w).__name__}) — fix it or remove the key "
+            f"to use DEFAULT_WEIGHTS."
         )
-        return dict(DEFAULT_WEIGHTS)
     if set(w.keys()) != set(DEFAULT_WEIGHTS):
-        print(
+        raise SystemExit(
             f"{PREFIX}: strategy.yaml.scoring.dimension_weights invalid "
-            f"(keys={sorted(w.keys())} must match {sorted(DEFAULT_WEIGHTS)}); "
-            f"falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+            f"(keys={sorted(w.keys())} must match {sorted(DEFAULT_WEIGHTS)}) "
+            f"— fix the key names or remove the key to use DEFAULT_WEIGHTS."
         )
-        return dict(DEFAULT_WEIGHTS)
     # bool is an int subclass: YAML 1.1 `yes`/`no`/`on`/`off` parse as
     # booleans and would pass a bare (int, float) check (0 <= True <= 1),
     # silently producing a 1/0/0 weighting and boolean values in the
@@ -735,21 +865,17 @@ def _load_strategy_weights(strategy_path=None):
         isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
         for v in w.values()
     ):
-        print(
+        raise SystemExit(
             f"{PREFIX}: strategy.yaml.scoring.dimension_weights invalid "
-            f"(values={dict(w)} must be numeric in [0,1]); "
-            f"falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+            f"(values={dict(w)} must be numeric in [0,1]) — fix the values "
+            f"or remove the key to use DEFAULT_WEIGHTS."
         )
-        return dict(DEFAULT_WEIGHTS)
     if abs(sum(w.values()) - 1.0) >= 0.01:
-        print(
+        raise SystemExit(
             f"{PREFIX}: strategy.yaml.scoring.dimension_weights invalid "
-            f"(sum={sum(w.values()):.4f} must be ~1.0); "
-            f"falling back to DEFAULT_WEIGHTS",
-            file=sys.stderr,
+            f"(sum={sum(w.values()):.4f} must be ~1.0) — fix the values "
+            f"or remove the key to use DEFAULT_WEIGHTS."
         )
-        return dict(DEFAULT_WEIGHTS)
     return {k: float(w[k]) for k in DEFAULT_WEIGHTS}
 
 
@@ -1079,6 +1205,19 @@ def main():
             file=sys.stderr,
         )
         sys.exit(1)
+    # Probe-2 B3: enum membership, not just equality. An unknown-but-equal
+    # tier value (e.g. a typo'd "fulll" threaded through .run_state.json)
+    # previously passed every check, mapped to ZERO fresh dims in the
+    # WebSearch-binding gate, and skipped the binding marker — fresh
+    # analysis silently mislabeled + validated legacy-lenient.
+    _TERMINAL_TIERS = ("full", "partial", "no_op")
+    if ctier not in _TERMINAL_TIERS:
+        print(
+            f"{PREFIX}: FATAL — unknown tier {ctier!r}; must be one of "
+            f"{_TERMINAL_TIERS}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if vtier != ctier:
         print(
             f"{PREFIX}: FATAL — tier mismatch: "
@@ -1139,9 +1278,9 @@ def main():
     # Assemble
     result = {
         "meta": build_meta(ticker, validation, freshness_interpretation, args.date, tier_context),
-        "scores": build_scores(score_files, weights),
+        "scores": build_scores(score_files, weights, expected_ticker=ticker),
         "synthesis": synthesis,
-        "dimensions": build_dimensions(score_files),
+        "dimensions": build_dimensions(score_files, expected_ticker=ticker),
     }
 
     # DL3c §3.7.4: propagate cert if any gated artifact was usd_converted.

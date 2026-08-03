@@ -76,10 +76,13 @@ section of summary.md.
 
 ### 0. Handle Missing Dimensions
 
-If any agent failed to produce output:
-- With 2 of 3 dimensions: proceed, but set `conviction` to no higher than "low"
-  and note the gap explicitly in synthesis
-- With 1 or 0 dimensions: do NOT produce a verdict. Report the failure.
+If any agent failed to produce output: do NOT produce a verdict — report
+which dimension is missing so the orchestrator re-dispatches that agent.
+All three dimensions are REQUIRED: the typed staging contract
+(`load_bq_analysis`) rejects a <3-dimension artifact, so a two-dimension
+synthesis cannot complete the run anyway (reviewed + declined widening —
+see `scripts/assemble.py:build_scores` docstring). A synthesis produced
+from partial dimensions would only waste the tokens before the abort.
 
 ### 1. Cross-Validate
 

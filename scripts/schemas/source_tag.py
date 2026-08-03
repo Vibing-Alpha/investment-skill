@@ -142,6 +142,15 @@ def stamp_websearch_binding(data: Mapping[str, Any]) -> dict:
     return new
 
 
+# Probe-2 review round-4: WHITELIST, not blacklist. The anti-hallucination
+# rule names four canonical KINDs; enumerating only the documented bad ones
+# ([News:] etc.) let any OTHER invented kind ([Memory:], [Recall:], ...)
+# ride beside a canonical tag. Any bracket-kind token outside the canonical
+# four is rejected (real-artifact sweep confirms only the four appear).
+_BRACKET_KIND_RE = re.compile(r"\[([A-Za-z][A-Za-z ]{0,20}):")
+_CANONICAL_KINDS = frozenset({"api", "websearch", "filing", "calc"})
+
+
 def check_source_tag(
     value: str, *, artifact: str, path: str, strict_websearch: bool = False
 ) -> None:
@@ -154,17 +163,33 @@ def check_source_tag(
     `strict_websearch=True` additionally requires every WebSearch tag in
     the value to carry the url + access-date binding (marked artifacts).
     """
-    m = SOURCE_TAG_RE.search(value)
-    if not m:
+    # Probe-2 B6 (+ round-4 whitelist): every bracket-kind token in the
+    # value must be one of the four canonical KINDs — an invented kind
+    # ([News:], [Memory:], ...) riding beside a canonical tag previously
+    # validated (search() checked only the first canonical match).
+    for _km in _BRACKET_KIND_RE.finditer(value):
+        if _km.group(1).strip().casefold() not in _CANONICAL_KINDS:
+            raise SchemaError(
+                artifact, path,
+                f"non-canonical source KIND [{_km.group(1)}:] in {value!r} — "
+                "tag by SOURCE CHANNEL ([API:]/[WebSearch:]/[Filing:]/"
+                "[Calc:]), not content type",
+            )
+    matches = list(SOURCE_TAG_RE.finditer(value))
+    if not matches:
         raise SchemaError(
             artifact, path, f"non-canonical source tag: {value!r}"
         )
-    descriptor = m.group(2).strip().casefold()
-    if descriptor in PLACEHOLDER_DESCRIPTORS:
-        raise SchemaError(
-            artifact, path,
-            f"placeholder-theater descriptor {descriptor!r} in {value!r}",
-        )
+    # Cold-round 11: validate EVERY canonical tag's descriptor, not just
+    # the first — a legit [API:] followed by a placeholder [Calc: <formula>]
+    # previously passed.
+    for m in matches:
+        descriptor = m.group(2).strip().casefold()
+        if descriptor in PLACEHOLDER_DESCRIPTORS:
+            raise SchemaError(
+                artifact, path,
+                f"placeholder-theater descriptor {descriptor!r} in {value!r}",
+            )
     if strict_websearch:
         check_websearch_binding(value, artifact=artifact, path=path)
 

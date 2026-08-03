@@ -1788,6 +1788,67 @@ _OverrideStatus = Literal[
 ]
 
 
+def derive_overall_validation_status(category_statuses: Dict) -> str:
+    """Top-level `00_validation.status` from the per-category map.
+
+    ONE implementation (producer-consumer rule #3), shared by the fetch
+    pipeline and the Step-4.5 two-phase validation merge (probe-2 C2 — the
+    merge previously kept phase-2's SUBSET-LOCAL top-level status as
+    terminal truth, so a clean merged category map stayed labeled PARTIAL
+    and contradicted its own categories).
+
+    Matrix (unchanged semantics, extracted from the inline block):
+    - critical categories = price / metrics / financials / filing; any
+      FAILED or CIRCUIT_BREAKER → FAILED; all PASSED → PASSED; any
+      INCOMPLETE → INCOMPLETE; else PARTIAL. eps_validation contributes
+      when non-PASSED/non-SKIPPED (ISS-120 lineage).
+    - non-critical categories (historical/macro_rates/company/news/insider/
+      analyst_estimates/earnings/institutional/segmented_revenues/
+      growth_stock_mode) downgrade a top-level PASSED to PARTIAL when
+      FAILED/PARTIAL/INCOMPLETE (ISS-120/130/131, ISS-220 4.26) —
+      "PASSED means everything attempted succeeded".
+    """
+    def _st(key):
+        entry = category_statuses.get(key)
+        return entry.get("status") if isinstance(entry, dict) else None
+
+    critical_statuses = [
+        _st("price"), _st("metrics"), _st("financials"), _st("filing"),
+    ]
+    eps_status = _st("eps_validation")
+    if eps_status and eps_status not in ("PASSED", "SKIPPED"):
+        critical_statuses.append(eps_status)
+
+    if "FAILED" in critical_statuses or "CIRCUIT_BREAKER" in critical_statuses:
+        final_status = "FAILED"
+    elif any(s is None for s in critical_statuses):
+        # Round-25 F3: a MISSING critical category must not vacuous-pass.
+        # The old `if s` filter dropped absent entries before the all(),
+        # so derive({}) — or a truncated map keeping only filing:PASSED —
+        # returned PASSED, certifying data sources that were never
+        # validated. Absent critical evidence = INCOMPLETE.
+        final_status = "INCOMPLETE"
+    elif all(s == "PASSED" for s in critical_statuses):
+        final_status = "PASSED"
+    elif "INCOMPLETE" in critical_statuses:
+        final_status = "INCOMPLETE"
+    else:
+        final_status = "PARTIAL"
+
+    non_critical_keys = (
+        "historical", "macro_rates", "company", "news", "insider",
+        "analyst_estimates", "earnings", "institutional",
+        "segmented_revenues",
+        "growth_stock_mode",
+    )
+    if final_status == "PASSED":
+        for nk in non_critical_keys:
+            if _st(nk) in ("FAILED", "PARTIAL", "INCOMPLETE"):
+                final_status = "PARTIAL"
+                break
+    return final_status
+
+
 def _derive_category_status(
     result=None,
     *,
@@ -3772,66 +3833,7 @@ def _main_impl(
     # This means final_status may report FAILED for a category that yfinance
     # actually backfilled. A proper fix would re-evaluate each category status
     # after fallback, but that requires non-trivial refactoring.
-    critical_statuses = [
-        category_statuses.get("price", {}).get("status"),
-        category_statuses.get("metrics", {}).get("status"),
-        category_statuses.get("financials", {}).get("status"),
-        category_statuses.get("filing", {}).get("status"),
-    ]
-    # EPS validation contributes to overall status (any non-PASSED -> PARTIAL)
-    eps_status = category_statuses.get("eps_validation", {}).get("status")
-    if eps_status and eps_status not in ("PASSED", "SKIPPED"):
-        critical_statuses.append(eps_status)
-
-    if "FAILED" in critical_statuses or "CIRCUIT_BREAKER" in critical_statuses:
-        final_status = "FAILED"
-    elif all(s == "PASSED" for s in critical_statuses if s):
-        final_status = "PASSED"
-    elif "INCOMPLETE" in critical_statuses:
-        final_status = "INCOMPLETE"
-    else:
-        final_status = "PARTIAL"
-
-    # ISS-120 (Loop8 cycle 2): non-critical category failures must also
-    # downgrade PASSED → PARTIAL. Pre-fix only `historical` was wired
-    # to downgrade; macro_rates / news / insider / analyst_estimates /
-    # earnings / institutional / company FAILED would silently leave
-    # final_status PASSED. Loop8 cycle 1 ISS-103 fixed
-    # `macro_combined_status` per-category but the user-facing
-    # `final_status` still hid it. Now any non-critical category that's
-    # FAILED, PARTIAL, or INCOMPLETE downgrades a top-level PASSED to
-    # PARTIAL — preserves the strict "PASSED means everything attempted
-    # succeeded" semantics consumers rely on.
-    #
-    # ISS-130 (Loop9 cycle 1): keys must match the ACTUAL strings written
-    # by the per-category dispatch above — the real keys are
-    # `analyst_estimates` (not "analyst") and `segmented_revenues` (not
-    # "segmented"); my Loop8c2 placeholders silently never matched, so
-    # those two categories' failures still slipped through. Verified
-    # by grep over fetch.py for `category_statuses["..."]` writes.
-    #
-    # ISS-131 (Loop9 cycle 1): include `historical` in this loop so
-    # PARTIAL/INCOMPLETE historical states also downgrade — pre-fix
-    # only the special-cased FAILED branch handled historical, leaving
-    # PARTIAL/INCOMPLETE invisible at the top level.
-    # ISS-220 4.26 (Loop36 cycle 1): include `growth_stock_mode`.
-    # Pre-fix when `detect_growth_stock_mode` swallowed an exception
-    # and emitted `status=FAILED` (ISS-198 Loop28), the FAILED state
-    # was invisible at top level — final_status stayed PASSED. Add to
-    # non_critical_keys so a compute-time growth-stock-detection
-    # failure surfaces as PARTIAL (informational signal to operator).
-    non_critical_keys = (
-        "historical", "macro_rates", "company", "news", "insider",
-        "analyst_estimates", "earnings", "institutional",
-        "segmented_revenues",
-        "growth_stock_mode",
-    )
-    if final_status == "PASSED":
-        for nk in non_critical_keys:
-            nk_status = category_statuses.get(nk, {}).get("status")
-            if nk_status in ("FAILED", "PARTIAL", "INCOMPLETE"):
-                final_status = "PARTIAL"
-                break
+    final_status = derive_overall_validation_status(category_statuses)
 
     # 00_validation.json -- ALWAYS written (even for subset fetches).
     validation_data = {

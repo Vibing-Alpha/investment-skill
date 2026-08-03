@@ -33,6 +33,20 @@ _RATE_MIN_PCT = 0.0
 _RATE_MAX_PCT = 25.0
 
 
+def rate_in_percent_domain(v) -> bool:
+    """True iff v is a plausible central-bank policy rate in PERCENT units.
+
+    Round-20 F1: shared with the LIVE fetch path in scripts/macro.py —
+    the [0, 25] unit gate previously existed only on the disk-cache load,
+    so a provider unit drift (basis points: rate=375.0) rode the live
+    path into macro.json as fed_funds under rates_status PASSED.
+    """
+    return (
+        isinstance(v, (int, float)) and not isinstance(v, bool)
+        and math.isfinite(v) and _RATE_MIN_PCT <= v <= _RATE_MAX_PCT
+    )
+
+
 @dataclass(frozen=True)
 class CentralBankRate:
     bank: str

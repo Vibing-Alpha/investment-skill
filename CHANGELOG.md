@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.1 — 2026-08-03
+
+- Hardening release: cold-review rounds 15-28 (12 fix commits) — FX/quote correctness (current_investments FX conversion, bool-as-number gates, finite-positive price/MA/regime gates, FED-rate unit domain), fail-closed config/identity (invalid dimension_weights refusal, cross-ticker score gate), orchestration abort-window consistency (exit guards, --no-completed stamping, copy-first archive, partial-stress refusal, run_meta writer preservation), delta/calendar gates (classifier shape, events structural floor chain, holiday-coverage warning, no vacuous PASSED).
+
 ## v1.7.0 — 2026-08-03
 
 - Fix live PEG-horizon defect: peer pegRatio (5y-expected basis) can no longer be crossed with 1y growth to imply a fair-value anchor; peers.py emits a per-field basis map + fetched_at

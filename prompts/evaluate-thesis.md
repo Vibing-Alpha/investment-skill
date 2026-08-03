@@ -199,7 +199,11 @@ get ER and max_downside right; CE follows mechanically. It will be null whenever
 ER is null. Understand the formula above so your narrative is consistent with the
 sign (a negative ER ⇒ negative CE ⇒ unfavorable risk/reward).
 
-ER and max_downside must carry source tags per anti-hallucination rules.
+ER and max_downside must carry source tags per anti-hallucination rules —
+emit them in `calculation_audit.expected_return_source` /
+`calculation_audit.max_downside_source` (the canonical placement; the
+typed loader REQUIRES a source for each non-null value on
+binding-marked artifacts).
 
 **When ER / CE are NOT computable — emit `null`, never a placeholder.**
 If `valuation.json` has no per-share fair value (all scenario targets `null` —
@@ -268,6 +272,10 @@ actually monitor.
   "key_uncertainties": ["Most important unknowns that could shift the thesis"],
   "expected_return": 18.5,
   "max_downside": -22.0,
+  "calculation_audit": {
+    "expected_return_source": "[Calc: prob_weighted_target 190.2 / price 160.5 - 1; targets from valuation.json scenarios]",
+    "max_downside_source": "[Calc: bear_target 125.2 / price 160.5 - 1]"
+  },
   "conflicts_resolved": [
     {
       "conflict": "Description of signal conflict",

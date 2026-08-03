@@ -77,6 +77,15 @@ the latest fundamentals:
 - `P/S = current_market_cap / TTM_revenue`, `P/B = current_market_cap /
   total_equity`, `EV/EBITDA = (current_market_cap + net_debt) / TTM_EBITDA`,
   `P/E = current_price / TTM_EPS`.
+- **Non-positive denominators are method EXCLUSIONS, not computations**:
+  `total_equity <= 0` (legitimate for buyback-heavy issuers) → exclude P/B
+  with reason "negative shareholders_equity"; `TTM_EBITDA <= 0` /
+  `TTM_EPS <= 0` → exclude that method likewise. Never present a
+  negative multiple as "cheap", and never divide by a near-zero
+  denominator to produce a four-digit-plus multiple — the
+  historical_multiples producer withholds such windows with a
+  denominator-fragile warning; mirror that treatment for your own
+  current-multiple derivations.
 
 If `01_price_data.json` carries a `snapshot.market_cap_reconciliation`
 block (nested under `snapshot`, NOT at the root; status
@@ -156,9 +165,13 @@ isolation is meaningless — context is everything.
    it from `implied_fair_value` or cite it explicitly as a single-source
    reference (name the USD peer contributing that metric — `medians` aggregates
    USD peers only, so do not name a non-USD peer from the `peers` dict) and
-   lower `confidence`. Prefer methods with
-   `n >= 3`. This is comparability transparency, not a substitute for your own
-   judgment about which peers belong in the cohort.
+   lower `confidence`. **`n == 2` gets the SAME non-anchor treatment as
+   `n == 1`** — a two-contributor "median" is the midpoint of two companies,
+   not a cohort statistic: cite the two contributors explicitly, do not use
+   it for `implied_fair_value.at_peer_median`, and lower `confidence`. Only
+   `n >= 3` medians qualify as peer anchors. This is comparability
+   transparency, not a substitute for your own judgment about which peers
+   belong in the cohort.
 
    **Producer USD-uniformity certificate (DL3b):** when `medians_currency` is present,
    the `medians` field is guaranteed to aggregate only over USD-denominated peers; the

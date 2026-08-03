@@ -173,7 +173,15 @@ Read `<captured-abs-ROOT>/strategy.yaml`. Extract the `principles:` field.
    their freshness is handled by the content comparison in step 2 below, so a
    notes-only edit still propagates without touching the hash.)
 2. If hash matches: read cached `hard_constraints`, `soft_principles`,
-   and `principle_notes`. **Notes-freshness guard:** because `source_hash`
+   and `principle_notes`. **Cache-hit disclosure (probe-2 A4):** the
+   `source_hash` covers the extraction INPUT (principles), not the
+   extracted constraints — a bad prior extraction persists as long as the
+   principles text is unchanged. So on every cache hit, RELAY the cached
+   constraints to the user in one line (e.g. "使用缓存约束:
+   max_single_position=0.35, min_cash=0.20, max_holdings=8") — and if
+   `hard_constraints` is EMPTY, say explicitly that NO numeric floors
+   will be enforced this run so the user can catch a lost constraint and
+   ask for a recompile. **Notes-freshness guard:** because `source_hash`
    does NOT cover `principle_notes`, after a hash match ALSO compare
    `strategy.yaml`'s `principle_notes` against the compiled file's; if they
    differ in ANY way — missing, empty, OR edited (a `framework` /
@@ -665,19 +673,26 @@ silently); the Write tool sidesteps all of it. Content shape:
 (`candidate_scan` is REQUIRED when `orders_proposed` is empty — Phase 3
 zero-order discipline.)
 
-Then call the logger:
+Then call the logger. If the write command fails (the `|| { …; exit 1; }`
+guard fires), STOP — the refusal reason is on stderr, the validator
+output is preserved for the re-run, and NO decision log exists yet:
 
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+# Round-20 F4: the exit code MUST be checked — a cmd_write refusal
+# (blob shape violation, missing rationale/principle) writes NO
+# decisions.json, and the unconditional rm below would then delete the
+# only constraint/stress evidence while the block exits 0.
 "$PYBIN" -m scripts.portfolio_log write \
   --decisions-blob "reports/portfolio/$ETDAY/.decisions_blob.json" \
   --state portfolio-state.yaml \
   --macro "reports/portfolio/$ETDAY/macro.json" \
   --constraints strategy.compiled.yaml \
   --stress-test "reports/portfolio/$ETDAY/.validator_output.json" \
-  --output-dir "reports/portfolio/$ETDAY"
+  --output-dir "reports/portfolio/$ETDAY" \
+  || { echo "FATAL: portfolio_log write REFUSED — decisions.json was NOT written. The validator output is KEPT at reports/portfolio/$ETDAY/.validator_output.json; fix the decisions blob per the stderr above and re-run THIS step (do not proceed)." >&2; exit 1; }
 
 # Clean up the validator output (its content is now in decisions.json).
 # $ETDAY is re-derived in THIS block (Step 6's shell variables do not

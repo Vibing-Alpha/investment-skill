@@ -186,7 +186,8 @@ def assert_portfolio_state_ok(root: Path) -> None:
         return (isinstance(o, dict) and isinstance(o.get("ticker"), str) and o["ticker"].strip()
                 and isinstance(o.get("type"), str) and _is_pos_num(o.get("shares"))
                 and (_is_pos_num(o.get("price")) or _is_pos_num(o.get("est_price"))
-                     or _is_pos_num(o.get("limit_price"))))
+                     or _is_pos_num(o.get("limit_price"))
+                     or _is_pos_num(o.get("stop_price"))))
     orders_ok = open_orders is None or (isinstance(open_orders, list) and all(_order_ok(o) for o in open_orders))
     cash = pstate.get("cash")
     if not (_is_finite_num(cash) and cash >= 0 and holdings_ok and watchlist_ok and orders_ok):

@@ -225,7 +225,9 @@ Write a JSON file with this structure:
 }
 ```
 
-Note: `peer_tickers` lists 3-5 closest publicly traded competitors. This is
+Note: `peer_tickers` lists 3-5 closest publicly traded competitors —
+NEVER the analyzed company itself (a self-entry contaminates the peer
+median downstream). This is
 output for potential use by downstream modules (timing, valuation), not consumed
 within the current analysis. Tickers must be yfinance-compatible: use US tickers
 for NYSE/NASDAQ-listed companies, or add the exchange suffix for non-US stocks

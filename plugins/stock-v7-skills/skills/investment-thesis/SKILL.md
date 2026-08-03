@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -368,6 +368,13 @@ GATES_PASSED=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_
     --gates-passed "$GATES_PASSED"
 ```
 
+If this command exits non-zero with `REFUSED: prior events.json … is
+binding-marked but missing sections`, the prior is an aborted partial
+artifact (round-24) — do NOT treat the run as failed: switch to the
+`rerun` branch below exactly as if the decision had been `rerun`
+(clear `events.json`, dispatch the events agent, write the rerun
+audit).
+
 If `rerun`: FIRST clear the stale destination — `rm -f
 "$REPORT_DIR/events.json"` (cold-round 7: the session dir is reused, so
 if the events agent fails to write, an earlier same-session events.json
@@ -443,7 +450,7 @@ except Exception:
     sys.exit(1)
 ga = m.get('generated_at') if isinstance(m, dict) else None
 sys.exit(0 if (ga and _safe_normalize_to_et_date(ga)) else 1)
-" || { echo "[fatal] stamp_events_meta failed AND the agent fallback generated_at is missing/unnormalizable — events.json would hard-fail Step 6.5. Aborting." >&2; exit 1; }
+" || { "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] stamp_events_meta failed AND the agent fallback generated_at is missing/unnormalizable — events.json would hard-fail Step 6.5. run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Aborting." >&2; exit 1; }
 fi
 ```
 
@@ -466,13 +473,24 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
 import json, sys
 from scripts.schemas.source_tag import validate_source_tags, websearch_binding_active
 data = json.load(open('$REPORT_DIR/events.json', encoding='utf-8'))
+# Round-15 F7: structural floor — a parseable, stamped events.json that
+# DROPPED its body sections previously passed vacuously; the next run's
+# probe then read the missing catalyst_calendar as [] = 'no catalysts'
+# and the artifact stayed reuse-eligible for 7 days. Require the
+# sections downstream consumers read (probe: catalyst_calendar; thesis
+# synthesis: signals/bias/density/macro_context/confidence).
+from scripts.thesis.reuse_events import EVENTS_STRUCTURAL_FLOOR
+missing = [k for k in EVENTS_STRUCTURAL_FLOOR if k not in data]
+if missing:
+    print(f'FATAL: events.json is missing required sections {missing} — the events agent dropped part of the contracted output.', file=sys.stderr)
+    sys.exit(1)
 try:
     validate_source_tags(data, artifact='events',
                          strict_websearch=websearch_binding_active(data, artifact='events'))
 except ValueError as e:
     print(f'FATAL: events.json WebSearch source-binding validation failed: {e}', file=sys.stderr)
     sys.exit(1)
-" || { echo "[fatal] events.json failed WebSearch source-binding validation — every [WebSearch:] tag in fresh events output must bind outlet + url + access-date. Re-dispatch the events agent with the error above." >&2; exit 1; }
+" || { "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] events.json failed its structural floor or WebSearch source-binding validation — a fresh events output must carry all contracted sections and bind every [WebSearch:] tag (outlet + url + access-date). run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Re-dispatch the events agent with the error above; if it fails again, STOP." >&2; exit 1; }
 ```
 
 ### Step 5: Valuation + Technical (always fresh)
@@ -502,7 +520,8 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
 # 445 vs 436). The computation is pure + instant; recompute is always safe.
 "$PYBIN" -m scripts.indicators \
   --price-json "$REPORT_DIR/data/01_price_data.json" \
-  --output "$REPORT_DIR/data/indicators.json"
+  --output "$REPORT_DIR/data/indicators.json" \
+  || { echo "FATAL: indicators recompute failed — the current price artifact is unusable, and proceeding would let a PRIOR same-session indicators.json (computed from a different price series) survive as if current. Fix 01_price_data.json (re-run the probe/fetch) before continuing." >&2; exit 1; }
 
 # Clear THIS run's valuation producer outputs first. $REPORT_DIR is reused for
 # the whole session date, so a same-day rerun can leave stale artifacts. Without
@@ -563,6 +582,10 @@ printf 'BQ_DIR=%s\n' "$BQ_DIR"
 import json, subprocess, sys
 with open('$BQ_DIR/bq_analysis.json', encoding='utf-8') as f:
     pts = json.load(f).get('dimensions',{}).get('industry',{}).get('peer_tickers',[])
+# Probe-2 review round-9: the SUBJECT must never sit in its own peer set —
+# it contaminates the median and can promote a 2-competitor median into an
+# apparently qualified n>=3 anchor.
+pts = [t for t in pts if isinstance(t, str) and t.upper() != '$TICKER']
 if pts:
     subprocess.run([sys.executable, '-m', 'scripts.peers', '--tickers'] + pts +
                    ['--output', '$REPORT_DIR/data/peer_multiples.json'], check=True)
@@ -634,6 +657,47 @@ the Agent V / Agent T dispatches — the evidence layer is lens-free by design;
 the user lens applies only at Step 6 synthesis. A pre-lensed `technical.json`
 (e.g. `entry_favorability` conditioned on the user's entry discipline) would
 double-lens the synthesis and contaminate the objective evidence base.
+
+**Hard-gate both deliverables before Step 6** (cold-round 10: the files are
+cleared pre-dispatch, so a missed agent write would otherwise flow into
+synthesis as a silently missing analysis axis — parseability is checked too,
+since a truncated Write is non-empty but unusable). If a gate fires,
+RE-DISPATCH that agent ONCE; if it fails again, **STOP** and surface the
+failure:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+for f in valuation.json technical.json; do
+  [ -s "$REPORT_DIR/$f" ] \
+    || { echo "FATAL: $f missing/empty after agent dispatch — re-dispatch that agent" >&2; exit 1; }
+done
+# Structural floor (cold-round 11): parseable + the prompt's top-level
+# sections present. NOT a full schema (deliberate — these are rich LLM
+# artifacts and the synthesis agent reads them in depth); the floor
+# catches a semantically hollow response that non-empty+parse alone
+# passed.
+"$PYBIN" -c "
+import json, sys
+req = {
+    'valuation.json': ['method_screen', 'multiples', 'scenarios',
+                       'convergence', 'valuation_stance'],
+    'technical.json': ['trend', 'momentum', 'timing_assessment'],
+}
+bad = []
+for fname, keys in req.items():
+    d = json.load(open('$REPORT_DIR/' + fname, encoding='utf-8'))
+    missing = [k for k in keys if k not in d]
+    if missing:
+        bad.append(f'{fname} missing {missing}')
+if bad:
+    print('FATAL: hollow agent deliverable — ' + '; '.join(bad) +
+          ' — re-dispatch that agent', file=sys.stderr)
+    sys.exit(1)
+"
+```
 
 Both agents MUST first read
 `<captured-abs-ROOT>/.claude/skills/investment-thesis/gotchas.md` for their
@@ -777,7 +841,13 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 if ! "$PYBIN" -m scripts.schemas.investment_thesis "$REPORT_DIR/investment_thesis.json"; then
-  echo "[fatal] investment_thesis.json failed contract validation — see SchemaError above. Aborting run." >&2
+  # Round-20 F3: this run already REPLACED the canonical artifact with its
+  # invalid output, but run_meta may still carry an earlier same-day run's
+  # thesis completed=true — stamp the section incomplete so the resolver
+  # cannot serve the invalid artifact as a fresh completed thesis.
+  "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" \
+    --ticker "$TICKER" --skill investment-thesis --no-completed || true
+  echo "[fatal] investment_thesis.json failed contract validation — see SchemaError above. run_meta.thesis stamped NOT-completed. Aborting run." >&2
   exit 1
 fi
 ```

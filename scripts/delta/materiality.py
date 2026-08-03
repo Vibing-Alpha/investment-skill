@@ -137,6 +137,23 @@ def validate_classifier_output(raw: dict) -> ClassifierOutput:
             raise ValueError(
                 f"{count_key} must be an integer, got {type(v).__name__}"
             )
+    # Round-19: the list fields must BE lists — `list({})` silently turned
+    # a shape-drifted dict into [] (count==len passes at 0), and the health
+    # ints accepted bool (int subclass), so `total_articles: true` read as
+    # 1 article → input_healthy fabricated → tier no_op / events reuse on
+    # schema-invalid classifier output.
+    for list_key in ("material_list", "low_signal_headlines"):
+        if not isinstance(raw[list_key], list):
+            raise ValueError(
+                f"{list_key} must be a list, got {type(raw[list_key]).__name__}"
+            )
+    for health_int_key in ("total_articles", "sources_with_content"):
+        hv = h[health_int_key]
+        if isinstance(hv, bool) or not isinstance(hv, int):
+            raise ValueError(
+                f"classifier_input_health.{health_int_key} must be an "
+                f"integer, got {type(hv).__name__}"
+            )
     if raw["material_count"] != len(raw["material_list"]):
         raise ValueError(
             f"material_count={raw['material_count']} disagrees with "

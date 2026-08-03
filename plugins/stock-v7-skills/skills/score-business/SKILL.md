@@ -75,7 +75,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -245,6 +245,11 @@ printf 'TIER=%s\n' "$TIER"
 
 ### Step 3: Tier-specific fetch + agents
 
+> If any Bash block in this step exits non-zero — including the validation
+> merge (`FATAL: validation merge failed`) — show its stderr to the user and
+> **STOP**: proceeding past a failed merge would let later steps consume a
+> phase-2 file whose SKIPPED stubs erased the phase-1 degradation record.
+
 **If `no_op`:** copy remaining categories + prior scores + prior dimensions from the prior run. Skip dim agents.
 
 ```bash
@@ -281,15 +286,24 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 
-# Save phase 1's validation before phase 2 fetch (merge in Step 4.5).
-# Use a run-scoped transient dotfile in $REPORT_DIR, NOT /tmp/...$$ — the
-# Step 3 save and the Step 4.5 merge run in SEPARATE shells (agent dispatch
-# happens between them), so a $$ (PID) name would not match across calls.
+# Save phase 1's validation before phase 2 fetch (merged right below).
 cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided partial
+
+# Merge the two-phase validation IMMEDIATELY (probe-2 C1 — previously this
+# ran as Step 4.5 AFTER the synthesis agent, so synthesis read the
+# phase-2-SKIPPED-stubbed file and mislabeled clean phase-1 data as
+# SKIPPED/PARTIAL in its freshness narrative). Merging here means
+# 00_validation.json is whole before ANY agent runs. Exit-gated with ||
+# (forty-sixth cold round): set -e is INERT in interactive harness shells.
+"$PYBIN" -m scripts.score_business.validation_merge \
+    --phase1 "$REPORT_DIR/.validation_phase1.json" \
+    --phase2 "$REPORT_DIR/data/00_validation.json" \
+    || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
+rm -f "$REPORT_DIR/.validation_phase1.json"
 
 # Copy fundamental dim from prior
 "$PYBIN" -c "
@@ -317,6 +331,18 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided full
+
+# Merge the two-phase validation IMMEDIATELY (probe-2 C1 — previously this
+# ran as Step 4.5 AFTER the synthesis agent, so synthesis read the
+# phase-2-SKIPPED-stubbed file and mislabeled clean phase-1 data as
+# SKIPPED/PARTIAL in its freshness narrative). Merging here means
+# 00_validation.json is whole before ANY agent runs. Exit-gated with ||
+# (forty-sixth cold round): set -e is INERT in interactive harness shells.
+"$PYBIN" -m scripts.score_business.validation_merge \
+    --phase1 "$REPORT_DIR/.validation_phase1.json" \
+    --phase2 "$REPORT_DIR/data/00_validation.json" \
+    || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
+rm -f "$REPORT_DIR/.validation_phase1.json"
 
 "$PYBIN" -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
   --output "$REPORT_DIR/data/indicators.json"
@@ -363,8 +389,9 @@ shell's variables nor its cwd, and `.json` writes via the Write tool are allowed
 Agent inputs as in pre-delta (02_financial for fundamental; 06+03+05+07 for
 forward; 02+03 + WebSearch for industry), read from
 `<captured-abs-ROOT>/<REPORT_DIR>/data/`. Follow this input list verbatim — do
-NOT add `00_validation.json` (between phase 2 and the Step 4.5 merge it is
-phase-2-SKIPPED-stubbed and would mislead the agents).
+NOT add `00_validation.json` (the dimension agents' input contract is
+deliberately data-only; validation state is the synthesis agent's read, and
+the two-phase merge in Step 3 already ran so the file is whole).
 
 The forward + industry agents MUST have WebSearch access — their prompts
 carry a fail-closed preflight (one real WebSearch call before any
@@ -450,40 +477,15 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
   || { echo "FATAL: synthesis produced no synthesis.json — re-dispatch synthesis agent" >&2; exit 1; }
 ```
 
-### Step 4.5: Merge two-phase validation (before assemble)
+### Step 4.5: Merge two-phase validation — MOVED to Step 3
 
-If tier > no_op, phase 2 overwrote `00_validation.json` with only its own
-category_statuses. Merge phase 1's entries back so assembler's
-`build_meta` can read `categories.financials.latest_period`:
-
-```bash
-cd "<captured-abs-ROOT>"
-PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-TICKER="<TICKER>"
-REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
-TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
-if [ "$TIER" != "no_op" ]; then
-# The merge MUST be exit-gated with || (forty-sixth cold round): a failed
-# merge (missing/malformed phase-1 file) followed by the rm below read as
-# success — set -e is INERT in interactive harness shells — and assemble
-# then consumed the UNMERGED phase-2 file, whose SKIPPED stubs erased the
-# phase-1 degradation record entirely.
-"$PYBIN" -m scripts.score_business.validation_merge \
-    --phase1 "$REPORT_DIR/.validation_phase1.json" \
-    --phase2 "$REPORT_DIR/data/00_validation.json" \
-    || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
-# In-place merge: phase 2's SKIPPED stubs that would have clobbered
-# phase 1's live entries are reverted to phase 1's PASSED/WARN data.
-# Top-level fields (tier_decided, validated_at) keep phase 2's value
-# as terminal truth.
-rm -f "$REPORT_DIR/.validation_phase1.json"
-fi
-```
-
-If the merge command exits non-zero, show its stderr to the user and
-**STOP** — do not run assemble: an unmerged phase-2 file carries SKIPPED
-stubs where phase 1 recorded real losses, so proceeding would erase the
-degradation record the gate depends on.
+The two-phase merge now runs at the END of Step 3, immediately after the
+phase-2 fetch (probe-2 C1: it previously ran here — AFTER the synthesis
+agent had already read the phase-2-stubbed 00_validation.json and
+mislabeled clean phase-1 categories as SKIPPED in its freshness
+narrative). Nothing to do in this step; if `.validation_phase1.json`
+still exists at this point, Step 3's merge did not run — STOP and re-run
+the Step 3 merge block before assembling.
 
 ### Step 5: Assemble
 
@@ -521,10 +523,16 @@ cat > "$TIER_CONTEXT_JSON" <<TIER_CONTEXT_JSON_EOF
 }
 TIER_CONTEXT_JSON_EOF
 
-# 3) Run assembler (cross-checks both sources, aborts on mismatch)
+# 3) Run assembler (cross-checks both sources, aborts on mismatch).
+# Round-16: the exit code MUST be checked — on a same-day rerun the
+# assembler fail-closes by KEEPING the prior canonical bq_analysis.json,
+# so without this gate the loader below happily validates the STALE
+# artifact, Step 6 records completed=true, and a failed refresh
+# masquerades as the current run.
 "$PYBIN" -m scripts.assemble \
   --report-dir "$REPORT_DIR" \
-  --tier-context-json "$TIER_CONTEXT_JSON"
+  --tier-context-json "$TIER_CONTEXT_JSON" \
+  || { rm -f "$TIER_CONTEXT_JSON"; echo "FATAL: scripts.assemble failed — the canonical bq_analysis.json (if present) is a PRIOR run's artifact, not this run's. Fix the failed score/synthesis input and re-run; do NOT record this run as completed." >&2; exit 1; }
 
 rm "$TIER_CONTEXT_JSON"
 

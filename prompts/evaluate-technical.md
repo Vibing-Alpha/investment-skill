@@ -15,13 +15,16 @@ the technical picture so downstream agents can use it for sizing, timing, and ri
   - `historical.weekly`: ~104 bars (2yr), same OHLCV format
 - `data/indicators.json` — pre-computed by `scripts/indicators.py`:
   - `macd`: `{macd_line, signal_line, histogram, crossover, hist_trend, zero_side}`
-    - `hist_trend` ∈ `expanding|contracting|flat|reversal`
+    - `hist_trend` ∈ `expanding|contracting|flat|reversal|insufficient_data`
       - `reversal` = histogram changed sign between the last two bars
         (zero-crossing). Treat as inflection, not a fade — concurrent
         with `crossover=golden|death`.
       - `expanding`/`contracting` compare `|hist_t|` vs `|hist_{t-1}|` in
         the same-sign case only.
-    - `zero_side` ∈ `above|below` — `below` also covers the exact-zero edge
+    - `zero_side` ∈ `above|below|insufficient_data` — `below` also covers the exact-zero edge
+    - when the numeric fields are null (short price history), ALL
+      categorical fields read `insufficient_data` — treat MACD as
+      UNKNOWN, never as flat/bearish
     - Implementation detail: SMA-seeded EMA (standard across most retail
       platforms). May differ in the initial ~3×period bars from Wilder-
       seeded implementations; values converge thereafter.
@@ -30,8 +33,10 @@ the technical picture so downstream agents can use it for sizing, timing, and ri
       (relative compression). This is separate from absolute-bandwidth buckets
       (`tight`/`normal`/`wide`) — a band can be `squeeze=true` while `width_pct`
       is still in the `normal` range.
-    - `position` ∈ `above_upper|upper_half|middle|lower_half|below_lower`
-      (`middle` appears when `std==0`, i.e., all window values are identical)
+    - `position` ∈ `above_upper|upper_half|middle|lower_half|below_lower|insufficient_data`
+      (`middle` appears when `std==0`, i.e., all window values are identical;
+      `insufficient_data` + null bands + `squeeze=null` = short history —
+      treat Bollinger as UNKNOWN, never as lower-half positioning)
   - `atr`: `{atr_14, atr_pct, stop_1x, stop_1_5x, stop_2x}`
   - `rsi`: `{rsi, avg_gain, avg_loss}`
   - `rsi_divergence`: `bullish_divergence|bearish_divergence|none|insufficient_data`

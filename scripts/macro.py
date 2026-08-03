@@ -146,6 +146,12 @@ def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _fin_pos_close(c) -> bool:
+    """Finite-positive close gate for display/MA series (round-24 F2)."""
+    from scripts.indicators import _fin_pos
+    return _fin_pos(c)
+
+
 def _sma_rounded(closes, period):
     """Simple moving average over the last *period* closes, rounded to 2dp."""
     if period < 1 or len(closes) < period:
@@ -221,8 +227,13 @@ def _anchored_series(ohlcv, anchor_iso):
     an early-close calendar is machinery without a named real failure.
     """
     closes_thru, close_at = [], None
+    from scripts.indicators import _fin_pos
     for ts_i, c in zip(ohlcv.get("timestamp") or [], ohlcv.get("close") or []):
-        if c is None:
+        # Round-20 F2: gate on finite-POSITIVE, not just non-None — a
+        # provider missing-value drift encoded as numeric 0.0 previously
+        # entered the series and read as a subdued VIX close (0.0 < ma20),
+        # flipping the deterministic regime to risk_on.
+        if not _fin_pos(c):
             continue
         d = _et_date_iso(ts_i)
         if d is None or d > anchor_iso:
@@ -327,10 +338,18 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
         ohlcv["timestamp"] = timestamps
         rmp = meta.get("regularMarketPrice")
         rmt = meta.get("regularMarketTime")
-        # Last bar with a non-null close, positionally aligned with timestamp.
+        # Round-21 F1: a non-positive/non-finite meta quote is not a price —
+        # a provider-bugged rmp=-1.0 with a newer timestamp previously beat
+        # a valid positive chart bar and shipped as the current price under
+        # PASSED. Same gate on the bar-close candidates.
+        from scripts.indicators import _fin_pos as _fp
+        if rmp is not None and not _fp(rmp):
+            rmp = None
+        # Last bar with a usable (finite-positive) close, positionally
+        # aligned with timestamp.
         last_bar_ts, last_bar_close = None, None
         for ts_i, close_i in zip(timestamps, ohlcv["close"]):
-            if close_i is not None:
+            if _fp(close_i):
                 last_bar_ts, last_bar_close = ts_i, close_i
 
         # Timestamp-aware pick (feedback 2026-06-11 #1): Yahoo's meta quote
@@ -531,6 +550,27 @@ def _fetch_rates_live():
         for r in rates:
             if r.get("bank") == "FED":
                 rate_val = r.get("rate")
+                # Round-20 F1: the [0,25] percent-unit domain gate existed
+                # only on the disk-cache load path — a live provider unit
+                # drift (basis points: 375.0) shipped as fed_funds under
+                # PASSED. One implementation: schemas.macro_rates owns the
+                # domain.
+                from scripts.schemas.macro_rates import rate_in_percent_domain
+                if rate_val is not None and not rate_in_percent_domain(rate_val):
+                    print(
+                        f"[WARN] Live FED rate {rate_val!r} outside percent "
+                        f"domain [0, 25] (unit drift?) — discarding live "
+                        f"value, treating rates as FAILED.",
+                        file=sys.stderr,
+                    )
+                    return None, {
+                        "status": "FAILED",
+                        "error_code": "unit_domain",
+                        "error_detail": (
+                            f"FED rate {rate_val!r} outside percent domain "
+                            f"[0, 25]"
+                        ),
+                    }
                 if rate_val is not None:
                     return (
                         {"fed_funds": rate_val, "source": "financial_datasets_api"},
@@ -648,7 +688,10 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         # status) — the middle slot can be a LIST, not the OHLCV dict.
         if not isinstance(ohlcv_i, dict):
             ohlcv_i = {}
-        closes = [c for c in (ohlcv_i.get("close") or []) if c is not None]
+        # Round-24 F2: finite-positive, not just non-None — a 0.0 close
+        # (provider missing-value drift) skewed the displayed MA under
+        # PASSED (100.0-avg window read 95.0).
+        closes = [c for c in (ohlcv_i.get("close") or []) if _fin_pos_close(c)]
         market[idx] = {
             "price": price,
             "ma20": _sma_rounded(closes, 20),
@@ -679,7 +722,8 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         vix_price, vix_ohlcv, vix_status = vix_triple
     if not isinstance(vix_ohlcv, dict):  # future-exception fallback shape
         vix_ohlcv = {}
-    vix_closes = [c for c in (vix_ohlcv.get("close") or []) if c is not None]
+    vix_closes = [c for c in (vix_ohlcv.get("close") or [])
+                  if _fin_pos_close(c)]  # round-24 F2: same gate as indices
     volatility = {
         "vix": vix_price,
         "vix_ma20": _sma_rounded(vix_closes, 20),

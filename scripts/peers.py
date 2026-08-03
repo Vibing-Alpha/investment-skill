@@ -51,8 +51,31 @@ def _try_fetch(ticker: str, field_map: Dict, yf) -> tuple:
         multiples = {}
         for short_name, yf_field in field_map.items():
             val = info.get(yf_field)
-            if val is not None and isinstance(val, (int, float)):
-                if math.isfinite(val) and val > 0:
+            # Round-18 F1: bool is an int subclass — a provider-drifted
+            # `trailingPE: true` passed every numeric gate as 1.0 and
+            # minted a fabricated 1x multiple into the peer median.
+            if (val is not None and isinstance(val, (int, float))
+                    and not isinstance(val, bool)):
+                # Upper bound mirrors historical_multiples'
+                # _ABSURD_MULTIPLE_CAP (probe-2 review round-7): a
+                # near-zero-earnings peer's 15,000x P/E is
+                # denominator-fragile noise, not a comparable — and two
+                # such peers could mint an 'n=3 qualified' absurd median.
+                if math.isfinite(val) and 0 < val <= 10_000:
+                    # Probe-2 D1: a POSITIVE provider enterpriseToEbitda can
+                    # be negative-EV ÷ negative-EBITDA (cash-rich loss-making
+                    # issuers) — superficially "cheap", actually meaningless.
+                    # Sign-gate on the provider's own ebitda field: absent or
+                    # non-positive → drop the ratio (fail-closed; the other
+                    # double-negative candidates are already filtered by the
+                    # val > 0 gate since one negative factor makes the ratio
+                    # negative).
+                    if short_name == "ev_ebitda":
+                        ebitda = info.get("ebitda")
+                        if (ebitda is None or isinstance(ebitda, bool)
+                                or not isinstance(ebitda, (int, float))
+                                or not math.isfinite(ebitda) or ebitda <= 0):
+                            continue
                     multiples[short_name] = round(val, 2)
         if len(multiples) < 2:
             return {}, {}

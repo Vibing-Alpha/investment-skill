@@ -35,6 +35,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Round-21 F2: ONE definition of the fresh-events structural floor —
+# the sections downstream consumers read (probe: catalyst_calendar;
+# thesis synthesis: signals/bias/density/macro_context/confidence).
+# Used by the SKILL's post-dispatch gate AND the fresh-destination
+# guard below (an aborted producer leftover must not earn the guard).
+EVENTS_STRUCTURAL_FLOOR = (
+    "catalyst_calendar", "macro_context", "signals", "event_density",
+    "overall_event_bias", "confidence",
+)
+
 
 def _split_csv(s: str) -> list[str]:
     """Split comma-separated list, dropping empties."""
@@ -73,9 +83,31 @@ def write_reuse_path(
             cur = json.loads(dst_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             cur = None  # unreadable dst → replace with the reuse copy
+        # Round-21 F2: the guard must not protect an ABORTED producer
+        # leftover — a stamped-but-partial fresh artifact (failed the
+        # SKILL's structural floor, run aborted, file remained) would
+        # otherwise be recorded as a successful "fresh" events result.
+        # Only a floor-passing fresh artifact earns the guard; a partial
+        # one is replaced by the prior VALID copy below.
+        _floor_missing = (
+            [k for k in EVENTS_STRUCTURAL_FLOOR if k not in cur]
+            if isinstance(cur, dict) else []
+        )
         if (isinstance(cur, dict)
                 and isinstance(cur.get("meta"), dict)
-                and "reuse_meta" not in cur["meta"]):
+                and "reuse_meta" not in cur["meta"]
+                and _floor_missing):
+            print(
+                f"[reuse_events] WARN: destination events.json looks like an "
+                f"ABORTED fresh output (missing sections {_floor_missing}) — "
+                f"replacing it with the prior VALID copy instead of "
+                f"recording it as fresh.",
+                file=sys.stderr,
+            )
+        if (isinstance(cur, dict)
+                and isinstance(cur.get("meta"), dict)
+                and "reuse_meta" not in cur["meta"]
+                and not _floor_missing):
             print(
                 "[reuse_events] SKIP: destination events.json is a fresh "
                 "same-session output (no reuse_meta) — not overwriting with "
@@ -100,6 +132,25 @@ def write_reuse_path(
 
     prior_path = prior_thesis_dir / "events.json"
     prior = json.loads(prior_path.read_text(encoding="utf-8"))
+    # Round-24 F3: a BINDING-MARKED prior that fails the structural floor
+    # is an aborted producer leftover sitting behind a stale
+    # completed=true (the abort replaced the valid artifact, the run
+    # stopped, the resolver still served the dir). Reusing it propagates
+    # missing event evidence for another 7 days — refuse; the
+    # orchestrator falls back to the rerun branch. Pre-binding (unmarked)
+    # priors stay legacy-lenient (design: reused pre-binding artifacts).
+    if prior.get("_websearch_binding_version") is not None:
+        _prior_missing = [k for k in EVENTS_STRUCTURAL_FLOOR
+                          if k not in prior]
+        if _prior_missing:
+            print(
+                f"[reuse_events] REFUSED: prior events.json at {prior_path} "
+                f"is binding-marked but missing sections {_prior_missing} — "
+                f"an aborted partial artifact must not be reused. Fall back "
+                f"to the RERUN branch (fresh events agent).",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     prior["catalyst_calendar"] = prune_past(
         prior.get("catalyst_calendar", []), today_et(),
     )

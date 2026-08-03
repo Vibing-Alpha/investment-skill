@@ -965,6 +965,23 @@ def extract_fcf_inputs(
                     "The CAPM cost of equity may be understated for volatile stocks."
                 )
 
+            # Probe-2 D2: domain-gate the resolved beta. Real equity betas
+            # live within roughly [-1, 4]; a provider value outside that
+            # (de-SPACs / microcaps with broken regressions can carry
+            # beta=10 or -3) is garbage input, and clamping the garbage
+            # CAPM to a bound endpoint produced a NORMAL-LOOKING 5%/25%
+            # discount rate. Out-of-domain → market-average default, with
+            # the rejection disclosed (same posture as beta-unavailable).
+            if not (-1.0 <= beta <= 4.0):
+                result["warnings"].append(
+                    f"beta {beta} rejected: outside the real-equity domain "
+                    f"[-1, 4] (provider regression garbage) — using "
+                    f"market-average 1.0 instead. The discount rate is a "
+                    f"DEFAULT, not a fitted CAPM."
+                )
+                beta = 1.0
+                beta_source = "default_out_of_domain"
+
             # CAPM cost of equity: risk_free + beta * ERP. The per-share
             # cash flow this discounts is a LEVERED (equity-holder) proxy,
             # so cost of equity — not a debt-weighted WACC — is the
@@ -1007,6 +1024,10 @@ def extract_fcf_inputs(
                 beta_tag_map = {
                     "cli_override": "[CLI: --beta override]",
                     "default": "[Default: 1.0 market average]",
+                    "default_out_of_domain": (
+                        "[Default: 1.0 market average — out-of-domain "
+                        "provider beta rejected]"
+                    ),
                 }
                 beta_source_tag = beta_tag_map.get(
                     beta_source, "[API: 01_price_data.beta.value]"

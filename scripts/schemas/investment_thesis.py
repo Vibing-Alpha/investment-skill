@@ -336,6 +336,62 @@ def validate_investment_thesis(data: Mapping[str, Any]) -> InvestmentThesis:
             check_source_tag(v, artifact=_ARTIFACT, path=path,
                              strict_websearch=strict_ws)
 
+    # Probe-2 B2: the DECISION numbers (expected_return / max_downside)
+    # must carry provenance on binding-marked (post-contract) artifacts.
+    # Two shapes exist in the wild and both are accepted:
+    #   calculation_audit.expected_return_source / .max_downside_source
+    #   top-level expected_return_source / max_downside_source
+    # Pre-fix NEITHER was required — an unsourced altered ER validated
+    # cleanly. Legacy (unmarked) artifacts keep the old lenient rule.
+    if strict_ws:
+        # Probe-2 review round-10: the price ANCHOR is required on
+        # binding-marked artifacts — without meta.current_price the
+        # portfolio layer cannot check whether a price move has consumed
+        # the ER (portfolio-decide.md thesis_price read), yet ER/CE
+        # validated fine. Legacy artifacts keep the lenient rule.
+        if meta.current_price is None:
+            raise SchemaError(
+                _ARTIFACT, "meta.current_price",
+                "required on binding-marked artifacts — ER/CE without a "
+                "price anchor cannot be re-checked against price moves",
+            )
+        audit_map = audit_raw if isinstance(audit_raw, Mapping) else {}
+        # Accepted key aliases per field (all observed in the wild):
+        # calculation_audit.{expected_return_source | er_source} /
+        # calculation_audit.{max_downside_source | md_source}, or the same
+        # long-form key at top level.
+        _SRC_ALIASES = {
+            "expected_return": ("expected_return_source", "er_source"),
+            "max_downside": ("max_downside_source", "md_source"),
+        }
+        for field_name, field_val in (("expected_return", er),
+                                      ("max_downside", md)):
+            if field_val is None:
+                continue  # null ER is a documented not-computable state
+            aliases = _SRC_ALIASES[field_name]
+            src_val = None
+            for k in aliases:
+                v = audit_map.get(k)
+                if isinstance(v, str) and v.strip():
+                    src_val = v
+                    break
+            if src_val is None:
+                v = data.get(aliases[0])
+                if isinstance(v, str) and v.strip():
+                    src_val = v
+            if src_val is None:
+                raise SchemaError(
+                    _ARTIFACT, aliases[0],
+                    f"{field_name} is a decision number and must carry a "
+                    f"source tag (calculation_audit.{aliases[0]} / "
+                    f"calculation_audit.{aliases[1]} / top-level "
+                    f"{aliases[0]}) on binding-marked artifacts",
+                )
+            # Tag content is validated by the calculation_audit walk above
+            # (audit placement) or here (top-level placement).
+            check_source_tag(src_val, artifact=_ARTIFACT,
+                             path=aliases[0], strict_websearch=strict_ws)
+
     # Dispatch DL3c mode + validate cert (mirrors bq_analysis loader).
     # Errors from dispatch_dl3c_mode (illegal _dl3c_version, cert without
     # version, cert with basis=usd_native shape) propagate as SchemaError.

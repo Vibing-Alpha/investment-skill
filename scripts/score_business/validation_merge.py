@@ -80,10 +80,25 @@ def merge_validation(
     """
     merged: dict[str, Any] = dict(phase2)  # phase 2 baseline (terminal truth)
     merged["is_adr"] = bool(phase1.get("is_adr")) or bool(phase2.get("is_adr"))
+    # Probe-2 review round-3: `is_tech_stock` is monotonic within a run for
+    # the same reason as is_adr — only phase 1 fetches company data, so the
+    # phase-2 subset defaults it False and would re-clobber a correct True.
+    merged["is_tech_stock"] = (bool(phase1.get("is_tech_stock"))
+                               or bool(phase2.get("is_tech_stock")))
     p2_fb = phase2.get("fmp_fallback") if isinstance(phase2, dict) else None
     if not isinstance(p2_fb, dict):
         merged["fmp_fallback"] = (phase1.get("fmp_fallback")
                                   if isinstance(phase1, dict) else None)
+    # Probe-2 review round-3: same evidence-preservation rule for the
+    # yfinance_fallback audit record — the phase-2 subset never attempts
+    # the fallback (attempted=False stub), which replaced phase 1's real
+    # record while phase 1's rescued category data survived. Phase 2 wins
+    # only if it actually ATTEMPTED.
+    p2_yf = phase2.get("yfinance_fallback") if isinstance(phase2, dict) else None
+    if not (isinstance(p2_yf, dict) and p2_yf.get("attempted")):
+        p1_yf = phase1.get("yfinance_fallback") if isinstance(phase1, dict) else None
+        if isinstance(p1_yf, dict):
+            merged["yfinance_fallback"] = p1_yf
     p1_cats = phase1.get("categories", {}) if isinstance(phase1, dict) else {}
     p2_cats = phase2.get("categories", {}) if isinstance(phase2, dict) else {}
 
@@ -104,6 +119,26 @@ def merge_validation(
         # a stub is not, and the missing key is exactly what the
         # stored-validation shape check exists to catch.
     merged["categories"] = merged_cats
+
+    # Probe-2 C2a: the top-level status must describe the MERGED map, not
+    # phase 2's subset-local run. Pre-fix a clean merged map stayed
+    # labeled PARTIAL (phase 2's local truth: everything-else-SKIPPED),
+    # contradicting its own categories all the way into
+    # bq_analysis.meta.validation_status. Recompute via the ONE shared
+    # matrix (scripts.fetch.derive_overall_validation_status).
+    from scripts.fetch import derive_overall_validation_status
+    merged["status"] = derive_overall_validation_status(merged_cats)
+
+    # Probe-2 C2b: root `growth_stock_mode` follows the live-entry rule
+    # like any category — phase 2's subset fetch never runs the detector
+    # and writes a SKIPPED stub, which previously replaced phase 1's live
+    # record (root said SKIPPED/disabled while categories.growth_stock_mode
+    # was live — contradictory disclosure in the stored artifact).
+    p2_growth = phase2.get("growth_stock_mode")
+    p1_growth = phase1.get("growth_stock_mode") if isinstance(phase1, dict) else None
+    if not is_live_entry(p2_growth) and is_live_entry(p1_growth):
+        merged["growth_stock_mode"] = p1_growth
+
     return merged
 
 

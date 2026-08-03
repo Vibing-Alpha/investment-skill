@@ -45,8 +45,11 @@ _WEIGHTS_TOL = 0.01  # matches scripts/assemble.py:274 producer tolerance
 
 _REQUIRED_WEIGHT_KEYS = frozenset({"fundamental", "forward", "industry"})
 
-_SCORE_MIN = 0.0   # unit-ok: BQ scores are 0-10 rubric, not percent/decimal
-_SCORE_MAX = 10.0  # unit-ok: BQ scores are 0-10 rubric, not percent/decimal
+# Probe-2 B5: every scoring rubric bottoms out at 1 (1-10 scale) — 0 was
+# dead validation vocabulary no prompt can emit, and a zeroed score (data
+# corruption) read as ultra-low-but-valid instead of invalid.
+_SCORE_MIN = 1.0   # unit-ok: BQ scores are 1-10 rubric, not percent/decimal
+_SCORE_MAX = 10.0  # unit-ok: BQ scores are 1-10 rubric, not percent/decimal
 
 
 __all__ = [
@@ -331,6 +334,28 @@ def validate_bq_analysis(data: Mapping[str, Any]) -> BqAnalysis:
         payload_for_source_tags, artifact=_ARTIFACT,
         strict_websearch=strict_ws,
     )
+
+    # Probe-2 review round-14: structural floor for the synthesis section —
+    # exactly the fields /portfolio consumes (portfolio SKILL Step 3 reads
+    # watchlist_recommendation/conviction/thesis/key_strengths/key_risks/
+    # catalyst_calendar). A plausible PARTIAL synthesis previously validated
+    # with the decision-driving fields absent. Not gated on the websearch
+    # binding marker: partial-tier runs (which /portfolio also consumes)
+    # don't carry it. An EMPTY mapping stays lenient — visible absence is
+    # not the plausible-partial failure mode, and minimal delta fixtures
+    # use it.
+    syn = data.get("synthesis")
+    if isinstance(syn, Mapping) and syn:
+        _SYN_FLOOR = ("watchlist_recommendation", "conviction", "thesis",
+                      "key_strengths", "key_risks", "catalyst_calendar")
+        _syn_missing = [k for k in _SYN_FLOOR if k not in syn]
+        if _syn_missing:
+            raise SchemaError(
+                _ARTIFACT, "synthesis",
+                f"synthesis is missing decision-driving fields "
+                f"{_syn_missing} — the /portfolio layer reads these; "
+                f"re-dispatch the synthesis agent",
+            )
 
     # post-impl loop-1 H5: dispatch DL3c mode + validate cert. Errors from
     # dispatch_dl3c_mode (illegal _dl3c_version, cert without version,

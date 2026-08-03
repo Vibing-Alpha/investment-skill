@@ -184,6 +184,13 @@ def _fetch_yfinance_history(yf_ticker: str) -> AdapterResult:
             close = _extract_close(row)
             if close is None:
                 continue
+            # Round-22: bool is an int subclass — float(True)=1.0 would
+            # pass the positive/NaN gate below and mint a plausible 1.0
+            # FX close (inverted into a wrong USD/local rate that the
+            # fx_apply typed gate then accepts). Repo-wide numeric
+            # convention: reject bool before coercion.
+            if isinstance(close, bool):
+                continue
             try:
                 close_f = float(close)
             except (TypeError, ValueError):
