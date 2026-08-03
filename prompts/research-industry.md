@@ -150,7 +150,11 @@ across at least 3 sources per top-level claim.
 
 Identify candidate US-listed tickers operating in this industry. For each, capture:
 
-- `ticker` — US exchange ticker (NYSE/NASDAQ/AMEX). Must match `^[A-Z0-9][A-Z0-9.\-]{0,14}$`.
+- `ticker` — US-traded ticker: NYSE/NASDAQ/AMEX common stock or ADR, **or an
+  actively-traded OTC ADR** (e.g. MRAAY, TTDKY — eligible per
+  `rules/research-industry.md` §1.1; OTC picks require the §3.4 top-level
+  liquidity-risk entry). Excluding active OTC ADRs silently drops eligible
+  industry leaders. Must match `^[A-Z0-9][A-Z0-9.\-]{0,14}$`.
 - `company_name` — display name.
 - `market_position` ∈ `{leader, challenger, niche, disruptor}`. Definitions:
   - **leader**: top 1-3 by market share, defines the industry
@@ -341,7 +345,7 @@ nullable fields use literal `null`. See
 
 ## 行业框架 <!-- or "Framing" -->
 - **生命周期**: <lifecycle>
-- **TAM**: <tam_usd_b> 亿美元 · **5年 CAGR**: <cagr_5y_pct>%
+- **TAM**: $<tam_usd_b>B（十亿美元；如以「亿美元」表述须 ×10） · **5年 CAGR**: <cagr_5y_pct>%
 - **关键驱动**: bullet list of key_drivers (synthesized into prose-friendly form)
 
 ## 板块信号 <!-- or "Sector Signal" -->
@@ -365,12 +369,15 @@ ETF <etf_symbol> · 5/20/60d <trends> · **<regime>**
 ## 下一步 <!-- "Next steps" — emit ONLY if priority-1 candidates exist -->
 建议先对优先级 1 的 ticker 跑 `/score-business`: <P1 tickers comma-separated>
 
-<!-- Conditional note: include the next sentence ONLY if any candidate
-     is an OTC ADR (any non-NYSE/NASDAQ listing) or has a non-USD reporting
-     currency. Reference: the candidate's market_position is set + the
-     orchestrator may have flagged in regime_rationale or the rationale text. -->
+<!-- Conditional note: include the next sentence ONLY when the JSON itself
+     says so — i.e. risks[] contains the mandatory OTC-ADR liquidity-risk
+     entry (rules §3.4; it names the tickers), or a candidate's rationale
+     text explicitly identifies the company as an ADR / non-USD reporter.
+     The candidate schema carries NO listing-venue or reporting-currency
+     field, so do NOT infer either from memory: if the JSON doesn't state
+     it, omit this note. -->
 <!-- If applicable: -->
-注：候选含 OTC ADR / 非 USD 报表企业（{tickers}）。`/score-business` 跑这些时会自动走 DL3c FX 转换路径，bq_analysis.json + investment_thesis.json 会带 `currency_conversion` 凭证；per-share 指标为 USD-converted basis，FX 波动是额外风险维度。
+注：候选含 OTC ADR / 非 USD 报表企业（{tickers, 取自 risks[] 的 OTC 流动性风险条目}）。`/score-business` 跑这些时会自动走 DL3c FX 转换路径，bq_analysis.json + investment_thesis.json 会带 `currency_conversion` 凭证；per-share 指标为 USD-converted basis，FX 波动是额外风险维度。
 ```
 
 Word count target 300-800. Trim aggressively. The JSON is the source of truth;

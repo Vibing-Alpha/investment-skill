@@ -280,7 +280,10 @@ def _market_universe_strategy(window: str) -> str:
 from scripts.cli_utils import TICKER_RE as _TICKER_RE
 
 
-def _universe_watchlist(path: str) -> List[Dict]:
+def _universe_watchlist(path: str, _doc_out: Optional[List] = None) -> List[Dict]:
+    """_doc_out: optional 1-slot list — receives the parsed portfolio-state
+    dict when the file has that shape, so the caller can reuse ONE parse
+    for personalization (closing round-31)."""
     """Read tickers from file. Supports newline-separated text or YAML list.
 
     Security: resolves symlinks and rejects them to prevent a symlink pointing
@@ -307,8 +310,24 @@ def _universe_watchlist(path: str) -> List[Dict]:
             if isinstance(data, list):
                 raw_tickers = [str(t).strip().upper() for t in data if t]
             elif isinstance(data, dict):
-                # support holdings-style: {AAPL: {...}, ...}
-                raw_tickers = [str(k).strip().upper() for k in data.keys()]
+                # 4-angle closing round-2: portfolio-state.yaml nests its
+                # universe under holdings/watchlist — the old top-level-keys
+                # read screened the pseudo-tickers {cash, holdings, ...} and
+                # OMITTED the actual portfolio. Detect that shape first;
+                # plain {AAPL: {...}} watchlist files keep the legacy read.
+                if "holdings" in data or "watchlist" in data:
+                    if _doc_out is not None:
+                        _doc_out.append(data)
+                    h = data.get("holdings")
+                    w = data.get("watchlist")
+                    raw_tickers = (
+                        [str(k).strip().upper() for k in (h or {}).keys()
+                         if isinstance(h, dict)]
+                        + [str(t).strip().upper() for t in (w or []) if t]
+                    )
+                else:
+                    # support holdings-style: {AAPL: {...}, ...}
+                    raw_tickers = [str(k).strip().upper() for k in data.keys()]
         except ImportError:
             print("FATAL: yaml module required for .yaml watchlist", file=sys.stderr)
             sys.exit(2)
@@ -466,11 +485,27 @@ def _bulk_ohlcv(symbols: List[str], period: str = "3mo") -> Dict[str, Dict[str, 
                 else int(v)
                 for v in aligned["Volume"].tolist()
             ],
+            # Bar dates (ISO) — needed to tell the live partial session bar
+            # from completed ones (liquidity floors anchor on completed bars).
+            "date": [
+                d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else None
+                for d in aligned.index.tolist()
+            ],
         }
 
     if len(symbols) == 1:
         sym = symbols[0]
-        rec = _align(df)
+        # Closing round-15 F5: pinned yfinance emits MultiIndex columns
+        # (ticker, field) even for ONE symbol under group_by="ticker" —
+        # the flat-column _align then raised KeyError and the single-
+        # symbol screen produced no output at all. Flatten first.
+        sub = df
+        if getattr(df.columns, "nlevels", 1) > 1:
+            try:
+                sub = df[sym]
+            except KeyError:
+                sub = df.droplevel(0, axis=1)
+        rec = _align(sub)
         if rec:
             out[sym] = rec
         return out
@@ -532,6 +567,7 @@ def _compute_metrics(
     quote_row: Optional[Dict],
     universe_row: Optional[Dict],
     include_tech: bool,
+    anchor_iso: Optional[str] = None,
 ) -> Optional[Dict]:
     closes = ohlcv.get("close", [])
     highs = ohlcv.get("high", [])
@@ -546,8 +582,27 @@ def _compute_metrics(
     # happens near market open before daily volume accumulates. Don't coerce
     # to 0 here; `_filter` and MD renderer handle None explicitly.
     cur_volume = volumes[-1] if volumes else None
+
+    # Round-35: liquidity floors must read a COMPLETED session, not the live
+    # partial bar — at 10:00 ET a 2M-share/day name may show 150k so far and
+    # be dropped as illiquid (macro.py solves the same hazard by anchoring
+    # to the last completed session). Display `volume` stays live (today's
+    # surge is signal on a 1d screen); the floor and ADDV use bars dated
+    # <= anchor. No anchor / no dates → legacy latest-bar behavior.
+    dates = ohlcv.get("date") or []
+    cut = len(closes)  # exclusive index of the last completed bar + 1
+    if anchor_iso and len(dates) == len(closes):
+        cut = 0
+        for i in range(len(dates) - 1, -1, -1):
+            if dates[i] is not None and dates[i] <= anchor_iso:
+                cut = i + 1
+                break
+    # Last COMPLETED bar's volume only — a None there fails the floor
+    # closed, same posture as the old latest-bar None handling.
+    floor_volume = (volumes[cut - 1]
+                    if 1 <= cut <= len(volumes) else None)
     vol_metrics = calc_volume(volumes, closes) if volumes else {}
-    addv = _avg_daily_dollar_volume(closes, volumes)
+    addv = _avg_daily_dollar_volume(closes[:cut], volumes[:cut])
 
     row: Dict = {
         "ticker": symbol,
@@ -555,8 +610,15 @@ def _compute_metrics(
         "sector": (universe_row or {}).get("sector") or (quote_row or {}).get("sector", ""),
         "industry": (universe_row or {}).get("industry", ""),
         "price_usd": round(cur_price, 2),
+        # Peripheral probe 2026-08-03: the UNROUNDED close, for floor
+        # comparisons — round(4.996, 2) == 5.00 previously passed a $5
+        # min-price floor. Stripped from the emitted row by _filter.
+        "_price_raw": cur_price,
         "market_cap_usd": (quote_row or {}).get("marketCap") or (universe_row or {}).get("market_cap_usd"),
         "volume": int(cur_volume) if cur_volume is not None else None,
+        # Completed-session volume for the liquidity floor (stripped by
+        # _filter, like _price_raw). Display `volume` above stays live.
+        "_volume_floor": int(floor_volume) if floor_volume is not None else None,
         "volume_ratio_vs_ma20": vol_metrics.get("volume_ratio_vs_ma20"),
         "avg_daily_dollar_volume_usd": round(addv, 2) if addv is not None else None,
         **returns,
@@ -710,26 +772,47 @@ def _filter(
     min_volume: int,
     min_mcap_usd: int,
     min_dollar_volume_usd: float = 0.0,
+    dropped: Optional[List[str]] = None,
 ) -> List[Dict]:
+    """Apply the liquidity/size floors. When `dropped` is a list, every
+    filtered row is recorded as "TICKER (reason)" — used by watchlist scope,
+    where the universe is the user's CURATED list and a silent omission
+    reads as "not notable" instead of "filtered out" (round-36)."""
+    def _drop(r: Dict, reason: str) -> None:
+        if dropped is not None:
+            dropped.append(f"{r.get('ticker', '?')} ({reason})")
+
     out = []
     for r in rows:
-        if r["price_usd"] < min_price_usd:
+        # Compare on the raw (unrounded) close; display keeps 2dp.
+        price_raw = r.get("_price_raw", r["price_usd"])
+        r.pop("_price_raw", None)
+        if price_raw < min_price_usd:
+            _drop(r, f"price {r['price_usd']} < min_price_usd {min_price_usd}")
             continue
-        # Volume=None means yfinance didn't return a value for the latest
-        # bar. Fail-closed: unknown volume can't pass a liquidity floor.
-        vol = r.get("volume")
+        # Liquidity floor reads the COMPLETED-session volume (_volume_floor)
+        # when present — the live partial bar under-reads a liquid name at
+        # 10:00 ET (round-35). Legacy rows without the key floor on the
+        # displayed volume. Fail-closed: unknown volume can't pass a floor.
+        vol = r.get("_volume_floor", r.get("volume"))
+        r.pop("_volume_floor", None)
         if vol is None and min_volume > 0:
+            _drop(r, f"completed-session volume unknown, min_volume {min_volume}")
             continue
         if vol is not None and vol < min_volume:
+            _drop(r, f"completed-session volume {vol} < min_volume {min_volume}")
             continue
         # Dollar-volume floor (WS-2B). OFF by default (0.0) so legacy callers
         # are unchanged. Fail-closed on None, same as the share-volume floor.
         if min_dollar_volume_usd > 0:
             addv = r.get("avg_daily_dollar_volume_usd")
             if addv is None or addv < min_dollar_volume_usd:
+                _drop(r, f"ADDV {addv} < min_dollar_volume_usd "
+                         f"{min_dollar_volume_usd}")
                 continue
         mcap = r.get("market_cap_usd")
         if min_mcap_usd > 0 and (mcap is None or mcap < min_mcap_usd):
+            _drop(r, f"mcap {mcap} < min_mcap_usd {min_mcap_usd}")
             continue
         out.append(r)
     return out
@@ -814,6 +897,19 @@ def _list_prior_runs(fingerprint: str, before_date: str, lookback_days: int = 10
             try:
                 data = json.loads(jf.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("scope_fingerprint") == fingerprint:
+                    # Closing round-13 F3: a run built on PARTIAL source
+                    # feeds (a failed /gainers beside healthy losers/
+                    # actives) is not a comparable baseline — using it as
+                    # the delta prior minted false new_today labels for
+                    # tickers that were merely absent because their feed
+                    # failed. Skip degraded runs; fall to an older
+                    # complete one (or none).
+                    _srcs = ((data.get("warnings") or {})
+                             .get("universe_sources") or {})
+                    if isinstance(_srcs, dict) and any(
+                            isinstance(v, str) and v.startswith("failed")
+                            for v in _srcs.values()):
+                        continue
                     matched = jf
                     break
             except Exception:
@@ -823,7 +919,9 @@ def _list_prior_runs(fingerprint: str, before_date: str, lookback_days: int = 10
     return out
 
 
-def _compute_delta(today_tickers: List[str], prior_path: Optional[Path]) -> Dict:
+def _compute_delta(today_tickers: List[str], prior_path: Optional[Path],
+                   today_params: Optional[Dict] = None,
+                   today_ohlcv_missing: Optional[List[str]] = None) -> Dict:
     """new / dropped / sustained based on the most recent prior run.
 
     Defensive against: None path, unreadable file, non-JSON content, JSON
@@ -849,12 +947,56 @@ def _compute_delta(today_tickers: List[str], prior_path: Optional[Path]) -> Dict
     ]
     today_set = set(today_tickers)
     prior_set = set(prior_tickers)
-    return {
+    # Closing round-22: a ticker absent from the PRIOR run only because
+    # its OHLCV feed transiently failed (warnings.ohlcv_missing) is
+    # UNKNOWN in that baseline, not new today; symmetrically a ticker
+    # missing from TODAY's feed is unknown, not dropped. Excluding them
+    # (with a disclosure note) keeps New/Dropped as real cross-run facts.
+    prior_missing = set((prior.get("warnings") or {}).get("ohlcv_missing")
+                        or [])
+    today_missing = set(today_ohlcv_missing or [])
+    out = {
         "prior_date": prior.get("run_date"),
-        "new": [t for t in today_tickers if t not in prior_set],
-        "dropped": [t for t in prior_tickers if t not in today_set],
+        "new": [t for t in today_tickers
+                if t not in prior_set and t not in prior_missing],
+        "dropped": [t for t in prior_tickers
+                    if t not in today_set and t not in today_missing],
         "sustained": [t for t in today_tickers if t in prior_set],
     }
+    _excluded = ([t for t in today_tickers
+                  if t not in prior_set and t in prior_missing]
+                 + [t for t in prior_tickers
+                    if t not in today_set and t in today_missing])
+    if _excluded:
+        out["feed_gap_excluded"] = sorted(set(_excluded))
+        out["feed_gap_note"] = (
+            "excluded from New/Dropped: OHLCV feed gaps made these "
+            "tickers unmeasurable in one of the two runs")
+    # 4-angle probe: the fingerprint deliberately omits result-shaping
+    # params (--top + floors) so threshold tuning still finds a prior —
+    # but then New/Dropped can be pure filter artifacts (rank 11-20 under
+    # --top 10→20 read as "new"). Disclose the drift so the renderer can
+    # caveat it and attention scoring can withhold the new_today bonus.
+    if today_params is not None:
+        prior_params = {
+            "filters": prior.get("filters"),
+            "top": prior.get("top"),
+        }
+        comparable = {
+            "filters": today_params.get("filters"),
+            # legacy priors lack "top" — compare only when both known
+            "top": today_params.get("top") if prior.get("top") is not None else None,
+        }
+        if prior_params["top"] is None:
+            prior_params["top"] = None
+        if comparable != prior_params:
+            out["params_changed"] = True
+            out["params_note"] = (
+                "result-shaping params (filters/--top) differ from the "
+                "prior run — New/Dropped may reflect the parameter change, "
+                "not market movement"
+            )
+    return out
 
 
 def _compute_streaks(today_tickers: List[str], fingerprint: str, today_date: str,
@@ -866,55 +1008,63 @@ def _compute_streaks(today_tickers: List[str], fingerprint: str, today_date: str
     no matching fingerprint for that day), the streak resets. Today's run
     counts as day 1 by convention.
 
-    We do a calendar-day walk rather than iterating a pre-filtered priors
-    list, because "day present in list" ≠ "day had valid data". If a corrupt
-    JSON on day-2 is silently dropped, day-1 and day-3 would appear
-    consecutive to the caller — which inflates the streak by bridging a gap
-    that should have broken it. Fail-closed per producer-consumer rule §4.
+    We walk actual TRADING days backward from today — not the set of date
+    directories that happen to exist. Iterating existing dirs would bridge
+    any wholly-absent day (no directory at all), so three sparse runs weeks
+    apart would count as a 3-day streak and fabricate a "persistent leader"
+    Attention tag. A trading day with no matching run breaks the chain;
+    weekends/holidays are skipped without consuming lookback or resetting.
+    Fail-closed per producer-consumer rule §4.
     """
     streaks: Dict[str, int] = {t: 1 for t in today_tickers}
     if not SCREEN_REPORTS_ROOT.is_dir():
         return streaks
 
-    date_dirs = sorted(
-        (d for d in SCREEN_REPORTS_ROOT.iterdir()
-         if d.is_dir() and d.name.isdigit() and len(d.name) == 8),
-        reverse=True,
-    )
-    before_key = today_date.replace("-", "")
+    from datetime import date as _date, timedelta as _timedelta
+    from scripts.delta.calendar import is_trading_day
+    try:
+        cursor = _date.fromisoformat(today_date)
+    except ValueError:
+        return streaks
     still_streaking = set(today_tickers)
 
     scanned_days = 0
-    for d in date_dirs:
-        if d.name >= before_key:
-            continue
+    # Bounded walk: lookback_days trading days, plus a hard calendar cap so
+    # a long holiday stretch can't loop unboundedly.
+    for _ in range(lookback_days * 4):
         if scanned_days >= lookback_days or not still_streaking:
             break
+        cursor -= _timedelta(days=1)
+        if not is_trading_day(cursor):
+            continue
         scanned_days += 1
+        d = SCREEN_REPORTS_ROOT / cursor.strftime("%Y%m%d")
 
         # Find today's fingerprint-matching file in this dir, if any.
         # Newest-mtime first so a same-day re-run's result wins over a stale
         # earlier run — matches _list_prior_runs selection.
         prior_set: Optional[set] = None
-        for jf in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                data = json.loads(jf.read_text(encoding="utf-8"))
-            except Exception:
-                # Unparseable — unknown data, break entire streak chain
-                prior_set = None
+        if d.is_dir():
+            for jf in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                try:
+                    data = json.loads(jf.read_text(encoding="utf-8"))
+                except Exception:
+                    # Unparseable — unknown data, break entire streak chain
+                    prior_set = None
+                    break
+                if not isinstance(data, dict):
+                    continue
+                if data.get("scope_fingerprint") != fingerprint:
+                    continue
+                results = data.get("results", []) or []
+                prior_set = {r.get("ticker") for r in results if isinstance(r, dict) and r.get("ticker")}
                 break
-            if not isinstance(data, dict):
-                continue
-            if data.get("scope_fingerprint") != fingerprint:
-                continue
-            results = data.get("results", []) or []
-            prior_set = {r.get("ticker") for r in results if isinstance(r, dict) and r.get("ticker")}
-            break
 
         if prior_set is None:
-            # No valid match for this day — fail-closed, reset all streaks.
-            # Applies to: day had no screener output, output didn't match
-            # fingerprint, JSON was corrupt, or file unreadable.
+            # No valid match for this trading day — fail-closed, reset all
+            # streaks. Applies to: day directory absent entirely, day had no
+            # screener output, output didn't match fingerprint, JSON was
+            # corrupt, or file unreadable.
             still_streaking.clear()
             break
 
@@ -963,7 +1113,7 @@ _THEME_KEYWORDS = {
 _UNKNOWN_THEMES_WARNED: set = set()  # noqa: audit-fail-open — reset per-test via tests/conftest.py _reset_screen_module_state
 
 
-def _load_personalization() -> Dict:
+def _load_personalization(state_doc: Optional[Dict] = None) -> Dict:
     """Read strategy.yaml + portfolio-state.yaml from project root.
 
     Returns {holdings: set, watchlist: set, themes: list[str], loaded: bool,
@@ -1009,7 +1159,20 @@ def _load_personalization() -> Dict:
             print(f"WARN: {msg}", file=sys.stderr)
             result["errors"].append(msg)
 
-    if port_path.is_file():
+    # Closing round-31: when the caller already parsed portfolio-state
+    # (watchlist scope reads the SAME file for its universe), reuse that
+    # parse — a mid-run atomic state sync otherwise made the persisted
+    # artifact mix an S0 universe with S1 personalization tags/Attention.
+    if state_doc is not None:
+        p = state_doc
+        holdings = p.get("holdings") or {}
+        if isinstance(holdings, dict):
+            result["holdings"] = {str(k).upper() for k in holdings.keys()}
+        watchlist = p.get("watchlist") or []
+        if isinstance(watchlist, list):
+            result["watchlist"] = {str(w).strip().upper() for w in watchlist if w}
+        result["loaded"] = True
+    elif port_path.is_file():
         try:
             p = yaml.safe_load(port_path.read_text(encoding="utf-8")) or {}
             holdings = p.get("holdings") or {}
@@ -1077,7 +1240,10 @@ def _tag_row(row: Dict, perz: Dict, delta: Dict, streaks: Dict[str, int]) -> Lis
     # Delta tags (only when there WAS a prior run — otherwise 'new' is
     # meaningless since every ticker is "new" by default)
     if delta.get("prior_date"):
-        if t in set(delta.get("new", [])):
+        if t in set(delta.get("new", [])) and not delta.get("params_changed"):
+            # under param drift "new" may be a filter artifact — withhold
+            # the tag (and its attention bonus); the delta block carries
+            # the caveat note
             tags.append("new_today")
         streak = streaks.get(t, 1)
         if streak >= 3:
@@ -1119,6 +1285,12 @@ def _pick_attention(rows: List[Dict], perz_loaded: bool) -> List[str]:
             except (IndexError, ValueError):
                 pass
         if score > 0:
+            # Closing round-12 F2: the documented rule below was never
+            # enforced — without personalization a lone new_today (2 pts)
+            # made the human-facing Attention shortlist. Non-personalized
+            # runs require a >=3-day streak; theme/new alone don't qualify.
+            if not perz_loaded and not streak_tags:
+                continue
             scored.append((score, r["ticker"]))
     scored.sort(reverse=True)
     # Keep at most 5; drop if there's no personalization AND score is just
@@ -1126,19 +1298,12 @@ def _pick_attention(rows: List[Dict], perz_loaded: bool) -> List[str]:
     return [t for _, t in scored[:5]]
 
 
-def _emit_json(result: Dict, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-
-
-def _emit_markdown(result: Dict, path: Path, include_tech: bool) -> None:
+def _build_markdown(result: Dict, include_tech: bool) -> str:
     rows = result["results"]
     scope = result["scope"]
     window = result["window"]
     direction = result["direction"]
     filters = result["filters"]
-    path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: List[str] = []
     lines.append(f"# Screen — {result['run_date']}")
@@ -1150,6 +1315,35 @@ def _emit_markdown(result: Dict, path: Path, include_tech: bool) -> None:
         lines.append(f"- **Min $-volume**: ≥ ${filters['min_dollar_volume_usd']:,.0f}/day (ADDV)")
     lines.append(f"- **Universe**: {result['universe_size']} → **Survivors**: {result['survivors']} → **Top**: {len(rows)}")
     lines.append("")
+
+    # 4-angle closing round-2: warnings (partial source feeds, rejected
+    # tickers, degraded universes) were JSON-only — a failed /gainers
+    # endpoint rendered a "top gainers" page built from losers/actives
+    # with no visible caveat. The human page must carry them.
+    warns = result.get("warnings") or {}
+    if isinstance(warns, dict) and warns:
+        rendered: List[str] = []
+        srcs = warns.get("universe_sources")
+        if isinstance(srcs, dict):
+            failed = {k: v for k, v in srcs.items()
+                      if isinstance(v, str) and v.startswith("failed")}
+            if failed:
+                rendered.append(
+                    "**Partial universe** — failed source feed(s): "
+                    + ", ".join(f"`{k}` ({v})" for k, v in failed.items())
+                    + " — the ranked list is built WITHOUT those feeds "
+                      "(e.g. a failed /gainers feed means this is NOT a "
+                      "complete gainers screen).")
+        for k, v in warns.items():
+            if k == "universe_sources":
+                continue
+            rendered.append(f"**{k}**: {v}")
+        if rendered:
+            lines.append("## ⚠️ Warnings")
+            lines.append("")
+            for w in rendered:
+                lines.append(f"- {w}")
+            lines.append("")
 
     # Attention section — surface the 1-5 tickers that combine personalization
     # + delta signals. Human eyes land here first, before scanning the full table.
@@ -1180,6 +1374,13 @@ def _emit_markdown(result: Dict, path: Path, include_tech: bool) -> None:
     if delta.get("prior_date"):
         lines.append(f"## Delta vs {delta['prior_date']}")
         lines.append("")
+        if delta.get("params_changed"):
+            lines.append(f"> ⚠️ {delta.get('params_note')}")
+            lines.append("")
+        if delta.get("feed_gap_note"):
+            lines.append(f"> ⚠️ {delta.get('feed_gap_note')}: "
+                         f"{', '.join(delta.get('feed_gap_excluded') or [])}")
+            lines.append("")
         for label, key in [("New", "new"), ("Dropped", "dropped"), ("Sustained", "sustained")]:
             items = delta.get(key) or []
             if items:
@@ -1228,8 +1429,7 @@ def _emit_markdown(result: Dict, path: Path, include_tech: bool) -> None:
             cells.append(r.get("brief", ""))
             lines.append("| " + " | ".join(cells) + " |")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
 def _fmt_pct(v: Optional[float]) -> str:
@@ -1290,6 +1490,9 @@ def main() -> int:
     # output JSON (`warnings` field). Silent partial-success would otherwise
     # let the delta layer treat a degraded run as canonical.
     warnings: Dict[str, object] = {}
+    # One-parse slot for the portfolio-state doc (watchlist scope): shared
+    # by the universe read, symbol_aliases (round-41), and personalization.
+    _state_doc_slot: List = []
 
     # 1. Universe
     universe_sources: Dict[str, str] = {}
@@ -1325,7 +1528,7 @@ def main() -> int:
             print("FATAL: --scope watchlist: requires a path, e.g. watchlist:my.txt",
                   file=sys.stderr)
             return 2
-        universe = _universe_watchlist(wl_path)
+        universe = _universe_watchlist(wl_path, _doc_out=_state_doc_slot)
     else:
         print(f"FATAL: --scope must be 'market' | 'sector:NAME' | 'watchlist:PATH', got '{scope}'", file=sys.stderr)
         return 2
@@ -1338,16 +1541,47 @@ def main() -> int:
     symbols = [u["symbol"] for u in universe]
     universe_idx = {u["symbol"]: u for u in universe}
 
+    # Round-41: honor portfolio-state symbol_aliases on watchlist scope —
+    # the state contract says feeds fetch the alias's VENDOR symbol
+    # (macro.py already does; the loader lives in scripts.monitor — ONE
+    # implementation). Without this, an aliased holding (broker renamed
+    # the symbol, vendor quotes the old one) fetches the canonical key,
+    # gets no OHLCV, and silently vanishes from the ranking/Attention.
+    # All output stays keyed by the CANONICAL symbol.
+    vendor_aliases: Dict[str, str] = {}
+    if scope.startswith("watchlist:") and _state_doc_slot:
+        from scripts.monitor import load_vendor_aliases
+        try:
+            vendor_aliases = load_vendor_aliases(
+                Path(wl_path), state_doc=_state_doc_slot[0])
+        except ValueError as exc:
+            # PRESENT-BUT-MALFORMED is HARD per the loader contract — a
+            # typoed alias must not silently fetch the state key instead.
+            print(f"FATAL: portfolio-state symbol_aliases invalid: {exc}",
+                  file=sys.stderr)
+            return 2
+    fetch_syms = [vendor_aliases.get(s, s) for s in symbols]
+    _to_canonical = {vendor_aliases.get(s, s): s for s in symbols}
+
+    def _rekey(d: Dict) -> Dict:
+        return {_to_canonical.get(k, k): v for k, v in d.items()}
+
     # 2. FMP batch quote for mcap/volume/sector (skip if already present from /stock-screener)
     needs_quote = any(u.get("market_cap_usd") is None for u in universe)
     quote_rows: Dict[str, Dict] = {}
     if needs_quote:
-        quote_rows, quote_missing = _batch_quote(symbols)
+        quote_rows, quote_missing = _batch_quote(fetch_syms)
+        quote_rows = _rekey(quote_rows)
+        quote_missing = [_to_canonical.get(s, s) for s in quote_missing]
         if quote_missing:
             warnings["quote_missing"] = quote_missing
 
     # 3. yfinance bulk OHLCV
-    ohlcv = _bulk_ohlcv(symbols, period="3mo")
+    # Closing round-5 F2: a 63-interval (3m) return needs 64 closes and
+    # yfinance period="3mo" returns exactly ~63 bars — every change_3m_pct
+    # came back None and the "ranked" output was raw input order. 6mo
+    # guarantees headroom for all four windows.
+    ohlcv = _rekey(_bulk_ohlcv(fetch_syms, period="6mo"))
     ohlcv_missing = [s for s in symbols if s not in ohlcv]
     if ohlcv_missing:
         warnings["ohlcv_missing"] = ohlcv_missing
@@ -1357,7 +1591,10 @@ def main() -> int:
     print(f"[screen] OHLCV fetched for {len(ohlcv)}/{len(symbols)} tickers in {time.time()-t0:.1f}s",
           file=sys.stderr)
 
-    # 4. Compute metrics
+    # 4. Compute metrics. The anchor (last completed ET session) lets the
+    # liquidity floors ignore the live partial bar during market hours.
+    from scripts.delta.calendar import session_et as _session_et
+    _anchor_iso = _session_et().isoformat()
     metrics: List[Dict] = []
     for sym in symbols:
         data = ohlcv.get(sym)
@@ -1368,13 +1605,35 @@ def main() -> int:
             quote_row=quote_rows.get(sym),
             universe_row=universe_idx.get(sym),
             include_tech=args.tech,
+            anchor_iso=_anchor_iso,
         )
         if row:
             metrics.append(row)
 
-    # 5. Filter + rank + truncate
+    # 5. Filter + rank + truncate. On a WATCHLIST scope every ticker is
+    # user-curated, so a floor drop must be DISCLOSED (round-36): a silent
+    # omission from the ranking reads as "nothing notable" rather than
+    # "filtered out by defaults tuned for the noisy market scope".
+    _floor_dropped: Optional[List[str]] = (
+        [] if scope.startswith("watchlist") else None)
     survivors = _filter(metrics, args.min_price_usd, args.min_volume, args.min_mcap_usd,
-                        min_dollar_volume_usd=args.min_dollar_volume_usd)
+                        min_dollar_volume_usd=args.min_dollar_volume_usd,
+                        dropped=_floor_dropped)
+    if _floor_dropped:
+        warnings["floor_filtered"] = _floor_dropped
+        print(f"WARN: {len(_floor_dropped)} watchlist ticker(s) dropped by "
+              f"the floors (disclosed in output): {_floor_dropped}",
+              file=sys.stderr)
+    # Closing round-5 F2 guard: if the ranking column is None for EVERY
+    # survivor (short history, provider drift), the "ranked" list is raw
+    # input order masquerading as a ranking — refuse rather than emit it.
+    _rank_key = f"change_{args.window}_pct"
+    if survivors and all(r.get(_rank_key) is None for r in survivors):
+        print(f"FATAL: change_{args.window}_pct is None for ALL "
+              f"{len(survivors)} survivors — cannot rank by {args.window} "
+              f"(insufficient price history from the provider). Refusing "
+              f"to emit an unranked list as a ranking.", file=sys.stderr)
+        sys.exit(1)
     ranked = _rank(survivors, args.window, args.direction)
     top = ranked[: args.top]
 
@@ -1408,14 +1667,29 @@ def main() -> int:
     today_tickers = [r["ticker"] for r in top]
     priors = _list_prior_runs(fingerprint, today_date, lookback_days=10)
     prior_path = priors[0] if priors else None
-    delta = _compute_delta(today_tickers, prior_path)
+    delta = _compute_delta(today_tickers, prior_path,
+                           today_ohlcv_missing=list(warnings.get("ohlcv_missing") or []),
+                           today_params={
+        "filters": {
+            "min_price_usd": args.min_price_usd,
+            "min_volume": args.min_volume,
+            "min_dollar_volume_usd": args.min_dollar_volume_usd,
+            "min_mcap_usd": args.min_mcap_usd,
+        },
+        "top": args.top,
+    })
     streaks = _compute_streaks(today_tickers, fingerprint, today_date)
 
     # 5d. Personalization — tag rows with held/watchlist/theme/new/streak
     # based on strategy.yaml + portfolio-state.yaml. Both are optional;
     # when absent, perz["loaded"]=False and tag lists will be empty (except
     # delta-derived tags, which are always safe).
-    perz = _load_personalization()
+    _sd = None
+    try:
+        _sd = _state_doc_slot[0] if _state_doc_slot else None
+    except NameError:
+        _sd = None  # non-watchlist scopes never define the slot
+    perz = _load_personalization(state_doc=_sd)
     for r in top:
         r["tags"] = _tag_row(r, perz, delta, streaks)
         # Re-render brief now that sector + tags are finalized
@@ -1437,6 +1711,7 @@ def main() -> int:
             "min_dollar_volume_usd": args.min_dollar_volume_usd,
             "min_mcap_usd": args.min_mcap_usd,
         },
+        "top": args.top,
         "universe_size": len(universe),
         "enriched": len(metrics),
         "survivors": len(survivors),
@@ -1454,8 +1729,14 @@ def main() -> int:
     }
 
     prefix = Path(args.output_prefix)
-    _emit_json(result, prefix.with_suffix(".json"))
-    _emit_markdown(result, prefix.with_suffix(".md"), include_tech=args.tech)
+    # Closing round-25: JSON+MD are one result — the old sequential
+    # non-atomic writes let a crash between them pair a new JSON with the
+    # previous run's MD (contradictory numbers under one scope_tag).
+    from scripts.cli_utils import write_pair_atomic
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    write_pair_atomic(result, str(prefix.with_suffix(".json")),
+                      _build_markdown(result, include_tech=args.tech),
+                      str(prefix.with_suffix(".md")))
 
     print(f"[screen] wrote {prefix}.json + {prefix}.md ({len(top)} rows) in {time.time()-t0:.1f}s",
           file=sys.stderr)

@@ -1323,19 +1323,34 @@ def main():
             f"{existing}. {note}" if existing else note
         )
 
-    # WebSearch binding marker — FULL-tier only: all three dims (and the
-    # synthesis derived from them) are fresh under the post-binding
-    # contract, so the artifact as a whole is strict-validatable at every
-    # future load. Partial/no_op artifacts embed reused (possibly
-    # pre-binding) dims and stay unmarked → legacy-lenient. The staging
-    # load below therefore strict-validates full-tier output fail-closed.
-    if ctier == "full":
+    # WebSearch binding marker — CHAIN-MARKED semantics (schema-evolution
+    # probe 2026-08-03 F1). FULL tier: all three dims + synthesis are
+    # fresh under the post-binding contract → stamp. PARTIAL/NO_OP: the
+    # copied dims may predate the binding contract, so stamping is safe
+    # only when the PRIOR artifact was itself marked (its content already
+    # satisfied strict validation; the fresh regenerated parts must too).
+    # Pre-fix, partial/no_op output was NEVER marked — a no-op rebuild of
+    # a fully-marked prior (the shipped AMD 20260730→20260731 chain)
+    # dropped the earned marker, and freshly regenerated synthesis prose
+    # escaped strict WebSearch-binding validation. Unmarked-prior chains
+    # stay legacy-lenient (no spurious failures on genuine legacy dims).
+    _prior_marked = tier_context.get("prior_websearch_binding_marked") is True
+    if ctier == "full" or _prior_marked:
         from scripts.schemas.source_tag import stamp_websearch_binding
         result = stamp_websearch_binding(result)
 
-    # DL3c marker — emit on EVERY assemble run (post-DL3c). Idempotent;
-    # places `_dl3c_version: 1` as the FIRST root key per PEP 468.
-    result = emit_dl3c_root_marker(result)
+    # DL3c marker — EVIDENCE-BASED (closing round-14 F1). The old
+    # unconditional stamp declared usd_native (marker + no cert) for a
+    # BQ run whose gated valuation artifacts DON'T EXIST YET (they are
+    # thesis-Step-5 products; fetch's adr_correction is a pre-DL3c stub)
+    # — a JPY-statement ADR's first BQ artifact carried a false
+    # USD-native currency label. Stamp only when at least one gated
+    # artifact actually ran under the DL3c contract; zero post-DL3c
+    # evidence → unmarked → dispatch reads legacy_pre_dl3c ("currency
+    # lineage undetermined"), which every consumer treats leniently.
+    if any(m in ("post_dl3c_usd_native", "post_dl3c_usd_converted",
+                 "post_dl3c_failed_fx") for m in loaded_modes.values()):
+        result = emit_dl3c_root_marker(result)
 
     # Write to a staging path, validate it, then atomically promote to the
     # canonical path — so the contract-validation failure mode honors the

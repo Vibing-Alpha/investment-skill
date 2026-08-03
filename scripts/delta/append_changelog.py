@@ -36,13 +36,49 @@ def append_changelog(
             f"rejected to prevent exfiltrating sensitive files into the "
             f"committed changelog."
         )
-    if prior_path is None or not Path(prior_path).exists():
+    # Concurrency probe 2026-08-03 F4: a same-day SECOND run must append
+    # to TODAY's already-accumulated changelog, not rebuild from the
+    # resolver-provided prior (yesterday) — the rebuild silently dropped
+    # the earlier same-day run's completed section (no race needed; runs
+    # finishing one after another lost history). Base preference:
+    # today's current file if present, else the prior.
+    base_path = None
+    if current_path.exists():
+        base_path = current_path
+        # Idempotency: the old rebuild-from-prior was naturally retry-safe;
+        # accumulate-mode must not double-append when an orchestration step
+        # is re-run with the identical section.
+        _existing = current_path.read_text(encoding="utf-8")
+        if delta_section.rstrip() and delta_section.rstrip() in _existing:
+            print(f"append_changelog: identical delta section already "
+                  f"present in {current_path} — skipping duplicate append.")
+            return
+    elif prior_path is not None and Path(prior_path).exists():
+        base_path = Path(prior_path)
+    if base_path is None:
         body = f"# {ticker} — Changelog\n\n{delta_section.rstrip()}\n"
     else:
-        prior_content = Path(prior_path).read_text(encoding="utf-8").rstrip()
+        prior_content = base_path.read_text(encoding="utf-8").rstrip()
         body = f"{prior_content}\n\n---\n\n{delta_section.rstrip()}\n"
 
-    current_path.write_text(body, encoding="utf-8")
+    # Closing round-6 F1: write_text truncates in place — a crash
+    # mid-write left a torn changelog that the accumulate-mode base
+    # preference then inherited forever. Temp + os.replace (repo
+    # convention).
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(current_path.parent),
+                               prefix=".changelog.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, str(current_path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _cli():

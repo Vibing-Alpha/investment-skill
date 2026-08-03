@@ -82,6 +82,26 @@ def decide_tier(prior_dir: str | Path | None, *, force_refresh: bool = False,
               file=sys.stderr)
         return (TIER_FULL, -1)
 
+    # Closing round-12 F1: age must be measured from the last GENUINE
+    # refresh (full/partial), not from the newest dir — daily runs
+    # otherwise chain no_op→no_op forever, each seeing a 1-day-old prior,
+    # and the 21/90-day valves never fire (pure-function repro: still
+    # no_op at chained run 25). A no_op copy carries the true vintage in
+    # meta.prior_source_date (the SKILL preserves it through chains).
+    try:
+        import json
+        _prior_art = prior_path / "industry_analysis.json"
+        if _prior_art.exists():
+            _m = (json.loads(_prior_art.read_text(encoding="utf-8"))
+                  .get("meta") or {})
+            if (_m.get("research_mode") == "no_op"
+                    and isinstance(_m.get("prior_source_date"), str)):
+                _v = date.fromisoformat(_m["prior_source_date"])
+                if _v <= prior_date:
+                    prior_date = _v
+    except (OSError, ValueError, TypeError):
+        pass  # fail-open-ok: unreadable prior meta → dirname date (the pre-fix behavior, still bounded by this run's own copy chain)
+
     days_since = (today - prior_date).days
     if days_since < 0:
         # Prior dir is in the future — clock skew or test fixture. Treat as no prior.

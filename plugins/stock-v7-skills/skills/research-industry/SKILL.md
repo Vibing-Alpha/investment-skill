@@ -80,8 +80,15 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.3" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
+
+> **Single-writer note (concurrency probe):** same-slug/day runs share
+> one run dir (`.run_state.json` + `industry_analysis.json` +
+> `summary.md`) with NO session lock — two concurrent sessions on the
+> same industry will interleave tier state and outputs. Do not run this
+> skill for the same industry in two sessions at once; sequential
+> same-day reruns are fine.
 
 ## Preflight: Money-path config
 
@@ -250,7 +257,59 @@ SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
+# Closing round-13 F2: fresh-destination guard (probe-4B family) — the
+# resolver excludes today, so a sequential same-day rerun after a
+# morning full/partial would resolve YESTERDAY as prior and this cp
+# would overwrite today's fresh research with the stale copy. A
+# same-day non-no_op destination is kept; skip the copy AND the meta
+# rewrite below.
+SKIP_COPY=$("$PYBIN" -c "
+import json, pathlib
+from scripts.delta.calendar import session_et
+p = pathlib.Path('$REPORT_DIR/industry_analysis.json')
+skip = 'no'
+if p.exists():
+    try:
+        m = (json.loads(p.read_text(encoding='utf-8')).get('meta') or {})
+        if (m.get('analysis_date') == session_et().isoformat()
+                and m.get('research_mode') in ('full', 'partial')):
+            skip = 'yes'
+    except ValueError:
+        pass
+print(skip)
+")
+if [ "$SKIP_COPY" = "yes" ]; then
+  echo "[research-industry] SKIP no_op copy: destination already holds TODAY's fresh full/partial artifact (fresh-destination guard)." >&2
+else
 cp "$PRIOR_DIR/industry_analysis.json" "$REPORT_DIR/industry_analysis.json"
+# Closing round-3: the byte-for-byte copy carried the PRIOR run's
+# analysis_date / research_mode — the Aug-3 human deliverable rendered
+# "Aug 1 / full" as if it described the current run. Rewrite meta to
+# THIS run's identity; the copied ANALYSIS content keeps its true
+# vintage via prior_source_date.
+"$PYBIN" -c "
+import datetime, json, os, pathlib
+from scripts.delta.calendar import session_et
+p = pathlib.Path('$REPORT_DIR/industry_analysis.json')
+doc = json.loads(p.read_text(encoding='utf-8'))
+m = doc.get('meta') or {}
+# Closing round-12 F1: preserve the ORIGINAL refresh vintage through
+# no_op chains (probe-4H semantics) — a no_op copying a no_op keeps the
+# TRUE full/partial date, so decide_tier's 21/90-day valves fire.
+_bn = os.path.basename('$PRIOR_DIR')
+if m.get('research_mode') == 'no_op' and m.get('prior_source_date'):
+    pass  # chain: keep the prior copy's original vintage as-is
+else:
+    m['prior_source_date'] = m.get('analysis_date') or (
+        _bn[:4] + '-' + _bn[4:6] + '-' + _bn[6:8]
+        if len(_bn) == 8 and _bn.isdigit() else None)
+m['analysis_date'] = session_et().isoformat()
+m['generated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+m['research_mode'] = 'no_op'
+doc['meta'] = m
+p.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding='utf-8')
+"
+fi
 # Then dispatch summary subagent in no_op mode (see Step 4).
 ```
 
@@ -289,9 +348,31 @@ ctx = {
     'sector_etf': {'symbol': etf['etf'], 'proxy_note': etf['proxy_note']},
     'user_force_refresh': state['force_refresh'],
 }
+# Peripheral probe 2026-08-03: the prompt consumes prior candidate_tickers
+# as 'prior_candidates_hint' but this context never carried it — every
+# partial refresh silently started selection without the prior universe.
+hint = []
+if prior:
+    pp = pathlib.Path(prior) / 'industry_analysis.json'
+    if pp.exists():
+        try:
+            doc = json.loads(pp.read_text(encoding='utf-8'))
+            hint = [c.get('ticker') for c in (doc.get('candidate_tickers') or [])
+                    if isinstance(c, dict) and c.get('ticker')]
+        except ValueError:
+            hint = []
+ctx['prior_candidates_hint'] = hint
 pathlib.Path('$REPORT_DIR/.tier_context.json').write_text(
     json.dumps(ctx, indent=2), encoding='utf-8')
 "
+# Clear the stale destination BEFORE dispatching (round-37, same family as
+# the thesis events clear and the summary.md clear below): the session dir
+# is reused on a sequential same-day rerun, so if the agent fails to write,
+# a leftover MORNING industry_analysis.json would be stamped + validated +
+# recorded as this run's freshly-authored artifact. With the file cleared,
+# a missed write fails the stamp step loudly instead (the resolver skips
+# missing-artifact dirs, so an aborted run can't be served as a prior).
+rm -f "$REPORT_DIR/industry_analysis.json"
 ```
 
 Spawn ONE subagent whose instructions are
@@ -336,24 +417,57 @@ from scripts.schemas.source_tag import stamp_websearch_binding
 p = pathlib.Path('$REPORT_DIR/industry_analysis.json')
 data = json.loads(p.read_text(encoding='utf-8'))
 p.write_text(json.dumps(stamp_websearch_binding(data), indent=2, ensure_ascii=False), encoding='utf-8')
-" || { echo "[fatal] could not stamp _websearch_binding_version onto industry_analysis.json" >&2; exit 1; }
+" || { echo "[fatal] could not stamp _websearch_binding_version onto industry_analysis.json (agent missed its write?)" >&2; "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "industry/$SLUG" --skill research-industry --tier "$TIER" --no-completed || true; exit 1; }
 fi
 "$PYBIN" -c "
+import json, pathlib, sys
 from scripts.schemas.industry_analysis import load_industry_analysis
-import sys
+# Closing round-11: bind the artifact to THIS run's identity — a
+# schema-valid artifact carrying another context's slug/mode (LLM
+# cross-wire) previously validated and was published under the
+# requested slug's directory.
+state = json.loads(pathlib.Path('$REPORT_DIR/.run_state.json').read_text(encoding='utf-8'))
+# Closing round-32: when a no_op run's fresh-destination guard KEPT
+# today's morning full/partial artifact, that artifact legitimately
+# declares its own mode — binding it to this run's 'no_op' tier
+# deterministically failed and the failure handler then stamped the
+# morning's completed=true away. Accept the kept artifact's mode in
+# exactly that case (slug binding stays strict).
+expected_mode = state['tier']
 try:
-    art = load_industry_analysis('$REPORT_DIR/industry_analysis.json')
+    _m = (json.loads(pathlib.Path('$REPORT_DIR/industry_analysis.json').read_text(encoding='utf-8')).get('meta') or {})
+    from scripts.delta.calendar import session_et
+    if (state['tier'] == 'no_op'
+            and _m.get('analysis_date') == session_et().isoformat()
+            and _m.get('research_mode') in ('full', 'partial')):
+        expected_mode = _m.get('research_mode')
+except ValueError:
+    pass
+try:
+    art = load_industry_analysis('$REPORT_DIR/industry_analysis.json',
+                                 expected_slug=state['slug'],
+                                 expected_mode=expected_mode)
     print(f'OK: {art.meta.industry_name} mode={art.meta.research_mode} candidates={len(art.candidate_tickers)}')
 except Exception as e:
     print(f'FATAL: industry_analysis.json failed validation: {e}', file=sys.stderr)
     sys.exit(1)
-" || exit 1
+" || { TIER=$("$PYBIN" -c "import json,pathlib;print(json.loads(pathlib.Path('$REPORT_DIR/.run_state.json').read_text(encoding='utf-8'))['tier'])"); "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "industry/$SLUG" --skill research-industry --tier "$TIER" --no-completed || true; exit 1; }
 ```
 
 On validation failure, re-dispatch the agent with the SchemaError message
 inlined (unbound-WebSearch-tag errors mean the agent must re-emit with
 real urls + access dates — never invent them). Up to 2 retries; on 3rd
-failure, surface the error and STOP.
+failure, surface the error and STOP. (Closing round-30: the failure
+handler above stamps `run_meta.industry --no-completed` — the agent's
+invalid output has already REPLACED the canonical artifact, and without
+the stamp a morning run's completed=true would let the resolver serve
+the invalid replacement as a valid prior tomorrow.)
+
+First clear the stale destination — `rm -f "$REPORT_DIR/summary.md"`
+(closing round-15 F3: the session dir is reused, so on a sequential
+same-day rerun the nonempty-only gate below would accept the MORNING
+run's summary if the subagent misses its write; with the file cleared,
+a missed write fails the gate loudly instead).
 
 Generate `summary.md` via a separate light subagent reading the validated
 JSON at `<captured-abs-ROOT>/<REPORT_DIR>/industry_analysis.json` +
@@ -457,6 +571,7 @@ RI_DELTA_SECTION_EOF
 
 "$PYBIN" -m scripts.delta.append_changelog \
     --ticker "industry/$SLUG" \
+    --prior "$PRIOR_DIR/summary.changelog.md" \
     --current "$REPORT_DIR/summary.changelog.md" \
     --delta-section "$DELTA_FILE"
 

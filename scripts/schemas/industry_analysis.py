@@ -17,6 +17,7 @@ tilt logic) call load_.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Any, Mapping
 from scripts.schemas.errors import SchemaError
 from scripts.schemas.source_tag import (
     SOURCE_TAG_RE,
+    check_source_tag,
     validate_source_tags,
     websearch_binding_active,
 )
@@ -45,7 +47,12 @@ _REGIME = frozenset({"tailwind", "neutral", "headwind"})
 _RESEARCH_MODE = frozenset({"full", "partial", "no_op"})
 
 _MAX_CANDIDATES = 12  # selection budget; downstream /score-business is per-ticker
-_MIN_CANDIDATES = 1   # at least one candidate, else why publish?
+# Closing round-21: the producer contract is "select 5-12" (prompt Phase
+# 4; SKILL description) — the old floor of 1 let an under-produced
+# single-candidate screen publish as a valid industry universe. A niche
+# industry genuinely lacking 5 investable names must surface that to the
+# user (re-dispatch / widen scope), not silently ship a 1-name screen.
+_MIN_CANDIDATES = 5
 
 _PRIORITY_MIN = 1
 _PRIORITY_MAX = 3  # 1 = top pick, 2 = strong, 3 = watchlist
@@ -160,8 +167,11 @@ def _opt_float(d: Mapping[str, Any], key: str, *, path: str) -> float | None:
     v = d.get(key)
     if v is None:
         return None
-    _require(isinstance(v, (int, float)) and not isinstance(v, bool),
-             f"{path}.{key}", "must be number or null")
+    # Closing round-4: json.loads accepts the NaN token — a NaN TAM
+    # previously sailed through the "strict" gate. Finite required.
+    _require(isinstance(v, (int, float)) and not isinstance(v, bool)
+             and math.isfinite(v),
+             f"{path}.{key}", "must be a FINITE number or null")
     return float(v)
 
 
@@ -212,6 +222,19 @@ def _validate_framing(d: Mapping[str, Any]) -> IndustryFraming:
                  f"{tam_src!r} missing canonical source tag "
                  f"[API|WebSearch|Filing|Calc: <descriptor>]")
     cagr = _opt_float(d, "cagr_5y_pct", path=path)
+    # Closing round-18: the field is PERCENT POINTS ("use 28, not 0.28"
+    # per the producer contract) — a decimal-scale slip (0.28 for 28%)
+    # previously validated and rendered "0.28%" (wrong by 100x). A
+    # nonzero |v| < 1 is overwhelmingly the decimal mistake, not a
+    # genuine sub-1% forward CAGR for a researched industry; reject with
+    # a self-explanatory message (units.md raw-percent convention).
+    if cagr is not None and cagr != 0 and abs(cagr) < 1:
+        _fail("framing.cagr_5y_pct",
+              f"{cagr} looks decimal-scaled — the contract is percent "
+              f"points (28 means 28%). Nonzero values in (-1, 1) are "
+              f"rejected as suspected decimal scale; for a genuinely "
+              f"sub-1% CAGR, round to 0 or 1 and state the precise "
+              f"figure inside cagr_source.")
     cagr_src = _opt_str(d, "cagr_source", path=path)
     _require((cagr is None) == (cagr_src is None),
              "framing.cagr_5y_pct and cagr_source", "must be both set or both null")
@@ -282,6 +305,28 @@ def _validate_sector_signal(d: Mapping[str, Any]) -> SectorSignal:
     regime = _require_str(d, "regime", path=path)
     _require(regime in _REGIME,
              "sector_signal.regime", f"{regime!r} not in {sorted(_REGIME)}")
+    # Closing rounds 14/19: the regime label is a DETERMINISTIC function
+    # of the trends per the prompt contract — tailwind = 20d>0 AND 60d>0
+    # AND 5d >= -2; headwind = 20d<0 AND 60d<0; neutral = anything else
+    # (incl. any null window). Enforce the exact classification when all
+    # three windows are known; with a null window only 'neutral' is
+    # contract-consistent, but stay lenient there (the contract itself
+    # says "any window null → neutral", so enforce that too when 20/60
+    # are known and 5d is null → neutral).
+    if t5 is not None and t20 is not None and t60 is not None:
+        expected = ("tailwind" if (t20 > 0 and t60 > 0 and t5 >= -2)
+                    else "headwind" if (t20 < 0 and t60 < 0)
+                    else "neutral")
+    else:
+        # Closing round-24: the contract is explicit — ANY null window →
+        # neutral (a null 20d beside 'tailwind' previously validated).
+        expected = "neutral"
+    _require(regime == expected, "sector_signal.regime",
+             f"regime={regime!r} contradicts the deterministic "
+             f"classification {expected!r} for trends 5d={t5}, "
+             f"20d={t20}, 60d={t60} (contract: tailwind = 20d>0 AND "
+             f"60d>0 AND 5d>=-2; headwind = 20d<0 AND 60d<0; else "
+             f"neutral, incl. any null window)")
     rationale = _require_str(d, "regime_rationale", path=path)
     _require(len(rationale) <= 200,
              "sector_signal.regime_rationale", "must be ≤200 chars")
@@ -292,11 +337,31 @@ def _validate_sector_signal(d: Mapping[str, Any]) -> SectorSignal:
     )
 
 
-def validate_industry_analysis(data: Mapping[str, Any]) -> IndustryAnalysis:
-    """In-memory validation. Raises SchemaError on any contract violation."""
+def validate_industry_analysis(
+    data: Mapping[str, Any],
+    *,
+    expected_slug: str | None = None,
+    expected_mode: str | None = None,
+) -> IndustryAnalysis:
+    """In-memory validation. Raises SchemaError on any contract violation.
+
+    ``expected_slug`` / ``expected_mode`` (closing round-11): identity
+    binding — a schema-valid artifact carrying ANOTHER context's
+    slug/research_mode (LLM cross-wire) previously validated and was
+    published under the requested slug's directory. Same pattern as the
+    BQ score-file dimension/ticker identity gates.
+    """
     _require(isinstance(data, Mapping), "<root>", "top-level must be mapping")
 
     meta = _validate_meta(data.get("meta", {}))
+    if expected_slug is not None and meta.slug != expected_slug:
+        _fail("meta.slug",
+              f"artifact declares slug={meta.slug!r} but this run is for "
+              f"{expected_slug!r} (cross-context agent output) — re-dispatch")
+    if expected_mode is not None and meta.research_mode != expected_mode:
+        _fail("meta.research_mode",
+              f"artifact declares research_mode={meta.research_mode!r} but "
+              f"this run decided {expected_mode!r} — re-dispatch")
     framing = _validate_framing(data.get("framing", {}))
 
     raw_candidates = data.get("candidate_tickers", ())
@@ -335,6 +400,11 @@ def validate_industry_analysis(data: Mapping[str, Any]) -> IndustryAnalysis:
     # companion field (tam_source / cagr_source / exposure_source).
     # Per-driver, per-risk, per-catalyst, and per-candidate-rationale must be tagged.
     untagged: list[str] = []
+    # Closing round-14 F3: rules/research-industry.md requires a source
+    # tag on the one-line thesis — the validator previously accepted an
+    # untagged headline claim (rendered verbatim as the summary title).
+    if SOURCE_TAG_RE.search(framing.one_line_thesis) is None:
+        untagged.append("framing.one_line_thesis")
     for i, drv in enumerate(framing.key_drivers):
         if SOURCE_TAG_RE.search(drv) is None:
             untagged.append(f"framing.key_drivers[{i}]")
@@ -351,6 +421,31 @@ def validate_industry_analysis(data: Mapping[str, Any]) -> IndustryAnalysis:
              "source tags",
              f"missing in: {', '.join(untagged)} "
              "(every claim needs [API:...] / [WebSearch:...] / [Calc:...] / [Filing:...])")
+    # Peripheral probe 2026-08-03: presence (regex search) is not quality —
+    # a placeholder-theater tag like `[Calc: formula]` or an invented KIND
+    # riding beside a canonical one previously validated. Run the full
+    # canonical check on every tagged claim field (plus the sourced
+    # companions and one_line_thesis when it carries tags).
+    for _path, _val in (
+        [(f"framing.key_drivers[{i}]", v)
+         for i, v in enumerate(framing.key_drivers)]
+        + [(f"candidate_tickers[{i}].rationale", c.rationale)
+           for i, c in enumerate(candidates)]
+        + [(f"risks[{i}]", v) for i, v in enumerate(risks)]
+        + [(f"catalysts[{i}]", v) for i, v in enumerate(catalysts)]
+        + ([("framing.one_line_thesis", framing.one_line_thesis)]
+           if SOURCE_TAG_RE.search(framing.one_line_thesis) else [])
+        # Closing round-6 F4: the numeric COMPANION source fields were
+        # regex-presence-checked only — `[Calc: formula]` (a forbidden
+        # placeholder) passed as a tam_source.
+        + ([("framing.tam_source", framing.tam_source)]
+           if framing.tam_source else [])
+        + ([("framing.cagr_source", framing.cagr_source)]
+           if framing.cagr_source else [])
+        + [(f"candidate_tickers[{i}].exposure_source", c.exposure_source)
+           for i, c in enumerate(candidates) if c.exposure_source]
+    ):
+        check_source_tag(_val, artifact=_ARTIFACT, path=_path)
 
     # WebSearch binding (Plan B Task 6): artifacts carrying the root
     # marker `_websearch_binding_version: 1` (stamped by the
@@ -373,7 +468,12 @@ def validate_industry_analysis(data: Mapping[str, Any]) -> IndustryAnalysis:
     )
 
 
-def load_industry_analysis(path: str | Path) -> IndustryAnalysis:
+def load_industry_analysis(
+    path: str | Path,
+    *,
+    expected_slug: str | None = None,
+    expected_mode: str | None = None,
+) -> IndustryAnalysis:
     """I/O wrapper: read JSON from disk then validate."""
     p = Path(path)
     try:
@@ -381,4 +481,5 @@ def load_industry_analysis(path: str | Path) -> IndustryAnalysis:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         raise SchemaError(_ARTIFACT, str(p), f"failed to load: {e}") from e
-    return validate_industry_analysis(data)
+    return validate_industry_analysis(
+        data, expected_slug=expected_slug, expected_mode=expected_mode)

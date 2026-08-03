@@ -662,7 +662,10 @@ def _enrich_decisions(
 # Blob validation (pre-persist, fail-closed)
 # ---------------------------------------------------------------------------
 
-def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
+def _validate_blob_shape(
+    blob: Dict[str, Any],
+    soft_principles: Optional[List[str]] = None,
+) -> List[str]:
     """Check the LLM-authored decisions blob for required fields + enum
     vocabularies per prompts/portfolio-decide.md. Returns error strings.
 
@@ -674,6 +677,13 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
     sequence/type/linked_decision on orders, and ticker/event/what_to_watch
     on follow_ups — fields required by prompts/portfolio-decide.md that
     were previously unchecked and could slip through into the log.
+
+    Closing round-38: when `soft_principles` (the compiled principle list)
+    is supplied, every clause-leading `#N` tag in principle_cited must be
+    within [1, len(soft_principles)] — an LLM indexing typo like "#99"
+    otherwise renders in decisions.md as an authoritative citation and
+    lands in the persisted cited_this_run audit. cmd_write runs this
+    second pass right after loading strategy.compiled.yaml.
     """
     errors: List[str] = []
     # Guard against non-list top-level fields — `blob.get("decisions", []) or []`
@@ -928,6 +938,33 @@ def _validate_blob_shape(blob: Dict[str, Any]) -> List[str]:
                 file=sys.stderr,
             )
 
+    # Closing round-38: principle-index range check (second pass — needs the
+    # compiled principle list, which cmd_write loads AFTER the up-front shape
+    # call). Tags are extracted by the SAME clause-leading parser the audit
+    # uses (_principle_tags), so what gets validated is exactly what gets
+    # credited/rendered. An EMPTY compiled list skips the check — there is
+    # nothing to bind to (legacy/default-principles configs); the audit
+    # section already reports zero valid tags for those.
+    if soft_principles:
+        valid_n = len(soft_principles)
+        for i, d in enumerate(_as_list("decisions")):
+            if not isinstance(d, dict):
+                continue
+            v = d.get("principle_cited")
+            if not isinstance(v, str):
+                continue
+            for tag in _principle_tags([v]):
+                try:
+                    n = int(tag.lstrip("#"))
+                except ValueError:
+                    continue
+                if not (1 <= n <= valid_n):
+                    errors.append(
+                        f"decisions[{i}] ({d.get('ticker', '?')}): "
+                        f"principle_cited tag {tag} is out of range — "
+                        f"strategy.compiled.yaml defines #1..#{valid_n}"
+                    )
+
     return errors
 
 
@@ -1025,11 +1062,19 @@ def _enrich_orders(
         shares = o.get("shares") or 0  # fail-open-ok: guarded by `if px and shares:` truthy check below — shares=0 skips notional computation
         if px and shares:
             notional = round(px * shares, 2)
-            o.setdefault("est_execution_price", px)
+            # Closing round-25: ASSIGN, never setdefault — enrichment owns
+            # this field. A plausible LLM-supplied est_execution_price in
+            # the blob previously survived and the md rendered "@ market
+            # \$90" while the safety math used the \$100 quote.
+            o["est_execution_price"] = px
             if o.get("action") == "sell":
                 o["est_proceeds"] = notional
             elif o.get("action") == "buy":
                 o["est_cost"] = notional
+        else:
+            # no computable price → no enrichment claims survive either
+            for _k in ("est_execution_price", "est_cost", "est_proceeds"):
+                o.pop(_k, None)
         out.append(o)
     return out
 
@@ -1053,13 +1098,18 @@ def _render_md(log: Dict[str, Any]) -> str:
     pb = log["portfolio_before"]
     lines.append("## 组合快照(执行前)")
     lines.append("")
-    lines.append(f"总权益 **${pb['total_equity']:,.2f}** · 现金 **${pb['cash']:,.2f}** ({pb['cash_pct']}%)")
+    _cp = pb.get('cash_pct')
+    lines.append(f"总权益 **${pb['total_equity']:,.2f}** · 现金 **${pb['cash']:,.2f}**"
+                 + (f" ({_cp}%)" if _cp is not None else " (—)"))
     lines.append("")
     lines.append("| Ticker | 股数 | 成本 | 现价 | 市值 | 权重 | 盈亏 |")
     lines.append("|---|---:|---:|---:|---:|---:|---:|")
     for h in pb["holdings"]:
-        cb = f"{h['cost_basis']:.2f}" if h.get('cost_basis') else "—"
-        px = f"{h['price']:.2f}" if h.get('price') else "—"
+        # Closing round-4: explicit 0 is a REAL value for both fields
+        # (zero-basis position; delisted-at-zero price) — only None is
+        # missing. Truthiness rendered a legitimate 0 basis as "—".
+        cb = f"{h['cost_basis']:.2f}" if h.get('cost_basis') is not None else "—"
+        px = f"{h['price']:.2f}" if h.get('price') is not None else "—"
         mv = f"{h['market_value']:,.0f}" if h.get('market_value') is not None else "—"
         wt = f"{h['weight_pct']}%" if h.get('weight_pct') is not None else "—"
         pnl = f"{h['pnl_pct']:+.1f}%" if h.get('pnl_pct') is not None else "—"
@@ -1085,21 +1135,52 @@ def _render_md(log: Dict[str, Any]) -> str:
     lines.append(f"**Regime**: `{m.get('regime')}` — {m.get('regime_interpretation')}")
     lines.append("")
     rows = [("SPY", m.get("spy")), ("QQQ", m.get("qqq")), ("DJI", m.get("dji"))]
-    lines.append("| 指标 | 现值 | MA50 | vs MA50 |")
+    # Display probe 2026-08-03 F3: the header previously said MA50/vs MA50
+    # while the VIX row carried MA20 data beneath it — a human read the
+    # VIX regime comparison under the wrong moving-average tenor. Neutral
+    # header + per-row tenor labels.
+    lines.append("| 指标 | 现值 | 均线 | vs 均线 |")
     lines.append("|---|---:|---:|---:|")
     for name, d in rows:
         if d:
-            lines.append(f"| {name} | {d.get('price')} | {d.get('ma50')} | {d.get('vs_ma50_pct')}% |")
+            # Closing round-8: a failed index feed persisted
+            # `| SPY | None | MA50 None | None% |` — None is missing
+            # data, render as '—' (the regime already classified it as
+            # incomplete; the table must not dress it as a number).
+            _p = d.get('price')
+            _ma = d.get('ma50')
+            _vs = d.get('vs_ma50_pct')
+            lines.append(
+                f"| {name} | {_p if _p is not None else '—'} | "
+                f"{'MA50 ' + str(_ma) if _ma is not None else '—'} | "
+                f"{str(_vs) + '%' if _vs is not None else '—'} |")
     if m.get("vix"):
         ri_vix = (m.get("regime_inputs") or {}).get("vix") or {}
         anchor = (m.get("regime_inputs") or {}).get("anchor_session")
         if ri_vix.get("close") is not None and anchor:
             vix_cell = f"{m['vix']} (anchored {ri_vix['close']} @ {anchor})"
-            ma20_cell = f"MA20 {ri_vix.get('ma20', m.get('vix_ma20'))}"
+            _a_ma20 = ri_vix.get('ma20', m.get('vix_ma20'))
+            # closing round-16: anchored close can exist beside a null
+            # MA20 (short history) — '—', never 'MA20 None'
+            ma20_cell = f"MA20 {_a_ma20}" if _a_ma20 is not None else "—"
+            # 4-angle closing round-2: the row shows the ANCHORED pair —
+            # its percentage must come from the same pair, not from the
+            # live quote (live 24 vs anchored 20 previously rendered an
+            # anchored 20/20 row with a 20.0% column).
+            _c = ri_vix.get("close")
+            if (isinstance(_c, (int, float)) and not isinstance(_c, bool)
+                    and isinstance(_a_ma20, (int, float))
+                    and not isinstance(_a_ma20, bool) and _a_ma20 > 0):
+                pct_cell = f"{round((_c - _a_ma20) / _a_ma20 * 100, 2)}%"
+            else:
+                pct_cell = "—"
         else:
             vix_cell = f"{m['vix']}"
-            ma20_cell = f"MA20 {m.get('vix_ma20')}"
-        lines.append(f"| VIX | {vix_cell} | {ma20_cell} | {m.get('vix_vs_ma20_pct')}% |")
+            _vma = m.get('vix_ma20')
+            _vpct = m.get('vix_vs_ma20_pct')
+            ma20_cell = f"MA20 {_vma}" if _vma is not None else "—"
+            pct_cell = f"{_vpct}%" if _vpct is not None else "—"
+        lines.append(f"| VIX | {vix_cell} | {ma20_cell} | {pct_cell} |")
     lines.append("")
     # Constraints
     c = log.get("constraints_active") or {}
@@ -1117,7 +1198,11 @@ def _render_md(log: Dict[str, Any]) -> str:
     lines.append("|---|---|---|---|---|---|")
     for d in decisions:
         cur = d.get("current_weight_pct", 0)  # fail-open-ok: 0% weight is legit (no position in this ticker)
-        tgt = d.get("target_weight_pct", cur)
+        if cur is None:
+            cur = 0
+        tgt = d.get("target_weight_pct")
+        if tgt is None:
+            tgt = cur  # closing round-16: explicit null target (hold/skip) reads as unchanged, never 'None%' 
         ts = d.get("thesis_snapshot") or {}
         er = f"{ts.get('er')}%" if ts.get("er") is not None else "—"
         ce = f"{ts.get('ce')}" if ts.get("ce") is not None else "—"
@@ -1387,6 +1472,27 @@ def _verify_source_hash(
             print(f"WARNING: {msg}", file=sys.stderr)
             return
         raise ValueError(msg)
+    # Closing round-5 F1: source_hash covers ONLY principles by contract
+    # (the SKILL's compile-time notes-freshness guard handles cache
+    # staleness at run START) — but a notes-only strategy edit BETWEEN
+    # compile and this write-time check passed undetected, persisting
+    # decisions authored under the old load-bearing notes
+    # (conflict_priority etc.). Same mechanism as the compile-time guard:
+    # content comparison, not a hash-formula change (no lockstep break).
+    src_notes = src.get("principle_notes") or {}
+    compiled_notes = compiled.principle_notes or {}
+    if src_notes != compiled_notes:
+        msg = (
+            f"strategy.yaml principle_notes differ from the compiled "
+            f"file's — a notes-only edit landed after compile. The "
+            f"decisions were authored under the OLD notes; recompile "
+            f"(re-run /portfolio) and re-check the decisions before "
+            f"logging."
+        )
+        if allow_stale:
+            print(f"WARNING: {msg}", file=sys.stderr)
+            return
+        raise ValueError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1649,6 +1755,22 @@ def cmd_write(args: argparse.Namespace) -> int:
     constraints_active = dict(hard)
     constraints_active["source_hash"] = src_hash
 
+    # Closing round-38: with the compiled principles in hand, range-check
+    # every clause-leading #N in principle_cited. An out-of-range tag
+    # ("#99" against a 8-principle strategy — a plain LLM indexing typo)
+    # previously rendered in decisions.md as an authoritative citation and
+    # was persisted into the cited_this_run audit.
+    principle_errors = _validate_blob_shape(
+        blob, soft_principles=all_principles_from_doc)
+    if principle_errors:
+        print("portfolio_log: REFUSED — invalid principle citation(s):",
+              file=sys.stderr)
+        for e in principle_errors:
+            print(f"  - {e}", file=sys.stderr)
+        print("  Fix principle_cited to reference the numbered principles "
+              "in strategy.compiled.yaml and re-run.", file=sys.stderr)
+        return 2
+
     decisions = _enrich_decisions(blob.get("decisions", []), portfolio_before)
     orders = _enrich_orders(blob.get("orders_proposed", []) or [], prices)
 
@@ -1725,6 +1847,108 @@ def cmd_write(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
+    # Closing round-27: the AUTHORING-time context seal — Step 5
+    # records the state hash + per-ticker thesis vintages it
+    # authored against (.decision_ctx.json). The validation-time
+    # hash below only covers validate→log; this closes
+    # author→validate. State drift → REFUSE; thesis refreshed
+    # after authoring → WARN (the supported mid-run re-analysis
+    # path requires re-affirming the decision, not a hard block).
+    # Closing round-41: this check is UNCONDITIONAL — it used to sit
+    # inside the --stress-test branch, so the documented all-hold/
+    # no-orders path (which legitimately omits the flag) skipped seal
+    # enforcement entirely and could persist S0-authored decisions
+    # beside an S1 snapshot.
+    _ctx_path = pathlib.Path(args.output_dir) / ".decision_ctx.json"
+    if _ctx_path.exists():
+        try:
+            _ctx = json.loads(_ctx_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _ctx = None
+        # Closing round-34: a PRESENT but unparseable seal — or one
+        # missing its state hash — is a crash-window/truncation
+        # artifact, NOT a legacy flow (only Step 5 ever writes this
+        # file). Silently skipping it re-opened the author→validate
+        # gate: an S1 state edit after a torn seal write persisted
+        # S0-authored decisions without even the legacy WARN.
+        # Unknown = fail-closed → REFUSE.
+        _ctx_sha = (_ctx.get("state_file_sha256")
+                    if isinstance(_ctx, dict) else None)
+        if not (isinstance(_ctx_sha, str) and _ctx_sha):
+            print(
+                "portfolio_log: REFUSED — .decision_ctx.json seal "
+                "exists but is unreadable or malformed (no "
+                "state_file_sha256); cannot verify the decisions "
+                "were authored against the current state. Re-run "
+                "the Step-5 seal (or delete the file to proceed as "
+                "a legacy unsealed flow).",
+                file=sys.stderr,
+            )
+            return 2
+        import hashlib as _hl2
+        try:
+            with open(args.state, "rb") as _sf2:
+                _now_sha = _hl2.sha256(
+                    _sf2.read()).hexdigest()
+        except OSError:
+            _now_sha = None
+        if _now_sha != _ctx_sha:
+            print(
+                f"portfolio_log: REFUSED — portfolio-state"
+                f".yaml changed since the decisions were "
+                f"AUTHORED (Step-5 seal {_ctx_sha[:12]}…, "
+                f"current {(_now_sha or 'unreadable')[:12]}"
+                f"…). Re-run the decision step against the "
+                f"current state.",
+                file=sys.stderr,
+            )
+            return 2
+        _ctx_ga = _ctx.get("thesis_generated_at")
+        if isinstance(_ctx_ga, dict):
+            for _d in (blob.get("decisions") or []):
+                _t = (_d or {}).get("ticker")
+                if not _t or _t not in _ctx_ga:
+                    continue
+                _cur_dir = None
+                try:
+                    from scripts.delta.resolver import \
+                        find_latest_prior as _flp
+                    _cur_dir = _flp(_t, "investment-thesis",
+                                    include_today=True)
+                except Exception:  # noqa: BLE001 — advisory check only
+                    _cur_dir = None
+                if _cur_dir is None:
+                    continue
+                _tp = _cur_dir / "investment_thesis.json"
+                if not _tp.exists():
+                    continue
+                try:
+                    _cur_ga = (json.loads(
+                        _tp.read_text(encoding="utf-8"))
+                        .get("meta") or {}).get("generated_at")
+                except (OSError, ValueError):
+                    continue
+                if _cur_ga != _ctx_ga.get(_t):
+                    print(
+                        f"[WARN] portfolio_log: the thesis for "
+                        f"{_t} was refreshed AFTER the decision "
+                        f"was authored (sealed "
+                        f"{_ctx_ga.get(_t)!r}, current "
+                        f"{_cur_ga!r}) — the persisted "
+                        f"thesis_snapshot reflects the NEW "
+                        f"thesis while the action/rationale "
+                        f"predate it; re-affirm the decision.",
+                        file=sys.stderr,
+                    )
+    else:
+        print(
+            "[WARN] portfolio_log: no .decision_ctx.json seal in "
+            "the output dir (legacy flow) — cannot verify the "
+            "decisions were authored against the current state/"
+            "thesis vintages.",
+            file=sys.stderr,
+        )
+
     stress = None
     if args.stress_test:
         stress_path = pathlib.Path(args.stress_test)
@@ -1752,6 +1976,67 @@ def cmd_write(args: argparse.Namespace) -> int:
         # artifacts without the echo get a WARN (can't verify), a present
         # echo that mismatches is a hard refusal.
         if isinstance(v, dict):
+            # Concurrency probe 2026-08-03 F3: verify the validator ran
+            # against the SAME portfolio-state content we are about to
+            # snapshot — an edit between Step 6 and Step 8 (user or another
+            # session) previously persisted S0-authored decisions beside an
+            # S1 snapshot undetected. Same posture as the orders echo:
+            # present-and-mismatched → REFUSE; absent → legacy WARN.
+            _v_state_sha = v.get("state_file_sha256")
+            if isinstance(_v_state_sha, str) and _v_state_sha:
+                import hashlib as _hl
+                try:
+                    with open(args.state, "rb") as _sf:
+                        _cur_sha = _hl.sha256(_sf.read()).hexdigest()
+                except OSError:
+                    _cur_sha = None
+                if _cur_sha != _v_state_sha:
+                    print(
+                        f"portfolio_log: REFUSED — portfolio-state.yaml "
+                        f"changed between validation and logging (validator "
+                        f"bound sha {_v_state_sha[:12]}…, current "
+                        f"{(_cur_sha or 'unreadable')[:12]}…). The decisions "
+                        f"were authored against a DIFFERENT state. Re-run "
+                        f"scripts.validate (and re-check the decisions) "
+                        f"against the current state.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            else:
+                print(
+                    "[WARN] portfolio_log: stress-test artifact carries no "
+                    "state_file_sha256 binding (legacy validator output) — "
+                    "cannot verify the state was unchanged since validation.",
+                    file=sys.stderr,
+                )
+            # Closing round-13 F1: bind the validator artifact to the SAME
+            # constraint values this log will attest as active — a mid-run
+            # recompile (legit principle edit) previously paired NEW
+            # constraints_active with an OLD stress verdict. Same posture
+            # as the orders echo: present-and-mismatched → REFUSE; absent
+            # → legacy WARN.
+            _cv = v.get("constraints_validated")
+            if isinstance(_cv, dict):
+                _now = {k: hard.get(k)
+                        for k in ("max_single_position", "max_sector",
+                                  "min_cash", "max_holdings")}
+                if _cv != _now:
+                    print(
+                        f"portfolio_log: REFUSED — the stress-test artifact "
+                        f"validated under constraints {_cv} but the current "
+                        f"compiled constraints are {_now} (recompiled "
+                        f"mid-run?). Re-run scripts.validate against the "
+                        f"current strategy.compiled.yaml.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            else:
+                print(
+                    "[WARN] portfolio_log: stress-test artifact carries no "
+                    "constraints_validated echo (legacy validator output) — "
+                    "cannot verify it validated under THESE constraints.",
+                    file=sys.stderr,
+                )
             echo = v.get("orders_validated")
             if echo is None:
                 print(
@@ -1993,7 +2278,36 @@ def cmd_write(args: argparse.Namespace) -> int:
         import shutil
         shutil.copy2(json_path, archive_json)
         if md_path.exists():
-            shutil.copy2(md_path, archive_json.with_suffix(".md"))
+            # Closing round-4 F1: the pair replace is per-file atomic, so a
+            # crash between the JSON and MD replaces can leave JSON=run B
+            # beside MD=run A. Archiving both under B's id would freeze a
+            # permanently mixed pair. The MD renders its own run_id line —
+            # verify it matches; on mismatch archive the MD under its OWN
+            # id and warn.
+            _md_text = md_path.read_text(encoding="utf-8")
+            _m = re.search(r"\*\*run_id\*\*: `([A-Za-z0-9TZ._:\-]{4,64})`",
+                           _md_text)
+            _md_rid = _m.group(1).replace(":", "_") if _m else None
+            if (_md_rid is not None and prior_run_id is not None
+                    and not prior_run_id.startswith("unknown-")
+                    and _md_rid != prior_run_id
+                    and re.fullmatch(r"[A-Za-z0-9TZ._\-]{4,64}", _md_rid)):
+                md_archive = out_dir / f"decisions.{_md_rid}.md"
+                n2 = 2
+                while md_archive.exists():
+                    md_archive = out_dir / f"decisions.{_md_rid}-{n2}.md"
+                    n2 += 1
+                shutil.copy2(md_path, md_archive)
+                print(
+                    f"[WARN] portfolio_log: canonical decisions.md carries "
+                    f"run_id {_md_rid} but decisions.json carries "
+                    f"{prior_run_id} (torn pair from an interrupted write) — "
+                    f"archived the MD under its OWN id ({md_archive.name}) "
+                    f"instead of pairing it with the JSON archive.",
+                    file=sys.stderr,
+                )
+            else:
+                shutil.copy2(md_path, archive_json.with_suffix(".md"))
         print(f"portfolio_log: archived prior same-day run -> {archive_json.name}")
 
     # Pair write: stages both tmps first, replaces JSON (canonical) then

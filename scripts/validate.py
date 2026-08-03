@@ -1119,6 +1119,16 @@ def validate_portfolio(
         # DIFFERENT order set as "stress-tested".
         "orders_validated": [dict(o) for o in (proposed_orders or [])
                              if isinstance(o, dict)],
+        # Closing round-13 F1: exact echo of the CONSTRAINTS this artifact
+        # validated under — a mid-run recompile (legit principle edit)
+        # otherwise let the logger pair NEW constraints_active with an OLD
+        # stress verdict ("min_cash 0.20" printed beside a PASS computed
+        # at 0.10).
+        "constraints_validated": {
+            k: normalized_constraints.get(k)
+            for k in ("max_single_position", "max_sector",
+                      "min_cash", "max_holdings")
+        },
     }
 
 
@@ -1162,9 +1172,14 @@ def _main():
 
     # Read inputs
     try:
-        with open(args.state, "r", encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as exc:
+        # Closing round-2 F1: read the bytes ONCE and both parse and hash
+        # from them — the previous parse-then-reopen-for-hash left a
+        # window where an atomic state replacement made the hash bind S1
+        # while the validation ran on S0 (defeating the binding contract).
+        with open(args.state, "rb") as f:
+            _state_bytes = f.read()
+        state = yaml.safe_load(_state_bytes.decode("utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"{prefix}: failed to read --state {args.state}: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -1208,6 +1223,14 @@ def _main():
     constraints = compiled.hard_constraints.to_mapping()
 
     result = validate_portfolio(state, prices, orders, constraints)
+
+    # Concurrency probe 2026-08-03 F3: bind this validation to the EXACT
+    # portfolio-state content it ran against. portfolio_log compares the
+    # hash at write time — an edit to portfolio-state.yaml between Step 6
+    # (validate) and Step 8 (log) previously persisted S0-authored
+    # decisions beside an S1 snapshot with no detectable mismatch.
+    import hashlib
+    result["state_file_sha256"] = hashlib.sha256(_state_bytes).hexdigest()
 
     write_output(result, args.output)
 

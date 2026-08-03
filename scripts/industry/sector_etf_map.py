@@ -38,12 +38,25 @@ class ETFChoice(NamedTuple):
 # direct sector ETF exists. The `proxy_note` is surfaced in the JSON so
 # the agent can copy it into `regime_rationale`.
 _MAP = (
-    # Semiconductors and adjacent component plays
-    (("ai-chips", "ai-chip", "semiconductor", "semi-", "mlcc",
-      "passive-component", "memory", "foundry"),
+    # Semiconductors — direct SOXX constituencies. Closing round-3: the
+    # bare substring "memory" matched "memory-care" (senior housing!) —
+    # use chip-specific tokens; the bare-slug "memory" case is handled by
+    # the exact-match special case in map_slug_to_etf.
+    (("ai-chips", "ai-chip", "semiconductor", "semi-", "memory-chip",
+      "dram", "nand", "hbm", "flash-memory", "foundry"),
      "SOXX",
      False,
      ""),
+    # 4-angle probe: MLCC / passive components are NOT SOXX constituents —
+    # SOXX is an END-MARKET proxy for them (the SKILL's own contract
+    # example requires a non-empty proxy note here; an empty note let the
+    # agent present SOXX's trend as direct industry exposure).
+    (("mlcc", "passive-component"),
+     "SOXX",
+     True,
+     "SOXX is an end-market proxy: MLCC/passive-component names are not "
+     "SOXX constituents; its trend reflects downstream semiconductor "
+     "demand, not this industry directly"),
     # Cybersecurity has a dedicated ETF
     (("cybersecurity", "infosec", "cyber-security"),
      "HACK",
@@ -64,8 +77,17 @@ _MAP = (
      "ICLN",
      False,
      ""),
-    # Energy (fossil)
-    (("oil", "natural-gas", "oilfield", "lng", "energy"),
+    # Energy (fossil). Closing round-15 F2: the bare substring "energy"
+    # matched nuclear-energy / energy-storage as DIRECT fossil-XLE
+    # exposure — fossil-specific tokens only; the exact slug "energy" is
+    # handled by the exact-match carve-out in map_slug_to_etf, and
+    # non-fossil energy slugs fall to the honest proxy fallback.
+    # Closing round-41: bare substring "oil" matched copper-fOIL and
+    # sOIL-remediation as fossil XLE — "oil" is now a whole-SEGMENT match
+    # in map_slug_to_etf (covers oil / crude-oil / oil-services), not a
+    # token here.
+    (("natural-gas", "oilfield", "lng", "fossil", "petroleum",
+      "coal"),
      "XLE",
      False,
      ""),
@@ -106,20 +128,31 @@ _MAP = (
      "XLU",
      False,
      ""),
-    # Communications / telecom / media
-    (("telecom", "wireless-carrier", "broadband", "media",
+    # Communications / telecom / media. Closing round-41: bare substring
+    # "media" matched sOIL-reMEDIAtion — "media" is now a whole-SEGMENT
+    # match in map_slug_to_etf (covers media / social-media /
+    # digital-media), not a token here.
+    (("telecom", "wireless-carrier", "broadband",
       "streaming", "social-media", "advertising"),
      "XLC",
      False,
      ""),
-    # Software / cloud / SaaS (broad tech sector since no dedicated SaaS ETF)
-    (("software", "saas", "cloud-", "enterprise-software"),
-     "XLK",
-     False,
-     ""),
-    # AI broadly (not chip-specific) — also XLK
+    # Closing round-31: SPECIFIC before GENERIC — 'ai-software'
+    # contains the substring 'software' and previously matched the
+    # IGV-direct entry first, dropping its required proxy note.
+    # AI broadly (not chip-specific) — XLK as a labeled thematic proxy
     (("ai-software", "generative-ai", "ai-platform"),
      "XLK",
+     True,
+     "XLK is a broad-technology proxy: no dedicated AI-software sector "
+     "ETF exists; its trend reflects large-cap tech, not this theme "
+     "directly"),
+    # Software / cloud / SaaS — IGV (iShares Expanded Tech-Software) IS
+    # the dedicated software-sector ETF (closing round-23: the old XLK
+    # entry admitted "no dedicated ETF" yet shipped an empty proxy note,
+    # presenting broad-tech momentum as direct software momentum).
+    (("software", "saas", "cloud-", "enterprise-software"),
+     "IGV",
      False,
      ""),
 )
@@ -142,6 +175,32 @@ def map_slug_to_etf(slug: str) -> ETFChoice:
     if not slug:
         return ETFChoice("SPY", "empty slug → broad-market fallback")
     norm = slug.lower()
+
+    # Closing round-3: the bare slug "memory" (memory chips in this
+    # tool's domain) stays SOXX-direct as an EXACT match only —
+    # substring "memory" previously routed memory-care to SOXX.
+    if norm == "memory":
+        return ETFChoice("SOXX", "")
+    if norm == "energy":
+        return ETFChoice("XLE", "")
+    # Closing round-40: the dashed tokens "cloud-"/"ev-" exist because the
+    # bare substrings over-match ("ev" is inside developer/elevator-class
+    # slugs), but normalization legitimately emits the BARE slugs for the
+    # plain requests "cloud" and "EV" (the SKILL's own trigger examples) —
+    # which then fell through to SPY. Exact-match them to their entries.
+    if norm == "cloud":
+        return ETFChoice("IGV", "")
+    if norm == "ev":
+        return ETFChoice("DRIV", "")
+    # Closing round-41: "oil" must match whole slug SEGMENTS only — as a
+    # bare substring it routed copper-fOIL and sOIL-remediation to fossil
+    # XLE (and no dashed variant helps: "soil-" contains "oil-"). Segment
+    # membership covers oil / crude-oil / oil-services / oil-gas exactly.
+    if "oil" in norm.split("-"):
+        return ETFChoice("XLE", "")
+    # Same class: "media" inside reMEDIAtion routed soil-remediation to XLC.
+    if "media" in norm.split("-"):
+        return ETFChoice("XLC", "")
 
     for patterns, etf, is_proxy, note in _MAP:
         for pat in patterns:

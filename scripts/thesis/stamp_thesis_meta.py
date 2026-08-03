@@ -67,6 +67,14 @@ def stamp_meta(
     meta["ticker"] = ticker
     meta["analysis_date"] = analysis_date
     meta["generated_at"] = generated_at
+    # Closing round-26: stamp the EXECUTING pipeline's contract version —
+    # run_meta labels the completed chain SYSTEM_VERSION but the artifact
+    # itself previously carried no version to cross-check (an artifact
+    # produced under a skewed prompt/pipeline was laundered as current).
+    # Stamped by CODE, not the prompt, so it attests the pipeline that
+    # actually ran; the typed loader fail-closes on a mismatch.
+    from scripts.delta.run_meta import SYSTEM_VERSION
+    meta["output_version"] = SYSTEM_VERSION
     thesis["meta"] = meta
     return thesis
 

@@ -78,7 +78,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.3" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -167,8 +167,10 @@ chase-risk, overbought/oversold, RSI, MACD, or volume anomalies — i.e.
 most of the time. Skip it only for a fast change-%-only scan.
 
 **Watchlist path**: if the user says "观察池" without a path, check
-`<captured-abs-ROOT>/portfolio-state.yaml` for holdings (each top-level key is
-a ticker). If present, use it. If not, ask the user.
+`<captured-abs-ROOT>/portfolio-state.yaml` — the parser extracts tickers
+from its `holdings:` mapping keys plus the `watchlist:` list (top-level
+keys like `cash`/`open_orders` are NOT tickers). If present, use it. If
+not, ask the user.
 
 **Theme with no GICS sector** (e.g. "铝电容/被动元件", "固态电池", "GLP-1
 CDMO" — a narrow industry that isn't one of the GICS-11 sectors, with no
@@ -204,16 +206,18 @@ scope, Claude should typically raise `--min-mcap-usd` one order of
 magnitude — sector screens are usually about mid/large caps worth
 analyzing, not penny-stock pumps that sneak through FMP's /gainers.
 
-For `watchlist:X` scope, go the OTHER way: **relax** the floors (usually
-`--min-price 0 --min-volume 0 --min-mcap-usd 0`). The watchlist is the
-user's explicit, curated input, but `_filter` is scope-blind — it applies
-the same market-tuned defaults (price ≥ USD 5, volume ≥ 500k, mcap ≥ USD 300M)
-and silently drops anything below them, with NO record of the drop (only
-fetch failures land in `warnings.ohlcv_missing`). Left at defaults, a
-watchlist screen will quietly delete hand-picked thin tickers — most often
-foreign ADRs that trade lightly on US OTC (e.g. Japanese passive-component
-names). That is silent loss of the user's chosen universe. Add a floor back
-only when the user explicitly wants to thin a large pasted list.
+For `watchlist:X` scope, go the OTHER way: **ALWAYS pass**
+`--min-price 0 --min-volume 0 --min-mcap-usd 0` (not "usually" — this is
+the rule). The watchlist is the user's explicit, curated input; the
+market-tuned defaults (price ≥ USD 5, volume ≥ 500k, mcap ≥ USD 300M)
+would drop hand-picked thin tickers — most often foreign ADRs that trade
+lightly on US OTC (e.g. Japanese passive-component names). Safety net:
+on watchlist scope the script DISCLOSES every floor-dropped ticker in
+`warnings.floor_filtered` (JSON + the MD Warnings section) — if that key
+appears in the output, tell the user which of their tickers were
+filtered and why instead of presenting the ranking as complete. Add a
+floor back only when the user explicitly wants to thin a large pasted
+list.
 
 Relax the defaults only if the user explicitly wants small caps, penny
 stocks, or micro-cap speculation. The exact numbers live in

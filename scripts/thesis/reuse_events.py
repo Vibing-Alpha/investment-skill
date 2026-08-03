@@ -104,10 +104,17 @@ def write_reuse_path(
                 f"recording it as fresh.",
                 file=sys.stderr,
             )
+        from scripts.delta.run_meta import SYSTEM_VERSION as _SYSV
+        _cur_version_ok = (
+            isinstance(cur, dict)
+            and isinstance(cur.get("meta"), dict)
+            and cur["meta"].get("output_version") == _SYSV
+        )
         if (isinstance(cur, dict)
                 and isinstance(cur.get("meta"), dict)
                 and "reuse_meta" not in cur["meta"]
-                and not _floor_missing):
+                and not _floor_missing
+                and _cur_version_ok):
             print(
                 "[reuse_events] SKIP: destination events.json is a fresh "
                 "same-session output (no reuse_meta) — not overwriting with "

@@ -107,16 +107,16 @@ def write_pair_atomic(json_data, json_path, text, text_path):
     Stages both files as tmp siblings first, then replaces in order:
     JSON (canonical) → text (derived). If either tmp write raises,
     both tmps are cleaned up and nothing is committed. If the JSON
-    rename succeeds but the text rename fails, JSON lands alone and
-    the text tmp is removed — which is acceptable because `decisions.json`
-    is the audit canonical and the MD is a view over it; a rerun
-    regenerates the MD from the same committed JSON.
+    rename succeeds but the text rename FAILS (round-35: the realistic
+    trigger is a Windows editor lock on the .md), the canonical JSON is
+    ROLLED BACK to its prior content (or removed when there was none),
+    so a run-B JSON never persists beside a run-A MD — the human
+    deliverable and the audit canonical stay the same generation.
 
-    Per-file atomicity is guaranteed by os.replace; the pair is NOT
-    atomic with respect to an external observer reading both files
-    between the two replaces (brief window where JSON is new but MD
-    is old/absent). Callers that need strict joint consistency should
-    treat missing/stale MD as "rerun required".
+    Per-file atomicity is guaranteed by os.replace. Residual (documented):
+    a hard process kill in the microseconds between the two replaces
+    cannot roll back — the next run's archive step archives the MD under
+    its OWN embedded run_id, so the torn pair never archives mixed.
     """
     json_out = json.dumps(json_data, indent=2, ensure_ascii=False) + "\n"
     json_dir = Path(json_path).resolve().parent
@@ -126,6 +126,7 @@ def write_pair_atomic(json_data, json_path, text, text_path):
 
     j_fd, j_tmp = tempfile.mkstemp(dir=str(json_dir), suffix=".tmp")
     t_fd, t_tmp = tempfile.mkstemp(dir=str(text_dir), suffix=".tmp")
+    j_backup = None
     try:
         with os.fdopen(j_fd, "w", encoding="utf-8") as f:
             f.write(json_out)
@@ -133,14 +134,39 @@ def write_pair_atomic(json_data, json_path, text, text_path):
         with os.fdopen(t_fd, "w", encoding="utf-8") as f:
             f.write(text)
         t_fd = None
+        # Snapshot the current canonical JSON so a failed text commit can
+        # roll it back.
+        if os.path.exists(json_path):
+            b_fd, j_backup = tempfile.mkstemp(dir=str(json_dir), suffix=".bak")
+            with os.fdopen(b_fd, "wb") as bf:
+                with open(json_path, "rb") as cf:
+                    bf.write(cf.read())
         # Both tmps are on disk; commit in canonical-first order.
         os.replace(j_tmp, json_path)
         j_tmp = None
-        os.replace(t_tmp, text_path)
-        t_tmp = None
+        try:
+            os.replace(t_tmp, text_path)
+            t_tmp = None
+        except OSError:
+            # Roll the canonical JSON back so the pair stays one generation.
+            try:
+                if j_backup is not None:
+                    os.replace(j_backup, json_path)
+                    j_backup = None
+                else:
+                    os.unlink(json_path)
+            except OSError:
+                pass  # rollback best-effort; the raise below is loud
+            raise
+        if j_backup is not None:
+            try:
+                os.unlink(j_backup)
+            except OSError:
+                pass
+            j_backup = None
     finally:
         # Cleanup any unclaimed tmp paths on early failure.
-        for tmp in (j_tmp, t_tmp):
+        for tmp in (j_tmp, t_tmp, j_backup):
             if tmp:
                 try:
                     os.unlink(tmp)

@@ -76,6 +76,15 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
+> **Single-writer note (concurrency probe 2026-08-03):** all same-day
+> portfolio runs share `reports/portfolio/<date>/` (macro.json + scratch
+> files) with NO session lock — two concurrent /portfolio sessions can
+> log one session's decisions against the other's prices. Do not run
+> /portfolio in two sessions at once; sequential same-day reruns are
+> fine (the earlier log is archived). Also do NOT edit
+> portfolio-state.yaml while a run is in flight — the validator now
+> binds its state hash and the logger refuses on mismatch.
+
 ## Preflight: Money-path config
 
 ```bash
@@ -448,6 +457,48 @@ Read the output JSON. This provides:
   per those principles' own criteria.
 
 ## Step 5: Make Decisions
+
+**First, seal the authoring context** (closing round-27): record WHAT
+state and thesis vintages the decisions are about to be authored
+against — the log writer refuses/warns when they drift before Step 8
+(an S0-authored rationale beside an S1 snapshot previously persisted
+undetected; the validation-time hash only covers validate→log).
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+"$PYBIN" -c "
+import hashlib, json, pathlib
+import yaml
+from scripts.delta.resolver import find_latest_prior
+state_bytes = pathlib.Path('portfolio-state.yaml').read_bytes()
+state = yaml.safe_load(state_bytes.decode('utf-8')) or {}
+tickers = sorted(set(list((state.get('holdings') or {}).keys())
+                     + list(state.get('watchlist') or [])))
+thesis_ga = {}
+for t in tickers:
+    d = find_latest_prior(t, 'investment-thesis', include_today=True)
+    if d is not None and (d / 'investment_thesis.json').exists():
+        try:
+            m = json.loads((d / 'investment_thesis.json').read_text(encoding='utf-8')).get('meta') or {}
+            thesis_ga[t] = m.get('generated_at')
+        except ValueError:
+            pass
+out = pathlib.Path('reports/portfolio/$ETDAY')
+out.mkdir(parents=True, exist_ok=True)
+# Atomic write (round-34): a torn/truncated seal is treated by the log
+# writer as malformed → hard REFUSE, so never leave a partial file behind.
+import os
+tmp = out / '.decision_ctx.json.tmp'
+tmp.write_text(json.dumps({
+    'state_file_sha256': hashlib.sha256(state_bytes).hexdigest(),
+    'thesis_generated_at': thesis_ga,
+}, indent=2), encoding='utf-8')
+os.replace(tmp, out / '.decision_ctx.json')
+print('decision ctx sealed for', len(tickers), 'tickers')
+"
+```
 
 Read `<captured-abs-ROOT>/prompts/portfolio-decide.md`.
 

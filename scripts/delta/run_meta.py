@@ -72,6 +72,13 @@ class RunMeta:
     thesis: Optional[ThesisSection] = None
     industry: Optional[IndustrySection] = None
     warnings: List[str] = field(default_factory=list)
+    # Closing round-3 F1: sections from an unloadable/version-mismatched
+    # prior file are PARKED here verbatim (with their original
+    # output_version) — preserved but never served. Grafting them into
+    # the live slots previously laundered a shape-compatible old-version
+    # thesis under the freshly-stamped current root version, and the
+    # resolver then served it as current.
+    preserved_legacy: dict = field(default_factory=dict)
 
     def add_warning(self, msg: str) -> None:
         self.warnings.append(msg)
@@ -98,6 +105,9 @@ class RunMeta:
             thesis=thesis,
             industry=industry,
             warnings=data.get("warnings", []),
+            preserved_legacy=(data.get("preserved_legacy")
+                              if isinstance(data.get("preserved_legacy"), dict)
+                              else {}),
         )
 
     @classmethod
@@ -146,11 +156,13 @@ def _load_preserving(meta_path: Path, ticker: str) -> RunMeta:
             f"instead of overwriting (resolver treats them as no-prior).",
             file=sys.stderr,
         )
-        rm.bq = _raw.get("bq") if isinstance(_raw.get("bq"), dict) else None
-        rm.thesis = (_raw.get("thesis")
-                     if isinstance(_raw.get("thesis"), dict) else None)
-        rm.industry = (_raw.get("industry")
-                       if isinstance(_raw.get("industry"), dict) else None)
+        parked = {
+            k: _raw[k] for k in ("bq", "thesis", "industry")
+            if isinstance(_raw.get(k), dict)
+        }
+        if parked:
+            parked["output_version"] = _raw.get("output_version")
+            rm.preserved_legacy = parked
         if isinstance(_raw.get("warnings"), list):
             rm.warnings = [w for w in _raw["warnings"] if isinstance(w, str)]
     return rm

@@ -204,6 +204,19 @@ def _validate_meta(raw: Any) -> ThesisMeta:
     if not _ISO_TS_RE.match(generated_at):
         raise SchemaError(_ARTIFACT, "meta.generated_at",
                           f"not ISO timestamp with TZ: {generated_at!r}")
+    # Closing round-26: stamp_thesis_meta stamps the executing pipeline's
+    # contract version — a PRESENT version that differs from the current
+    # one means the artifact was produced by a different pipeline
+    # (version-skew laundering); fail-close. Absent = legacy, lenient.
+    _ov = raw.get("output_version")
+    if _ov is not None:
+        from scripts.delta.run_meta import SYSTEM_VERSION as _SYSV
+        if _ov != _SYSV:
+            raise SchemaError(
+                _ARTIFACT, "meta.output_version",
+                f"artifact was produced under contract {_ov!r}; the "
+                f"current pipeline is {_SYSV!r} — re-run the thesis under "
+                f"the current version")
     # current_price is optional (the KEY may be absent, unlike ER/CE whose
     # keys must be present-but-may-be-null). Absent or null → None. A present
     # value must be a positive finite number — a price is never <= 0.

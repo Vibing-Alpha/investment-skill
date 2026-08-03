@@ -81,8 +81,15 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.3" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
+
+> **Single-writer note (concurrency probe 2026-08-03):** run dirs are
+> shared per ticker+day with NO session lock — two concurrent sessions
+> running this skill for the SAME ticker will interleave score/state
+> writes and can persist an artifact assembled from both sessions'
+> halves. Do not run this skill for the same ticker in two sessions at
+> once; a same-day RERUN after the earlier run finished is fine.
 
 ## Preflight: Money-path config
 
@@ -484,13 +491,22 @@ missing = [k for k in EVENTS_STRUCTURAL_FLOOR if k not in data]
 if missing:
     print(f'FATAL: events.json is missing required sections {missing} — the events agent dropped part of the contracted output.', file=sys.stderr)
     sys.exit(1)
+# Closing round-11: a FRESH events output must carry the CURRENT
+# contract version — a 7.0/absent output_version previously passed this
+# gate and was served in THIS run's thesis (Gate 4 only blocks reuse on
+# the NEXT run).
+from scripts.delta.run_meta import SYSTEM_VERSION
+_ov = (data.get('meta') or {}).get('output_version')
+if _ov != SYSTEM_VERSION:
+    print(f'FATAL: fresh events.json declares output_version={_ov!r}; the current contract is {SYSTEM_VERSION!r} — the events agent emitted an outdated/absent contract version.', file=sys.stderr)
+    sys.exit(1)
 try:
     validate_source_tags(data, artifact='events',
                          strict_websearch=websearch_binding_active(data, artifact='events'))
 except ValueError as e:
     print(f'FATAL: events.json WebSearch source-binding validation failed: {e}', file=sys.stderr)
     sys.exit(1)
-" || { "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] events.json failed its structural floor or WebSearch source-binding validation — a fresh events output must carry all contracted sections and bind every [WebSearch:] tag (outlet + url + access-date). run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Re-dispatch the events agent with the error above; if it fails again, STOP." >&2; exit 1; }
+" || { rm -f "$REPORT_DIR/events.json"; "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] events.json failed its structural floor / version / WebSearch source-binding validation — the INVALID file has been DELETED so a same-day retry cannot adopt it as fresh — a fresh events output must carry all contracted sections and bind every [WebSearch:] tag (outlet + url + access-date). run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Re-dispatch the events agent with the error above; if it fails again, STOP." >&2; exit 1; }
 ```
 
 ### Step 5: Valuation + Technical (always fresh)
@@ -533,7 +549,12 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
 rm -f "$REPORT_DIR/data/historical_multiples.json" \
       "$REPORT_DIR/data/fcf_inputs.json" \
       "$REPORT_DIR/data/peer_multiples.json" \
-      "$REPORT_DIR/data/reverse_dcf.json"
+      "$REPORT_DIR/data/reverse_dcf.json" \
+      "$REPORT_DIR/alpha_scan.json" \
+      "$REPORT_DIR/.alpha_status.json"
+# (closing round-15 F4: alpha artifacts are THIS run's products too — a
+# same-day rerun otherwise let a missed Phase-1 write serve the MORNING
+# run's candidates/phase label as current.)
 
 # Historical multiples + extract_fcf EXIT 1 (after writing a structured
 # `status: error` JSON) when they DL4 fail-close — expected for Dec-FYE names
@@ -709,8 +730,16 @@ MA200-approximation notes.
 ### Step 6: Synthesis (with events_reuse_context if reused)
 
 Spawn synthesis agent with `<captured-abs-ROOT>/prompts/evaluate-thesis.md`.
-If events was reused (Step 4 took the reuse path), include the
-`events_reuse_context` block per the prompt. Read `bq_analysis.json` from
+Include the `events_reuse_context` block per the prompt ONLY when
+`$REPORT_DIR/.events_reuse.json` reports `"status": "reused"` — NOT
+whenever the Step-3 decision was `reuse`. On a same-day rerun the
+fresh-destination guard can keep this morning's fresh `events.json`
+(the guard then writes `status: "fresh"`); a reuse context in that case
+would claim a prior-run provenance (`from_date`, `meta.reuse_meta`) the
+kept artifact does not carry, and the synthesis agent would transcribe
+that false "events reused from a prior run" label into
+thesis_summary.md. `status: "fresh"` → treat events as a fresh output
+(no context block). Read `bq_analysis.json` from
 same-day or prior BQ dir (the `<BQ_DIR>` Step 5a printed).
 
 Include `<captured-abs-ROOT>/strategy.yaml` in the dispatch input list — the
@@ -730,6 +759,20 @@ emphasise the JSON and silently drop the human file:
 - `$REPORT_DIR/thesis_summary.md` — human-facing summary in
   `output_language` (default zh-CN), <600 words
 
+> **Number-transcription rule (display probe 2026-08-03):** every number
+> in thesis_summary.md must be quoted VERBATIM from the JSON artifacts —
+> never re-derived with a flipped frame. ONE deterministic carve-out:
+> `capital_efficiency` is computed AFTER synthesis by
+> `scripts.thesis.compute_thesis_ce`, so the summary may state CE as
+> `round(expected_return / abs(max_downside), 4)` computed from the two
+> verbatim JSON fields — the IDENTICAL formula the script applies (any
+> other derivation is forbidden). The demonstrated failure:
+> `margin_of_safety_pct: -15.2` (defined as fair-mid/price − 1) was
+> transcribed as "高于中值 15.2%" — but price-above-mid is a DIFFERENT
+> ratio (price/mid − 1 = +17.9% in that run). Either quote the field with
+> its own framing ("安全边际 −15.2%") or, if re-framing, recompute with
+> the correct denominator and say which ratio it is.
+
 > **Dispatch note (`.claude/rules/skill-architecture.md` #8):** the harness
 > blocks subagent `.md` writes via the Write tool. Instruct the synthesis
 > agent to write `thesis_summary.md` via a Bash heredoc with a content-unique
@@ -748,6 +791,10 @@ changelog; it is NOT an `investment_thesis.json` field and the prompt
 does not define it, so the orchestrator gets it from the agent's return.
 On a first thesis run (empty `PRIOR_THESIS_DIR` from Step 0) it is just
 "First thesis run — no prior to diff" + the headline stance.
+Numbers in the delta_note (ER / max downside / CE, current AND prior)
+are quoted VERBATIM at the JSON's own precision — never re-rounded
+(closing round-5: "-16.8% from" beside the prior entry's verbatim
+"-16.75%" made the same run carry two precisions in one changelog).
 
 **Verify both files before proceeding** — a synthesis agent that emits
 only the JSON is a known failure mode (the human deliverable Step 8

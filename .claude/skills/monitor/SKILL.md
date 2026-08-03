@@ -74,6 +74,12 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
+> **Single-writer note (concurrency probe):** same-day monitor runs
+> share one run dir (`monitor_probe.json` + digest) with NO session
+> lock — a second session overwriting the probe mid-run can pair one
+> session's routing reasons with another's market facts. Do not run
+> /monitor in two sessions at once; sequential same-day reruns are fine.
+
 ## Preflight: Money-path config
 
 ```bash

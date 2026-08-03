@@ -78,6 +78,13 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
+> **Single-writer note (concurrency probe 2026-08-03):** run dirs are
+> shared per ticker+day with NO session lock — two concurrent sessions
+> running this skill for the SAME ticker will interleave score/state
+> writes and can persist an artifact assembled from both sessions'
+> halves. Do not run this skill for the same ticker in two sessions at
+> once; a same-day RERUN after the earlier run finished is fine.
+
 ## Preflight: Money-path config
 
 ```bash
@@ -523,6 +530,33 @@ cat > "$TIER_CONTEXT_JSON" <<TIER_CONTEXT_JSON_EOF
   }
 }
 TIER_CONTEXT_JSON_EOF
+
+# 2b) Chain-marked stamping input (schema-evolution probe 2026-08-03 F1):
+# partial/no_op output earns the WebSearch-binding marker iff the prior
+# artifact (same-day predecessor OR resolver prior) was itself marked —
+# copied content then already satisfied strict validation. Deterministic;
+# runs regardless of tier (assemble ignores it on full).
+"$PYBIN" -c "
+import json, pathlib
+from scripts.delta.resolver import find_latest_prior
+def _marked(p):
+    try:
+        return json.loads(pathlib.Path(p).read_text(encoding='utf-8')).get('_websearch_binding_version') == 1
+    except (OSError, ValueError):
+        return False
+marked = False
+cur = pathlib.Path('$REPORT_DIR/bq_analysis.json')
+if cur.exists():
+    marked = _marked(cur)
+if not marked:
+    prior = find_latest_prior('$TICKER', 'score-business')
+    if prior is not None and (pathlib.Path(prior) / 'bq_analysis.json').exists():
+        marked = _marked(pathlib.Path(prior) / 'bq_analysis.json')
+ctx_p = pathlib.Path('$TIER_CONTEXT_JSON')
+ctx = json.loads(ctx_p.read_text(encoding='utf-8'))
+ctx['prior_websearch_binding_marked'] = marked
+ctx_p.write_text(json.dumps(ctx, indent=2, ensure_ascii=False), encoding='utf-8')
+"
 
 # 3) Run assembler (cross-checks both sources, aborts on mismatch).
 # Round-16: the exit code MUST be checked — on a same-day rerun the

@@ -42,13 +42,19 @@ def _f(v):
         return None
 
 
-def load_universe(state_path: Path):
+def load_universe(state_path: Path, state_doc: dict | None = None):
     """Return ([{ticker, source, shares, cost_basis}], cash|None). Holding wins over watchlist.
-    Missing file → ([], None) (fail-closed; caller emits a warning)."""
-    if not Path(state_path).exists():
+    Missing file → ([], None) (fail-closed; caller emits a warning).
+    state_doc: pre-parsed portfolio-state (closing round-32 — the probe
+    parses ONCE and shares the doc with load_vendor_aliases, so a mid-run
+    state sync can't mix two versions in one probe)."""
+    if state_doc is not None:
+        data = state_doc
+    elif not Path(state_path).exists():
         return [], None
-    with open(state_path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    else:
+        with open(state_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
     holdings = data.get("holdings") or {}
     watchlist = data.get("watchlist") or []
     cash = data.get("cash")
@@ -98,7 +104,7 @@ def load_universe(state_path: Path):
     return rows, _f(cash)
 
 
-def load_vendor_aliases(state_path: Path) -> dict:
+def load_vendor_aliases(state_path: Path, state_doc: dict | None = None) -> dict:
     """{state_key: vendor_symbol} projection of portfolio-state symbol_aliases.
 
     ABSENT is soft (missing file / no symbol_aliases key → {} — alias-less
@@ -110,11 +116,14 @@ def load_vendor_aliases(state_path: Path) -> dict:
     Any non-missing-file OSError and yaml.YAMLError PROPAGATE — "can't read
     the state" must stop the fetch, not silently fetch unaliased.
     """
-    try:
-        with open(state_path, encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        return {}
+    if state_doc is not None:
+        state = state_doc
+    else:
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                state = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            return {}
     aliases = state.get("symbol_aliases")
     if aliases is None:
         return {}
@@ -257,6 +266,27 @@ def catalyst_evidence(ticker, calendar, today):
     return ev, warns
 
 
+# Closing round-23: /monitor is DAILY triage — a stale article in a
+# thin ticker's latest-N feed (observed: a 2-year-old acquisition
+# headline) must not become a "new" alert. Hard age ceiling; articles
+# with an unparseable date are KEPT but flagged age_unknown so the
+# router can weigh them (unknown ≠ recent).
+MONITOR_NEWS_MAX_AGE_DAYS = 14
+
+
+def _news_age_days(date_s):
+    """Days since published_at (date or ISO timestamp); None if unparseable."""
+    if not isinstance(date_s, str) or len(date_s) < 10:
+        return None
+    try:
+        import datetime as _dt
+        from scripts.delta.calendar import today_et
+        d = _dt.date.fromisoformat(date_s[:10])
+        return (today_et() - d).days
+    except ValueError:  # fail-open-ok: unparseable date → age_days=None, article KEPT and flagged unknown (router weighs it; unknown never reads as recent)
+        return None
+
+
 def news_evidence(ticker, articles):
     """Normalize {title,published_at,source,url} → evidence; id from url, else hash(title+date+source)."""
     ev, warns = [], []
@@ -265,6 +295,9 @@ def news_evidence(ticker, articles):
         title = (a.get("title") or "").strip()
         date = a.get("published_at")
         source = a.get("source")
+        _age = _news_age_days(date)
+        if _age is not None and _age > MONITOR_NEWS_MAX_AGE_DAYS:
+            continue  # stale feed content, not a daily-triage fact
         url = (a.get("url") or "").strip()
         if url:
             ident = url
@@ -277,7 +310,8 @@ def news_evidence(ticker, articles):
             "evidence_id": evidence_id("news", ticker, ident),
             "kind": "news",
             "text": title,
-            "meta": {"source": source, "date": date, "url": a.get("url")},
+            "meta": {"source": source, "date": date, "url": a.get("url"),
+                     "age_days": _age},
         })
     return ev, warns
 
@@ -295,9 +329,15 @@ def condition_evidence(ticker, invalid_if, entry_attractive_if):
 
 
 def staleness_evidence(ticker, staleness):
+    # Closing round-28: a null age (no current full-BQ anchor) previously
+    # rendered "BQ Noned" — unknown ages read as "unknown", never as a
+    # malformed numeric duration.
+    def _age(v):
+        return f"{v}d" if v is not None else "unknown"
     return {"evidence_id": evidence_id("staleness", ticker, staleness.get("state") or "unknown"),
-            "kind": "staleness", "text": f"BQ {staleness.get('days_since_full_bq')}d / thesis "
-                                         f"{staleness.get('days_since_thesis')}d ({staleness.get('state')})",
+            "kind": "staleness",
+            "text": f"BQ {_age(staleness.get('days_since_full_bq'))} / thesis "
+                    f"{_age(staleness.get('days_since_thesis'))} ({staleness.get('state')})",
             "meta": dict(staleness)}
 
 
@@ -410,6 +450,7 @@ def validate_raw_plan(raw: dict, probe_evidence_ids: set, probe_tickers: set):
     if not isinstance(items, list):                 # missing/non-list items must NOT pass the gate
         raise MonitorValidationError("raw plan must have an `items` list")
     _scan_advice(raw["summary"], "summary")
+    _seen_tickers: set = set()
     for i, item in enumerate(items):
         if not isinstance(item, dict):
             raise MonitorValidationError(f"items[{i}] is not an object")
@@ -420,6 +461,16 @@ def validate_raw_plan(raw: dict, probe_evidence_ids: set, probe_tickers: set):
         ticker = item.get("ticker")
         if ticker is not None and (not isinstance(ticker, str) or ticker not in probe_tickers):
             raise MonitorValidationError(f"items[{i}] ticker must be null or a monitored-universe ticker: {ticker!r}")
+        # Closing round-19 F3: the router contract is ONE visible item per
+        # ticker — two individually valid routes for the same ticker
+        # previously passed and rendered duplicated/conflicting follow-ups.
+        if ticker is not None:
+            if ticker in _seen_tickers:
+                raise MonitorValidationError(
+                    f"items[{i}] duplicate visible item for {ticker} — the "
+                    f"router contract is ONE item per ticker (merge the "
+                    f"routes/reasons into one item)")
+            _seen_tickers.add(ticker)
         if item.get("route") not in _ROUTES:
             raise MonitorValidationError(f"items[{i}] bad route enum: {item.get('route')!r}")
         if item.get("priority") not in _PRIORITIES:
@@ -489,10 +540,19 @@ def render_digest(plan: dict, probe: dict) -> str:
             if e is None:
                 continue   # dangling → omit (validator is the hard gate upstream)
             if e["kind"] == "news":
-                src = (e.get("meta") or {}).get("source") or "?"
-                lines.append(f"- news: «{e['text']}» — {src}")
+                _m = e.get("meta") or {}
+                src = _m.get("source") or "?"
+                _d = _m.get("date")
+                _dtag = (f" ({str(_d)[:10]})" if _d
+                         else " (date unknown)")
+                lines.append(f"- news: «{e['text']}» — {src}{_dtag}")
             elif e["kind"] == "condition":
-                lines.append(f"- fired condition: «{e['text']}»")
+                # Closing round-24: the probe records the condition TEXT,
+                # not whether it fired — a contract-compliant DEFERRED item
+                # (indicators unavailable) was rendered as "fired
+                # condition". Neutral label; the reason line carries the
+                # fired/deferred narrative.
+                lines.append(f"- condition: «{e['text']}»")
             elif e["kind"] == "catalyst":
                 lines.append(f"- catalyst: «{e['text']}» ({(e.get('meta') or {}).get('window')})")
             elif e["kind"] == "staleness":
@@ -629,9 +689,24 @@ def _atomic_write(path: Path, text: str):
 
 
 def _cmd_probe(args):
-    uni, cash = load_universe(Path(args.state))
+    # Closing round-32: parse portfolio-state ONCE and share the doc —
+    # sequential independent reads let a mid-run state sync assemble one
+    # probe from two state versions (S0 holding fetched without its S1-
+    # removed alias).
+    _doc = None
     try:
-        aliases = load_vendor_aliases(Path(args.state))
+        with open(args.state, encoding="utf-8") as _f:
+            _doc = yaml.safe_load(_f) or {}
+    except FileNotFoundError:
+        _doc = None
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"FATAL: {args.state} unreadable/malformed — "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    uni, cash = load_universe(Path(args.state), state_doc=_doc)
+    try:
+        aliases = (load_vendor_aliases(Path(args.state), state_doc=_doc)
+                   if _doc is not None else {})
     except (ValueError, yaml.YAMLError, OSError) as exc:
         print(f"FATAL: symbol_aliases in {args.state} unreadable/malformed — "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)

@@ -54,6 +54,10 @@ or key_metrics. Read from `prior_synthesis_path` and:
 
 - Copy verbatim: `watchlist_recommendation`, `conviction`, `thesis`,
   `key_strengths`, `key_risks`, `contradictions`, `key_metrics`.
+- **Do NOT copy freshness/staleness AGES verbatim into summary.md** —
+  "data is N days old" claims must be recomputed from TODAY's
+  `meta.data_freshness` (a no-op summary that copied "125 天" shipped
+  beside a canonical artifact saying 127 days).
 - Modify `catalyst_calendar`: past entries are already pruned before
   you read (pruned_catalyst_count tells you how many); optionally
   append newly-discovered catalysts from low_signal news.
@@ -244,6 +248,13 @@ Do NOT include:
 Write a one-page summary (under 800 words) in the language specified by
 `output_language` in strategy.yaml (default: zh-CN).
 
+**BQ score display rule:** when quoting the
+overall BQ score, round the weighted average to ONE decimal — identical
+to the canonical rounding `scripts/assemble.py` applies to
+`bq_analysis.json:scores.overall`. Never print more precision (a
+summary saying "7.86" beside a canonical "7.9" reads as two different
+scores to the human cross-referencing them).
+
 If the combined `summary.md` (This Run's Update section ≤150 words +
 Current View section ≤650 words) exceeds 800 words after you've
 truncated low-priority items (low_signal_news list, optional agent
@@ -269,11 +280,19 @@ are in the JSON.
 
 ## DL3c — Currency note (conditional)
 
-The assembled `bq_analysis.json` may carry a `currency_conversion` block at
-root when the underlying statements are non-USD and were FX-converted to USD
-by upstream producers (extract_fcf / historical_multiples / adr/correct). The
-block is present iff `basis == "usd_converted"`; USD-native artifacts emit no
+A `currency_conversion` block may be present when the underlying
+statements are non-USD and were FX-converted to USD by upstream producers
+(extract_fcf / historical_multiples / adr/correct). The block is present
+iff `basis == "usd_converted"`; USD-native artifacts emit no
 `currency_conversion` key (invariant 7).
+
+**Where to read it (synthesis runs BEFORE assembly — `bq_analysis.json`
+does not exist yet):** check the gated data artifacts in order —
+`data/adr_correction.json`, `data/historical_multiples.json`,
+`data/fcf_inputs.json` — and use the first `currency_conversion` block
+found (assembly later propagates the same cert to the canonical root).
+If none of those files exists or carries the block, there is no
+conversion — omit the note.
 
 When the block IS present, render a one-line note immediately under the
 Verdict line in `summary.md` and translate to the configured
@@ -283,7 +302,7 @@ Verdict line in `summary.md` and translate to the configured
 > metrics converted to USD at quarter-end FX (`{fx_source}`). FX risk is
 > excluded from the intrinsic-value calculation.
 
-Fields read from `bq_analysis.currency_conversion`:
+Fields read from the `currency_conversion` block:
 - `source_currency` — ISO 4217 (e.g. `JPY`, `EUR`)
 - `fx_source` — producer identifier (e.g. `yfinance:JPY=X`)
 
