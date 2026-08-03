@@ -75,7 +75,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.7.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 ## Preflight: Money-path config
@@ -386,9 +386,10 @@ Agent C: <captured-abs-ROOT>/prompts/score-industry.md → <captured-abs-ROOT>/<
 Compose each dispatch prompt with **concrete absolute paths** (substitute the
 captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
 shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
-Agent inputs as in pre-delta (02_financial for fundamental; 06+03+05+07 for
-forward; 02+03 + WebSearch for industry), read from
-`<captured-abs-ROOT>/<REPORT_DIR>/data/`. Follow this input list verbatim — do
+Agent inputs as in pre-delta (02_financial for fundamental; 02+06+03+05+07
+for forward — the prompt derives beat/miss from estimates-vs-actuals and
+reads `currency_consistency.status` from 02; 02+03 + WebSearch for
+industry), read from `<captured-abs-ROOT>/<REPORT_DIR>/data/`. Follow this input list verbatim — do
 NOT add `00_validation.json` (the dimension agents' input contract is
 deliberately data-only; validation state is the synthesis agent's read, and
 the two-phase merge in Step 3 already ran so the file is whole).
@@ -716,3 +717,10 @@ failure patterns. Key ones:
   financial-statement arrays (`income_statements`/`cash_flows`/`balance_sheets`)
   are NEWEST-first → `[0]` = latest quarter, `[:4]` for TTM. Do NOT use `[-N:]`
   on statements (it returns the OLDEST rows). When unsure, sort by `report_period`.
+  **`[:4]` is TTM ONLY when the 4 rows are CONSECUTIVE quarters** — verify
+  `fiscal_period` continuity first (a PASSED financials category does NOT
+  guarantee alignment: steady-state non-aligned sets — annual-only filers,
+  young listings — stay PASSED by design). On a gap, do NOT present the sum
+  as TTM: label it "N quarters spanning X months" and lean on the DL4-gated
+  intermediates (`historical_multiples.json` / `fcf_inputs.json`) for any
+  TTM-based number.

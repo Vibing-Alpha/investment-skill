@@ -42,7 +42,10 @@ Growth can be bought (with debt or dilution), but sustained high margins reflect
 genuine competitive advantages in pricing power, cost structure, or operating leverage.
 
 Analyze:
-- Gross margin level and trend (3+ years)
+- Gross margin level and trend (3+ years when the artifact carries it —
+  `02_financial_data.json` targets 16 quarters; if the actual history is
+  shorter, e.g. a young listing, analyze the AVAILABLE span and state it
+  explicitly: "margin trend over 7 quarters" — never extend from memory)
 - Operating margin vs industry peers
 - Net margin trajectory — improving or compressing?
 - DuPont decomposition: margin × turnover × leverage — which lever drives ROE?

@@ -69,6 +69,12 @@ snapshot P/S read 0.64 — "deep value" — when the current-price P/S was 2.07)
 
 Always derive the stock's **current** multiple from the **current price** and
 the latest fundamentals:
+- **ADR guard (check FIRST)**: read `data/adr_correction.json`. If
+  `needs_ratio_correction: true`, the quote is USD-per-ADR while balance-sheet
+  `outstanding_shares` are ORDINARY shares — `price × shares` is wrong by the
+  ADR ratio. Use the file's corrected values (`corrected_pe/pb/ps/...`,
+  `market_cap_used`, `adr_ratio`) instead of deriving your own; never multiply
+  an ADR price by ordinary share count.
 - `current_market_cap = current_price × latest_shares_outstanding`
   (balance sheet `outstanding_shares`). This equals the reconciled
   `market_cap` whenever a `market_cap_reconciliation` block is present; if no
@@ -127,10 +133,14 @@ isolation is meaningless — context is everything.
 
 ### Three Anchors
 
-1. **Self historical** (2Y range from `historical_multiples.json`): Where has
+1. **Self historical** (range from `historical_multiples.json`): Where has
    this stock traded relative to itself? A stock at 30x P/E that historically
    ranges 20-40x is mid-range; one that ranges 15-20x is stretched.
    Access: `summary.<method>.min`, `.median`, `.max`, `.span_days`, `.data_points`.
+   **Label the band by its ACTUAL span** — read `span_days`/`data_points` and
+   say e.g. "~1Y band (364d, 5 pts)"; never call it a "2Y range" by default.
+   A short band (span < ~600d or < 6 pts) is a WEAK anchor — say so and
+   weight the peer/absolute anchors up accordingly.
    Cross-check with `current_from_api.<method>` for the live snapshot.
 
    **Read `status` and `warnings` on this file before using it** (same rule as
@@ -370,7 +380,8 @@ If `fcf_inputs.json` has `status == "error"` (equivalent to `fcf_per_share is No
 Emit:
 ```
 {"implied_growth_rate_pct": null, "status": "skipped",
- "reason": "<error from fcf_inputs.json>", "source": "[Calc: skipped per fcf_inputs.json]"}
+ "reason": "<join of fcf_inputs.json:errors[] — the producer writes a LIST named `errors`, there is no singular `error` field>",
+ "source": "[Calc: skipped per fcf_inputs.json]"}
 ```
 Do NOT trigger this skip on `status == "partial"` — partial means a valid `fcf_per_share`
 was produced despite non-fatal warnings, and reverse_dcf is a stateless math operation

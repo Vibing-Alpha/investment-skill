@@ -3993,15 +3993,11 @@ def _main_impl(
             save_text(content, output_dir / filename)
             print(f"    {filename} ({len(content):,} chars)", file=sys.stderr)
 
-        # 05_filing_intelligence.json (guidance extraction -- zero LLM cost)
-        try:
-            from scripts.filing_intelligence import run as run_filing_intelligence
-            run_filing_intelligence(str(output_dir))
-        except ImportError:
-            # filing_intelligence not yet migrated to v7 -- skip gracefully
-            pass
-        except Exception as e:
-            print(f"    05_filing_intelligence.json SKIPPED: {e}", file=sys.stderr)
+        # NOTE: the v6 05_filing_intelligence.json producer was never
+        # migrated to v7 (the module does not exist). The dead-import
+        # call was removed 2026-08-03 (contract probe round-2) — its only
+        # consumer was a stale prompt reference, also removed. If the
+        # extractor is ever ported, restore BOTH sides in one commit.
 
     # 06_analyst_estimates.json
     if _should_fetch("06_analyst_estimates"):

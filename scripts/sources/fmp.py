@@ -884,7 +884,12 @@ def fetch_financials_from_fmp(ticker: str, *, fmp_api_key: str = "") -> AdapterR
         return AdapterResult.failed(code=ErrorCode.UNAUTHORIZED,
                                     detail="fmp_api_key not provided", source=src)
     safe_ticker = urllib.parse.quote(ticker, safe='')
-    params = {"period": "quarter", "limit": 8}
+    # Contract probe 2026-08-03: 16, not 8 — score-fundamental's declared
+    # 3+year margin-trend window needs 12+ quarters, and an FMP-filled
+    # ticker previously carried only ~21 months while the FDS primary
+    # requests 16. Live-verified: FMP returns 16 consecutive quarterly
+    # rows (AMD, 2022-06..2026-03).
+    params = {"period": "quarter", "limit": 16}
     try:
         inc_raw = _fmp_fetch_list(f"income-statement/{safe_ticker}", params, fmp_api_key)
         bal_raw = _fmp_fetch_list(f"balance-sheet-statement/{safe_ticker}", params, fmp_api_key)

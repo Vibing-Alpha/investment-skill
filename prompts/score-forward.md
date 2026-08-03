@@ -46,8 +46,17 @@ analysts model aggressively, or vice versa).
 
 Analyze:
 - Consensus EPS estimates for next quarter and next fiscal year
-- Beat/miss history (8 quarters minimum) — look for the PATTERN, not just stats
+- Beat/miss history (8 quarters minimum) — look for the PATTERN, not just stats.
+  **Data reality:** `07_earnings.json` carries only the LATEST report, not a
+  history array. Build the history from WebSearch (bound tags) and/or by
+  comparing `06_analyst_estimates` vs actuals in `02_financial_data`; if you
+  cannot ground ≥4 quarters, say "beat/miss history data-limited (N quarters)"
+  and reduce the weight of this signal — never fabricate quarters.
 - Estimate revision trend — are analysts raising or cutting?
+  **Data reality:** `06_analyst_estimates.json` is a POINT-IN-TIME snapshot
+  (no revision timestamps, no high/low spread). Revision direction must come
+  from WebSearch (bound tags); absent that, mark the revision trend `unknown`
+  — unknown must not tilt the score as if it were neutral.
 - Spread between highest and lowest estimate (consensus tightness)
 
 A company that consistently beats by 5%+ with rising estimates has a fundamentally
@@ -109,11 +118,11 @@ Analyze:
 Use filing quotes. "Management said X in Q{QUARTER} {CURRENT_YEAR} 10-Q, and Y actually happened"
 is 10x more valuable than "management seems competent."
 
-**Filing access**: Read SEC filing summaries from the data directory. If
-pre-processed filing intelligence files exist (e.g., `filing_intelligence.json`),
-use those first for efficiency — they contain pre-extracted key passages sorted
-by signal strength. Only read raw filing text when you need surrounding context
-for a specific quote.
+**Filing access**: Read the filing artifacts in the data directory:
+`05_filing_summary.json` (structured metadata) plus the `05_filing_*.md`
+extracts (Item 1/1A/7, 10-Q Item 2, revenue notes). There is NO
+pre-processed "filing intelligence" file in v7 — do not search for one;
+quote directly from the .md extracts.
 
 Scoring anchors:
 - 9-10: Exceptional track record, strong insider alignment, honest communicators

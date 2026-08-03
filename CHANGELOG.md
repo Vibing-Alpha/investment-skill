@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.2 — 2026-08-03
+
+- Data-contract release: fetch↔scaffolding interface audit (3 fix commits, cold-reviewed to 2x CLEAN) — FMP financials history 8→16 quarters (live-verified); forward agent input list gains 02_financial_data (estimates-vs-actuals + currency gate); ADR market-cap guard in valuation prompt (never price×ordinary-shares on non-1:1 ADRs); fcf_inputs errors[] field-name fix in reverse-DCF skip template; dead filing_intelligence reference removed on both sides; prompt data-reality notes (earnings history, estimate revisions, TTM-slice continuity, span-labeled valuation band); declined-cascade fetch includes 08_institutional.
+
 ## v1.7.1 — 2026-08-03
 
 - Hardening release: cold-review rounds 15-28 (12 fix commits) — FX/quote correctness (current_investments FX conversion, bool-as-number gates, finite-positive price/MA/regime gates, FED-rate unit domain), fail-closed config/identity (invalid dimension_weights refusal, cross-ticker score gate), orchestration abort-window consistency (exit guards, --no-completed stamping, copy-first archive, partial-stress refusal, run_meta writer preservation), delta/calendar gates (classifier shape, events structural floor chain, holiday-coverage warning, no vacuous PASSED).

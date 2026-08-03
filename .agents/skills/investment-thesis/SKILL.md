@@ -207,7 +207,7 @@ valid BQ is for this session ⇒ no cascade.
   TICKER="<TICKER>"
   REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
   "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
-    --categories 01_price_data,02_financial_data,03_company_news,04_insider_data,06_analyst_estimates,07_earnings,09_macro_rates \
+    --categories 01_price_data,02_financial_data,03_company_news,04_insider_data,06_analyst_estimates,07_earnings,08_institutional,09_macro_rates \
     --news-limit 10 \
     --tier-decided probe
   ```
