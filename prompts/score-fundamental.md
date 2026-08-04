@@ -322,6 +322,9 @@ Source tagging and data handling rules are enforced by `.claude/rules/anti-hallu
 
 - Compute `overall` as weighted average: `sum(score × weight) / 100`
 - Each sub-score must include at least one comparison anchor (historical, peer, or industry)
+- Before writing a universal characterization of an enumerated series
+  ("consecutive accelerating", "every quarter improved"), check each member;
+  if any step breaks the pattern, name the exception instead of universalizing
 - Use API data as primary source; WebSearch only when API is insufficient. Any
   WebSearch-sourced claim must use the bound tag form
   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` (real search behind it —

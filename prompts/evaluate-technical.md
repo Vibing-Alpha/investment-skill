@@ -172,21 +172,21 @@ Write `technical.json`:
       "price_vs_ma200": "above", "ma20_vs_ma50": "above",
       "pattern": "bullish_aligned"
     },
-    "source": "[Calc: price_data + historical.sma_20/sma_50]"
+    "source": "[API: 01_price_data, historical.sma_20/sma_50] [Calc: close > sma_20 > sma_50 → bullish_aligned]"
   },
   "momentum": {
     "macd": {"value": 1.23, "signal": 0.98, "histogram": 0.25,
       "crossover": "none", "hist_trend": "expanding", "zero_side": "above",
       "interpretation": "Momentum accelerating above zero line"},
     "rsi": {"value": 58.3, "zone": "neutral", "divergence": "none"},
-    "source": "[Calc: indicators.json]"
+    "source": "[API: indicators.json, macd + rsi]"
   },
   "volatility": {
     "atr_14": 3.45, "atr_pct": 2.1,
     "bollinger": {"position": "upper_half", "pct_b": 0.72, "width_pct": 8.5,
       "squeeze": false, "bandwidth": "normal",
       "interpretation": "Upper half of bands, normal bandwidth, no squeeze"},
-    "source": "[Calc: indicators.json]"
+    "source": "[API: indicators.json, atr + bollinger]"
   },
   "structure": {
     "support_levels": [
@@ -196,7 +196,7 @@ Write `technical.json`:
       {"price": 178.50, "type": "week_52_high", "strength": "strong"}],
     "distance_to_support_pct": -3.2,
     "distance_to_resistance_pct": 5.8,
-    "source": "[Calc: price_data + indicators.json]"
+    "source": "[API: 01_price_data, historical.daily] [Calc: distance_to_support_pct = (nearest_support - close) / close]"
   },
   "volume": {
     "recent_vs_avg": 1.15, "volume_ratio_5d_20d": 1.08,
@@ -204,7 +204,7 @@ Write `technical.json`:
     "price_volume_relationship": "bullish_confirmation",
     "trend_confirmation": true,
     "interpretation": "Volume above average, OBV rising — uptrend has participation",
-    "source": "[Calc: indicators.json]"
+    "source": "[API: indicators.json, volume]"
   },
   "timing_assessment": {
     "entry_favorability": "favorable",
@@ -227,6 +227,11 @@ or minor gaps) | `low` (significant data gaps or strongly contradictory signals)
 
 Source tagging enforced by `.claude/rules/anti-hallucination.md`. In addition:
 
+- `[Calc:]` payloads must contain the calculation itself — a formula or an
+  explicit comparison with named inputs. A bare file/field pointer
+  (`[Calc: indicators.json]`) is NOT a Calc tag: values read from an artifact
+  are tagged `[API: <file>, <field>]`; reserve `[Calc: ...]` for arithmetic
+  you actually performed.
 - Use pre-computed `indicators.json` values — do not re-derive MACD, RSI, etc.
 - Every support/resistance level must cite its data source
 - Volume interpretation is mandatory — always state confirm or contradict

@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     # validation file that the downstream assemble step consumes.
     from scripts.cli_utils import write_output as _atomic_write
     _atomic_write(merged, str(out_path))
-    print(str(out_path))
+    print(out_path.as_posix())
     return 0
 
 

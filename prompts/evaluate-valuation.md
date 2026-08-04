@@ -44,8 +44,12 @@ non-USD reporting currency. Three rules apply:
    that spot-rate volatility is an extra risk vector.
 3. **Add a row to your reasoning section** noting the conversion: "Per-share
    metrics converted from `<source_currency>` at FX window `<window dates>`
-   [WebSearch: <fx source>, <url>, accessed <YYYY-MM-DD>]. Multiples
-   comparable to USD peers."
+   [API: bq_analysis.currency_conversion, fx_source + window]. Multiples
+   comparable to USD peers." — the cert carries exactly `basis`,
+   `source_currency`, `fx_source`, `window`; cite those. The FX rate
+   arrived via the pipeline's API channel (yfinance), so NEVER restate it
+   as a `[WebSearch: ...]` tag (no real search happened, and fabricated
+   bindings fail strict validation).
 
 If `basis == "usd_native"` or no `currency_conversion` block (legacy
 pre-DL3c artifact): proceed without modification.
@@ -124,7 +128,7 @@ unavailable (e.g. a gapped quarterly window with no standalone fiscal Q4) AND
 `period == "ttm"`, the reconciled snapshot multiple is the best available
 current value. Tag a value you compute `[Calc: current_price ×
 shares / ...]`; tag a reconciled snapshot value
-`[API: metrics_snapshot (market-cap reconciled)]`.
+`[API: 02_financial_data, metrics_snapshot (market-cap reconciled)]`.
 
 ## Multiples Analysis
 
@@ -363,7 +367,7 @@ Instead, emit the reverse_dcf section of your valuation output as:
   "implied_growth_rate_pct": null,
   "status": "skipped",
   "reason": "<fcf_selection_reason from fcf_inputs.json>",
-  "source": "[Calc: skipped per fcf_selection_reason]"
+  "source": "[API: fcf_inputs.json, fcf_selection_reason]"
 }
 ```
 
@@ -381,7 +385,7 @@ Emit:
 ```
 {"implied_growth_rate_pct": null, "status": "skipped",
  "reason": "<join of fcf_inputs.json:errors[] — the producer writes a LIST named `errors`, there is no singular `error` field>",
- "source": "[Calc: skipped per fcf_inputs.json]"}
+ "source": "[API: fcf_inputs.json, errors]"}
 ```
 Do NOT trigger this skip on `status == "partial"` — partial means a valid `fcf_per_share`
 was produced despite non-fatal warnings, and reverse_dcf is a stateless math operation
@@ -456,7 +460,7 @@ Decide the trajectory from evidence, distinguishing two cases:
 This is NOT a license to justify any price. A premium you cannot tie to
 quantified, current evidence defaults to compression. State explicitly which case
 applies and cite the evidence; the multiple assumption carries a source basis like
-any other number — `[API: peer_multiples]` / `[Calc: ...]` / `[Filing: ...]` /
+any other number — `[API: peer_multiples, <field>]` / `[Calc: ...]` / `[Filing: ...]` /
 `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` (WebSearch tags must be
 bound; a real search behind every one) — and never invent a "deserved" multiple
 (anti-hallucination
@@ -549,7 +553,7 @@ Write `valuation.json` with this structure:
     "discount_rate_used": 0.105,
     "terminal_growth_used": 0.025,
     "interpretation": "Market prices in 15% growth — consensus is 12%, BQ evidence supports 10-14%",
-    "source": "[Calc: reverse_dcf]"
+    "source": "[API: reverse_dcf.json, implied_growth_rate_pct]"
   },
   "scenarios": {
     "bull": {
@@ -557,21 +561,21 @@ Write `valuation.json` with this structure:
       "target": 210,
       "assumptions": "AI product reaches 15% enterprise penetration (vs 8% today)",
       "key_driver": "Services revenue acceleration",
-      "derivation": "FY26E EPS $8.40 * 25x forward P/E [Calc]"
+      "derivation": "FY26E EPS $8.40 * 25x forward P/E [Calc: 8.40 * 25]"
     },
     "base": {
       "probability": 0.45,
       "target": 165,
       "assumptions": "Current growth trajectory continues, margins stable",
       "key_driver": "Organic growth at 12% with operating leverage",
-      "derivation": "FY26E EPS $7.20 * 23x forward P/E [Calc]"
+      "derivation": "FY26E EPS $7.50 * 22x forward P/E [Calc: 7.50 * 22]"
     },
     "bear": {
       "probability": 0.25,
       "target": 115,
       "assumptions": "Macro slowdown compresses demand, margin pressure from competition",
       "key_driver": "Revenue deceleration to 5%, margin compression 200bps",
-      "derivation": "FY26E EPS $5.75 * 20x forward P/E [Calc]"
+      "derivation": "FY26E EPS $5.75 * 20x forward P/E [Calc: 5.75 * 20]"
     }
   },
   "convergence": {
@@ -593,6 +597,13 @@ Source tagging and data handling rules are enforced by `.claude/rules/anti-hallu
 (loaded automatically via glob). In addition:
 
 - Every number in `multiples` must include a `source` field with calculation basis
+- `[Calc:]` payloads must show the calculation itself (formula or named-input
+  arithmetic). A bare producer/file label (`[Calc: reverse_dcf]`) is NOT a Calc
+  tag — a value read from a script artifact is `[API: <file>, <field>]`
+- `margin_of_safety_pct` is on the PRICE denominator (`mid/price - 1`); the
+  premium-over-mid is on the MID denominator (`price/mid - 1`). The two
+  magnitudes differ — never restate one as the other; carry the formula when
+  quoting either in prose
 - Do not fabricate peer multiples — use only tickers present in `peer_multiples.json`
 - Scenario probabilities must sum to 1.0
 - Scenario targets must be derived from explicit arithmetic, not intuition

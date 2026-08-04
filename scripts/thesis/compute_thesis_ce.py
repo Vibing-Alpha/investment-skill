@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         f"(ER={thesis.get('expected_return')}, MD={thesis.get('max_downside')})",
         file=sys.stderr,
     )
-    print(str(thesis_path))
+    print(thesis_path.as_posix())
     return 0
 
 

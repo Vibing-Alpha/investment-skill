@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"stamped meta: ticker={ticker} analysis_date={analysis_date}",
           file=sys.stderr)
-    print(str(thesis_path))
+    print(thesis_path.as_posix())
     return 0
 
 

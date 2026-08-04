@@ -256,7 +256,7 @@ def _cli():
             exclude_date=args.exclude_date,
             include_today=args.include_today,
         )
-        print(str(d) if d else "")
+        print(d.as_posix() if d else "")
     elif args.cmd == "allocate-bq-run":
         from scripts.delta.calendar import session_et
         from scripts.cli_utils import normalize_ticker
@@ -277,7 +277,7 @@ def _cli():
             (path / "scores").mkdir(exist_ok=True)
         except OSError as exc:
             _fatal_allocation_error(path, exc)
-        print(str(path))
+        print(path.as_posix())
     elif args.cmd == "allocate-industry-run":
         from scripts.delta.calendar import session_et
         import re as _re
@@ -296,7 +296,7 @@ def _cli():
             (path / "data").mkdir(exist_ok=True)
         except OSError as exc:
             _fatal_allocation_error(path, exc)
-        print(str(path))
+        print(path.as_posix())
 
 
 if __name__ == "__main__":

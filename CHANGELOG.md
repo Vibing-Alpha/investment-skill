@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.4 — 2026-08-04
+
+- Two-angle probe hardening (14 cold rounds): CLI path stdout prints as_posix at all 10 sites — native-Windows venv python emitted backslash paths that SKILL bash captures interpolated into inline -c string literals as octal escapes (silent path corruption); [Calc:] source-tag integrity — prompt exemplars rewritten to compliant [API: <file>, <field>] / formula forms, payload + universal-comparison-enumeration + denominator-binding rules added at the emitting prompts, [API:] KIND definition widened to run-directory files, and the DL3c FX note now carries the conversion cert's API-channel tags instead of instructing a fabricated WebSearch binding
+
 ## v1.7.3 — 2026-08-04
 
 - 4-angle audit hardening (33 cold-review rounds): unconditional authoring-seal enforcement incl. all-hold runs, malformed-seal refusal + atomic seal writes, decisions JSON/MD pair rollback on torn writes, principle-citation range checks; screen: trading-day streak walk, completed-session liquidity floors, watchlist floor-drop disclosure, vendor-alias support; research-industry: pre-dispatch destination clear, OTC ADR universe alignment, ETF slug mapping fixes (bare cloud/ev, oil/media segment matching); thesis: guard-kept fresh events drop stale reuse context

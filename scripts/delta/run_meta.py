@@ -283,7 +283,7 @@ def _cli():
         for w_msg in args.warning:
             existing.add_warning(w_msg)
         existing.save(warn_path)
-        print(str(warn_path))
+        print(warn_path.as_posix())
         return
     run_dir = Path(args.run_dir)
     meta_path = run_dir / "run_meta.json"
@@ -360,7 +360,7 @@ def _cli():
         rm.add_warning(w_msg)
 
     rm.save(meta_path)
-    print(str(meta_path))
+    print(meta_path.as_posix())
 
 
 if __name__ == "__main__":

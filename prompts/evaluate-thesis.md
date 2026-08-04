@@ -208,7 +208,7 @@ binding-marked artifacts).
 **When ER / CE are NOT computable — emit `null`, never a placeholder.**
 If `valuation.json` has no per-share fair value (all scenario targets `null` —
 the un-anchorable cohort: ADR-ratio-unknown ADRs like TTDKY/MRAAY/ASX, or every
-absolute lens fail-closed), then `(prob_weighted_target / price - 1)` cannot be
+absolute lens fail-closed), then `(prob_weighted_target / price - 1) * 100` cannot be
 evaluated. In that case emit `expected_return: null` and explain the
 not-computable state in `thesis.conviction_reasoning`. Do NOT fabricate a `0.0`
 (or any) placeholder — unknown rendered as zero is a producer-consumer violation
@@ -253,7 +253,7 @@ actually monitor.
 {
   "meta": {
     "current_price": 160.50,
-    "current_price_source": "[API: 01_price_data.snapshot.price]"
+    "current_price_source": "[API: 01_price_data, snapshot.price]"
   },
   "signal_assessment": {
     "dominant_signal": "valuation|technical|events|mixed",
@@ -273,8 +273,8 @@ actually monitor.
   "expected_return": 18.5,
   "max_downside": -22.0,
   "calculation_audit": {
-    "expected_return_source": "[Calc: prob_weighted_target 190.2 / price 160.5 - 1; targets from valuation.json scenarios]",
-    "max_downside_source": "[Calc: bear_target 125.2 / price 160.5 - 1]"
+    "expected_return_source": "[Calc: (prob_weighted_target 190.2 / price 160.5 - 1) * 100; targets from valuation.json scenarios]",
+    "max_downside_source": "[Calc: (bear_target 125.2 / price 160.5 - 1) * 100]"
   },
   "conflicts_resolved": [
     {
@@ -372,11 +372,18 @@ but do not need full source tags — those are in the JSON.
 
 ## Rules
 
-- Anti-hallucination: every number must carry a source tag (`[API]`, `[Calc: formula]`,
+- Anti-hallucination: every number must carry a source tag (`[API: field_name]`, `[Calc: formula]`,
   `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` — WebSearch tags must keep
   the url + access-date binding; preserve it verbatim when quoting from the
   sub-analyses — `[Filing: 10-K/10-Q]`). No source = does not exist.
 - Conflicts must be surfaced and resolved explicitly, never averaged away
+- `[Calc:]` payloads must show the calculation itself; a bare file/field
+  pointer (`[Calc: technical.json timing_assessment]`) is NOT a Calc tag —
+  a value read from a sub-analysis is `[API: <file>, <field>]`
+- Before writing a universal comparison ("exceeds/below EVERY level",
+  "larger than ALL ..."), enumerate the actual set from the source artifact
+  and check each member; if any member fails, name the exception instead of
+  universalizing
 - The user mandate is a LENS, not a FILTER — adjust weighting, never suppress evidence
 - All scenario targets and probabilities must come from valuation.json, not invented
 - thesis_invalid_if conditions must be specific and measurable — no "if things get worse"

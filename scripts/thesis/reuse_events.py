@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    print(str(report_dir / ".events_reuse.json"))
+    print((report_dir / ".events_reuse.json").as_posix())
     return 0
 
 

@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"stamped events generated_at={events['meta']['generated_at']}",
           file=sys.stderr)
-    print(str(events_path))
+    print(events_path.as_posix())
     return 0
 
 
