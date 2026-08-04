@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.5 — 2026-08-04
+
+- Operand-fidelity audit converged: [Calc:] operands verified against upstream API raw values across the analysis corpus; provenance-attribution corrections in stored analyses. No runtime/script changes.
+
 ## v1.7.4 — 2026-08-04
 
 - Two-angle probe hardening (14 cold rounds): CLI path stdout prints as_posix at all 10 sites — native-Windows venv python emitted backslash paths that SKILL bash captures interpolated into inline -c string literals as octal escapes (silent path corruption); [Calc:] source-tag integrity — prompt exemplars rewritten to compliant [API: <file>, <field>] / formula forms, payload + universal-comparison-enumeration + denominator-binding rules added at the emitting prompts, [API:] KIND definition widened to run-directory files, and the DL3c FX note now carries the conversion cert's API-channel tags instead of instructing a fabricated WebSearch binding
