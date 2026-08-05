@@ -316,13 +316,24 @@ human-facing audit trail.
 
 - `fcf_source`: which TTM path was used — `"api_fcf"` |
   `"ocf_minus_capex"` | `null`. Null means no valid TTM was computable.
-- `fcf_selection_reason`: one of 7 string enums
-  (`low_divergence_default`, `single_path_only`, `ni_sign_anchor`,
-  `fallback_min_abs`, `both_opposite_sign_null`, `both_invalid_null`,
-  `shares_unavailable`). The first 6 are state-machine terminal states;
-  the 7th fires when the state machine picked a valid TTM but Stage 4
-  couldn't divide by shares (balance sheet missing or outstanding_shares
-  non-positive). Always populated — audit every decision.
+- `fcf_selection_reason`: one of 9 string enums — the closed vocabulary is
+  `FCF_SELECTION_REASONS` in `scripts/fcf_constants.py`, which is the single
+  source of truth; this list must be updated in the same commit as that one
+  (`.claude/rules/producer-consumer.md` §2).
+  State-machine terminal states (6): `low_divergence_default`,
+  `single_path_only`, `ni_sign_anchor`, `fallback_min_abs`,
+  `both_opposite_sign_null`, `both_invalid_null`.
+  Emit-phase failure (1): `shares_unavailable` — the state machine picked a
+  valid TTM but Stage 4 couldn't divide by shares (balance sheet missing or
+  outstanding_shares non-positive).
+  Pre/post-aggregation data-integrity failures (2):
+  `insufficient_quarters_for_aligned_window` — the DL4 gate could not build
+  4 consecutive cross-statement-aligned quarters; and
+  `cumulative_cash_flow_suspected` — the window IS structurally valid but a
+  cash-flow row looks year-to-date CUMULATIVE rather than standalone (US
+  10-Q cash flows are YTD by construction; an un-de-cumulated row would
+  double-count earlier quarters when summed). Both emit
+  `fcf_per_share: null`. Always populated — audit every decision.
 - `fcf_divergence_pct`: `|TTM_api − TTM_calc| / max * 100`. `null` on
   single-path or both-invalid cases.
 

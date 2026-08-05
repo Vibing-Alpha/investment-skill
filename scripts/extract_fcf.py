@@ -36,6 +36,7 @@ from scripts.fcf_constants import (
     FCF_SELECTION_REASON_BOTH_OPPOSITE_SIGN_NULL,
     FCF_SELECTION_REASON_FALLBACK_MIN_ABS,
     FCF_SELECTION_REASON_INSUFFICIENT_QUARTERS,
+    FCF_SELECTION_REASON_CUMULATIVE_CASH_FLOW,
     FCF_SELECTION_REASON_LOW_DIVERGENCE_DEFAULT,
     FCF_SELECTION_REASON_NI_SIGN_ANCHOR,
     FCF_SELECTION_REASON_SHARES_UNAVAILABLE,
@@ -47,6 +48,9 @@ from scripts.fcf_constants import (
 from scripts.schemas.quarter_window import (
     InsufficientQuartersError,
     aligned_quarters,
+    attested_ytd_basis,
+    cumulative_detection_ran,
+    detect_cumulative_cash_flow,
 )
 # DL3c §3.2 — 3-state currency gate imports.
 # `scripts.fx_apply` is imported lazily at the call site (inside
@@ -127,6 +131,15 @@ def extract_fcf_inputs(
     Returns: Dict with price, fcf_per_share, discount_rate, warnings, and metadata.
     """
     result = {"status": "ok", "errors": [], "warnings": []}
+    # Where `fcf_selection_reason` was decided. `both_invalid_null` is
+    # OVERLOADED — the dual-path state machine sets it, and so do the
+    # pre-aggregation currency/structural gates — so the reason VALUE alone
+    # cannot say which control path produced it. Tagging them all as
+    # state-machine output was a false provenance claim on the artifact the
+    # valuation agent reads. (The outer read-failure handler needs no origin:
+    # it runs AFTER the only tag-emission site, so that path emits no tag at
+    # all — an absent claim, which is the honest outcome.)
+    _reason_origin = "state_machine"
 
     # --- Price + Beta ---
     beta_from_data = None
@@ -281,6 +294,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
                 currency_ok = False
 
@@ -301,6 +315,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
                 currency_ok = False
 
@@ -340,6 +355,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
                 currency_ok = False
             elif detected_currency not in SUPPORTED_FX_CURRENCIES:
@@ -354,6 +370,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
                 currency_ok = False
             else:
@@ -402,6 +419,7 @@ def extract_fcf_inputs(
                     result["ttm_fcf"] = None
                     result["fcf_source"] = None
                     result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                    _reason_origin = "gate"
                     result["fcf_divergence_pct"] = None
                     currency_ok = False
                 else:
@@ -443,6 +461,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
                 currency_ok = False
 
@@ -520,6 +539,7 @@ def extract_fcf_inputs(
                 result["ttm_fcf"] = None
                 result["fcf_source"] = None
                 result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                _reason_origin = "gate"
                 result["fcf_divergence_pct"] = None
             else:
                 # DL4 §3.2.0.B — aligned_quarters replaces the legacy
@@ -553,6 +573,53 @@ def extract_fcf_inputs(
                     result["fcf_divergence_pct"] = None
                     # Fall through to Stage 4 emit — `chosen is None` guard
                     # keeps fcf_per_share None.
+
+                if window is not None:
+                    # Supplementary DL4 guard — a structurally valid window
+                    # can still carry a year-to-date CUMULATIVE cash-flow
+                    # row (US 10-Q cash flows are YTD by construction; a
+                    # provider that does not de-cumulate emits an n-quarter
+                    # row under a well-formed quarter key, which
+                    # aligned_quarters accepts by design). Summing it
+                    # double-counts earlier quarters. The pre-existing
+                    # trailing-null skip above does NOT cover this: it is
+                    # gated on `any_fcf_populated`, so a source that never
+                    # populates `free_cash_flow` (the FMP fallback adapter)
+                    # takes the "trust the full window" branch and gets no
+                    # YTD protection at all — the demonstrated EME 20260803
+                    # failure (TTM FCF understated 28,154,000 / 2.40%,
+                    # carried into reverse_dcf).
+                    # Disclose whether the guard could run at all. A silent
+                    # fail-open otherwise reads downstream as "the gate
+                    # passed"; this says "not checked" instead. Deliberately
+                    # a dedicated field, NOT a warning: a dataset that simply
+                    # omits D&A is not a degraded run, and routing it through
+                    # `warnings` would permanently downgrade `status` for
+                    # every such issuer and dilute that signal.
+                    result["cumulative_check_ran"] = cumulative_detection_ran(window)
+                    # The tag must describe what ACTUALLY established the
+                    # result. An attested `period_value_basis` needs no probe
+                    # at all, so the probe-based wording would be a false
+                    # provenance claim on that path (it read True with every
+                    # D&A absent).
+                    result["cumulative_check_ran_tag"] = (
+                        "[API: 02_financial_data, period_value_basis (attested)]"
+                        if attested_ytd_basis(window) is not None else
+                        "[Calc: window fiscal-Q1 baseline AND every Q2-Q4 "
+                        "candidate carry a positive finite "
+                        "depreciation_and_amortization probe]"
+                    )
+                    cumulative_diag = detect_cumulative_cash_flow(window)
+                    if cumulative_diag is not None:
+                        result["errors"].append(
+                            f"Cash-flow window rejected: {cumulative_diag}"
+                        )
+                        result["fcf_per_share"] = None
+                        result["ttm_fcf"] = None
+                        result["fcf_source"] = None
+                        result["fcf_selection_reason"] = FCF_SELECTION_REASON_CUMULATIVE_CASH_FLOW
+                        result["fcf_divergence_pct"] = None
+                        window = None
 
                 if window is not None:
                     # window[3] is the latest aligned quarter (oldest-first
@@ -601,6 +668,7 @@ def extract_fcf_inputs(
                         result["ttm_fcf"] = None
                         result["fcf_source"] = None
                         result["fcf_selection_reason"] = FCF_SELECTION_REASON_BOTH_INVALID_NULL
+                        _reason_origin = "state_machine"
                         result["fcf_divergence_pct"] = None
                     else:
                         # === Stage 3: Decide ===
@@ -873,6 +941,19 @@ def extract_fcf_inputs(
                 "[Calc: path selection per fcf_selection_reason]"
             )
             result["fcf_selection_reason_tag"] = (
+                # Only the six terminal states actually come from the
+                # dual-path state machine. The two pre-aggregation integrity
+                # fail-closes are decided BEFORE it runs, and
+                # shares_unavailable is decided AFTER it, during emission —
+                # tagging either as state-machine output is false provenance.
+                "[Calc: pre-aggregation window integrity gate]"
+                if result.get("fcf_selection_reason") in (
+                    FCF_SELECTION_REASON_CUMULATIVE_CASH_FLOW,
+                    FCF_SELECTION_REASON_INSUFFICIENT_QUARTERS,
+                ) or _reason_origin == "gate" else
+                "[Calc: emit-phase per-share conversion]"
+                if result.get("fcf_selection_reason")
+                == FCF_SELECTION_REASON_SHARES_UNAVAILABLE else
                 "[Calc: state machine over (api_valid, calc_valid, divergence, ni_anchor)]"
             )
             if result.get("fcf_divergence_pct") is not None:

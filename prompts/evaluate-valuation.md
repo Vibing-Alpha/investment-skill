@@ -352,6 +352,41 @@ with null would raise a non-zero CLI error. The null signals that
   the DL4 aligned-quarter gate could not build 4 consecutive aligned
   quarters across income/cash-flow/balance (gapped or non-consecutive
   statements), so no TTM was formed
+- `fcf_selection_reason == "cumulative_cash_flow_suspected"` — the
+  aligned window is structurally valid, but at least one cash-flow row
+  looks year-to-date CUMULATIVE rather than standalone-quarterly. US
+  10-Q cash-flow statements are year-to-date by construction; when a
+  provider does not de-cumulate them, an n-quarter row arrives under a
+  well-formed quarter key and summing the window double-counts earlier
+  quarters. The `errors` entry takes one of two forms and they
+  carry different evidence. HEURISTIC detection names the offending row, its
+  depreciation-and-amortization ratio against the window's fiscal-Q1
+  baseline, and the threshold it cleared — quote those. ATTESTED detection
+  (the row carries `period_value_basis: "ytd"`, i.e. the provider DECLARED
+  it year-to-date) is authoritative and carries NO ratio and NO threshold —
+  quote it as the attestation it is and do not invent numbers for it. Note this is a DATA defect, not a company one: do NOT
+  read it as weak or volatile cash generation. If the same run's
+  `historical_multiples.json` also suppressed `ev_ebitda` (check its
+  `warnings` and `summary.ev_ebitda.current_unavailable_reason`), both
+  omissions share this one cause — say so once rather than reporting two
+  unrelated gaps.
+
+**Also read `cumulative_check_ran` in `fcf_inputs.json` (and in
+`adr_correction.json` when present).** It is `false` when the year-to-date
+cumulative-row guard could not judge the window. Two distinct causes, and
+they mean different things: either a row carries no usable
+`depreciation_and_amortization` (a sparse provider feed), OR the statements
+were FX-converted — the guard's probe ratio is not FX-invariant, so a
+converted window is reported un-checkable by design rather than judged on
+rates. Check for a `currency_conversion` cert to tell them apart, and do not
+report an FX-method limitation as missing provider data. A `false` there does NOT
+mean the data is bad; it means that axis is UNVERIFIED. When it is `false`
+and an FCF number was still emitted, say so explicitly in the valuation
+narrative (e.g. "the year-to-date contamination check could not run on this
+window") and treat the DCF lens as lower-confidence rather than clean.
+Never report a `false` as if the check had passed. The equivalent state for
+`historical_multiples.json` arrives as a warning naming the unchecked
+windows.
 
 A finite NON-POSITIVE `fcf_per_share` (cash-burning TTM) is a different
 case: the orchestration still invokes `scripts.reverse_dcf`, which

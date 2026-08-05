@@ -3,6 +3,12 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.6 — 2026-08-05
+
+- extract_fcf / historical_multiples / adr.correct: detect year-to-date CUMULATIVE cash-flow rows before TTM aggregation. US 10-Q cash flows are year-to-date by construction; when a provider does not de-cumulate them the row's quarter key stays well-formed, so the DL4 aligned-window gate accepts it and every consumer that SUMS the window is silently corrupted. Found in this repo's own stored data: TTM FCF understated 2.40% on one ticker (carried into reverse_dcf), TTM D&A overstated 47% on another, which DEFLATES EV/EBITDA and makes a name look cheaper than truth.
+- New shared guard in scripts/schemas/quarter_window.py, called by the three producers that aggregate a window. Two tiers: an attested period_value_basis=ytd is authoritative and rejects the whole window; otherwise a depreciation-and-amortization ratio against the window's fiscal-Q1 standalone baseline, scaled by fiscal-quarter index, suppresses only the affected lens. Measured over 91 corpus windows: 4 true positives, 0 false positives.
+- Fails OPEN when a window cannot be fully examined, and DISCLOSES that via the new cumulative_check_ran field (extract_fcf, adr_correction) or a named-window warning (historical_multiples) — so 'not checked' can no longer read downstream as 'checked and clean'. The valuation prompt routes on both.
+
 ## v1.7.5 — 2026-08-04
 
 - Operand-fidelity audit converged: [Calc:] operands verified against upstream API raw values across the analysis corpus; provenance-attribution corrections in stored analyses. No runtime/script changes.

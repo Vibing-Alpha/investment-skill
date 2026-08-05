@@ -31,6 +31,9 @@ from scripts.schemas.quarter_window import (
     AlignedQuarterWindow,
     InsufficientQuartersError,
     SkippedWindow,
+    attested_ytd_basis,
+    cumulative_detection_ran,
+    detect_cumulative_cash_flow,
     iter_aligned_quarter_windows,
 )
 from scripts.sources.fx_rates import SUPPORTED_FX_CURRENCIES
@@ -254,6 +257,12 @@ def compute_historical_multiples(
     income = financial_data.get("income_statements", [])
     cash_flow = financial_data.get("cash_flows", [])
     balance = financial_data.get("balance_sheets", [])
+    # Set True only after a DL3c FX conversion actually mutates the rows.
+    # The cumulative-row probe ratio is not FX-invariant (fx_apply uses a
+    # per-quarter historical rate), so a converted window must be reported
+    # un-checkable rather than judged. Bound HERE, before every branch that
+    # can reach the window loop.
+    _fx_converted = False
     # fresh-loop2 cycle 5 M2: shape-validate each statement family list
     # before indexing. The cycle-4 Mapping guard ensures top-level is a
     # dict, but `financial_data["income_statements"]` could itself be a
@@ -472,6 +481,7 @@ def compute_historical_multiples(
         # success return literal at line 789 spreads `**cert_block_to_add`.
         cert_block_to_add = build_cert_block(detected_currency, fx_window)
         # statement rows are now USD-tagged; downstream loop reads USD.
+        _fx_converted = True
 
     # DL4 §3.2 — replace independent sorts + bs_by_period lookup with the
     # iter helper. Yields (window, skip) pairs oldest-first over the
@@ -601,6 +611,8 @@ def compute_historical_multiples(
             return True
 
     negative_equity_windows: list = []   # probe-2 D4
+    cumulative_cf_windows: list = []     # YTD-cumulative cash-flow rows
+    cumulative_unchecked_windows: list = []   # probe unusable -> gate did NOT run
     fragile_denominator_notes: list = []  # probe-2 D5
     ev_windows_with_investments = 0      # probe-2 round-15 F4
     ev_windows_without_investments = 0   # probe-2 round-15 F4
@@ -696,6 +708,35 @@ def compute_historical_multiples(
                 )
             elif v_da is None:
                 missing_da = True
+        # Supplementary DL4 guard: a structurally valid window can still
+        # carry a year-to-date CUMULATIVE cash-flow row, which inflates
+        # ttm_da and therefore DEFLATES ev_ebitda (makes the name look
+        # cheaper than truth). Lens-local by design — every other multiple
+        # here is income/balance-derived and unaffected, so suppressing the
+        # whole window would discard correct P/E, P/S, P/B, EV/EBIT and
+        # EV/Revenue over a cash-flow-only defect.
+        # An ATTESTED year-to-date basis is categorical, unlike the D&A
+        # heuristic, and it can sit on the income rows too — which corrupts
+        # TTM revenue / EBIT / net income, i.e. P/E, P/S and EV/EBIT, not
+        # just the cash-flow lens. Suppressing only EV/EBITDA there would
+        # warn about one lens while publishing a wrong P/E, so an attested
+        # window is dropped whole.
+        _attested = attested_ytd_basis(w)
+        if _attested is not None:
+            skipped_serialized.append({
+                "anchor_report_period": period_key,
+                "failure_kind": "attested_ytd_basis",
+                "detail": _attested,
+            })
+            continue
+        cumulative_cf = detect_cumulative_cash_flow(
+            w, fx_converted=_fx_converted) is not None
+        # An actionable finding supersedes the "could not fully examine"
+        # note: reporting both for one window contradicts itself (the guard
+        # plainly DID find something) and buries the finding.
+        if not cumulative_cf and not cumulative_detection_ran(
+                w, fx_converted=_fx_converted):
+            cumulative_unchecked_windows.append(period_key)
         bs_pre = w[3].balance_row
         missing_shares = False
         missing_equity = False
@@ -892,8 +933,20 @@ def compute_historical_multiples(
         ttm_ebitda = ttm_ebit + ttm_da
         if (enterprise_value is not None
                 and not missing_ebit and not missing_da
+                and not cumulative_cf
                 and ttm_ebitda > 0):
             entry["multiples"]["ev_ebitda"] = round(enterprise_value / ttm_ebitda, 2)
+        elif (cumulative_cf and enterprise_value is not None
+                and not missing_ebit and not missing_da
+                and ttm_ebitda > 0):
+            # Only attribute the suppression to contamination when EV/EBITDA
+            # would otherwise have been computable — this predicate must
+            # mirror the emission branch above EXACTLY, `ttm_ebitda > 0`
+            # included. Dropping that term blamed the cumulative row on
+            # negative-EBITDA windows where the multiple was unavailable
+            # regardless, hiding an economically meaningful cause behind a
+            # data-defect narrative.
+            cumulative_cf_windows.append(period_key)
         if (enterprise_value is not None
                 and not missing_ebit and ttm_ebit > 0):
             entry["multiples"]["ev_ebit"] = round(enterprise_value / ttm_ebit, 2)
@@ -1010,6 +1063,17 @@ def compute_historical_multiples(
                     f"newest aligned window {latest_aligned_report_period} "
                     f"was dropped (see skipped_windows); quarterly_data[-1] is "
                     f"{latest_rp}, which is older than the latest aligned anchor."
+                )
+            elif name == "ev_ebitda" and latest_rp in cumulative_cf_windows:
+                # Name the ACTUAL cause. The generic message below would
+                # tell a reader the denominator was negative/zero or the
+                # field was missing, when in fact D&A was present and
+                # finite but the row is a suspected year-to-date cumulative
+                # — a materially different thing to act on.
+                entry["current_unavailable_reason"] = (
+                    f"latest quarter {latest_rp} has a suspected year-to-date "
+                    f"CUMULATIVE cash-flow row, so TTM D&A (and therefore "
+                    f"EBITDA) would double-count earlier quarters; see warnings."
                 )
             else:
                 entry["current_unavailable_reason"] = (
@@ -1138,6 +1202,32 @@ def compute_historical_multiples(
     out_warnings = list(fx_warnings_to_propagate)
     # Probe-2 D4/D5 disclosures — both downgrade status so the valuation
     # prompt's "read status + warnings" rule surfaces them.
+    if cumulative_unchecked_windows:
+        out_warnings.append(
+            f"Cumulative-cash-flow detection did NOT run for "
+            f"{len(cumulative_unchecked_windows)} window(s) "
+            f"({', '.join(str(p) for p in cumulative_unchecked_windows[:8])}"
+            f"{'…' if len(cumulative_unchecked_windows) > 8 else ''}): either a "
+            f"row carries no usable depreciation_and_amortization probe, or the "
+            f"window was FX-converted (the probe ratio is not FX-invariant, so a "
+            f"converted window cannot be judged — see currency_conversion). "
+            f"EV/EBITDA there is UNVERIFIED on the year-to-date axis, not "
+            f"verified clean."
+        )
+        # Deliberately does NOT downgrade `status`, unlike the branches around
+        # it. A dataset that simply omits D&A is not a degraded run — one
+        # guard was unavailable. Downgrading here would fire permanently for
+        # every such issuer and dilute the signal `status` carries.
+    if cumulative_cf_windows:
+        out_warnings.append(
+            f"EV/EBITDA suppressed for {len(cumulative_cf_windows)} window(s) "
+            f"({', '.join(str(p) for p in cumulative_cf_windows)}): a cash-flow "
+            f"row in each looks year-to-date CUMULATIVE, which would inflate "
+            f"TTM D&A and understate EV/EBITDA. Every other multiple in those "
+            f"windows is income/balance-derived and is retained."
+        )
+        if status == "ok":
+            status = "ok_with_warnings"
     if negative_equity_windows:
         out_warnings.append(
             f"P/B suppressed for {len(negative_equity_windows)} window(s) "

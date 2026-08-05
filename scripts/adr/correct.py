@@ -24,6 +24,9 @@ from scripts.schemas.quarter_window import (
     AlignedQuarterWindow,
     InsufficientQuartersError,
     aligned_quarters,
+    attested_ytd_basis,
+    cumulative_detection_ran,
+    detect_cumulative_cash_flow,
     iter_aligned_quarter_windows,
     row_matches_period,
 )
@@ -186,6 +189,12 @@ def compute_adr_valuation_correction(
     5. All ratio metrics use company_facts.market_cap
     """
     is_adr = profile.is_adr
+    # Bound at function scope, BEFORE the DL3c FX branch that sets it True.
+    # A later re-initialisation would silently clobber that (it did: the
+    # first attempt re-declared this beside the `_cumulative_cf_diag` init,
+    # which runs AFTER the conversion, so the flag was always False at the
+    # detector and converted D&A was judged as if it were single-basis).
+    _fx_converted = False
     result = {
         "is_adr": is_adr,
         "needs_correction": False,
@@ -375,6 +384,7 @@ def compute_adr_valuation_correction(
             result.setdefault("warnings", []).extend(fx_warnings)
             # Cert block at root (basis=usd_converted + 3 anti-hallucination tags).
             result.update(build_cert_block(detected_currency, fx_window))
+            _fx_converted = True
             # Statement rows now USD-tagged in place (Step 7); downstream
             # quarterly logic at line ~350+ runs unchanged on USD values.
         # else: detected_currency == "USD" — NO cert emitted (invariant 7).
@@ -471,6 +481,11 @@ def compute_adr_valuation_correction(
     # Prior-period TTM holder (populated for quarterly via iter helper [-2:]).
     prior_window = None
     growth_unavailable_reason = None
+    # Set on the quarterly path only; the annual carve-out reads a single
+    # full-year row that cannot be YTD-inflated, so it stays None there.
+    # Must be bound BEFORE the is_annual branch — the consumer below is
+    # reached by both paths.
+    _cumulative_cf_diag = None
 
     if is_annual:
         # Annual path — DL4 §3.2 carve-out. Single-row slices are the
@@ -697,17 +712,60 @@ def compute_adr_valuation_correction(
                         # current but not on prior. A prior_window with UNKNOWN
                         # currency mixed with USD current_window produces
                         # cross-currency eps_growth_rate / corrected_peg math.
-                        if all(q.statement_currency == "USD" for q in w):
+                        # Same attestation gate as current_window: the YoY
+                        # prior is summed independently into eps_growth_rate
+                        # and corrected_peg, so an attested row here corrupts
+                        # those under correction_status="applied" while the
+                        # current window looks clean. Measured: prior TTM
+                        # 250M instead of 200M turned 50% growth into 20% and
+                        # PEG 0.6667 into 1.6667, silently.
+                        _prior_attested = attested_ytd_basis(w)
+                        if (all(q.statement_currency == "USD" for q in w)
+                                and _prior_attested is None):
                             prior_window = w
+                        elif _prior_attested is not None:
+                            # A MATCHING prior was found and rejected on data
+                            # quality. Falling through to the generic
+                            # "not found" reason below would hide an
+                            # authoritative cause behind a structural one.
+                            growth_unavailable_reason = (
+                                f"YoY prior window rejected: {_prior_attested}"
+                            )
                         break
             except ValueError:
                 pass
 
         ttm_income_rows = [q.income_row for q in current_window]
         ttm_cf_rows = [q.cash_flow_row for q in current_window]
+        # Supplementary DL4 guard (quarterly path only — an annual row is
+        # full-year by definition and cannot be YTD-inflated). A window
+        # that passes aligned_quarters can still carry a year-to-date
+        # CUMULATIVE cash-flow row; summing it double-counts earlier
+        # quarters. Lens-local: only the cash-flow-derived legs (D&A ->
+        # EBITDA/EV-EBITDA, OCF/capex -> TTM FCF / FCF-per-ADR / FCF
+        # yield) are affected, so this is expressed as an incompleteness
+        # of those legs. Income- and balance-derived corrections, which
+        # are the point of this producer, are retained.
+        # Attested year-to-date is categorical and can sit on the income
+        # rows, which corrupts the EPS/PE correction this producer exists
+        # for — so it skips the whole correction rather than nulling only
+        # the cash-flow-derived legs.
+        _attested = attested_ytd_basis(current_window)
+        if _attested is not None:
+            result["correction_status"] = "skipped"
+            result["skip_reason"] = _attested
+            result.pop("message", None)
+            return emit_dl3c_root_marker(result)
+        _cumulative_cf_diag = detect_cumulative_cash_flow(
+            current_window, fx_converted=_fx_converted)
+        # Dedicated field, not a warning — see the equivalent note in
+        # scripts/extract_fcf.py: "probe unavailable" is a limitation of the
+        # dataset, not a degradation of this run.
+        result["cumulative_check_ran"] = cumulative_detection_ran(
+            current_window, fx_converted=_fx_converted)
         bs_row = current_window[3].balance_row  # latest quarter's balance
 
-        if prior_window is None:
+        if prior_window is None and growth_unavailable_reason is None:
             growth_unavailable_reason = (
                 "YoY prior 4-quarter window not found (anchor fiscal_period "
                 "4 quarters before current must exist as a valid aligned "
@@ -788,6 +846,14 @@ def compute_adr_valuation_correction(
     ocf_complete = _all_rows_have_finite(ttm_cf_rows, "net_cash_flow_from_operations")
     capex_complete = _all_rows_have_finite(ttm_cf_rows, "capital_expenditure")
     fcf_complete = ocf_complete and capex_complete
+    if _cumulative_cf_diag is not None:
+        # Treat a YTD-cumulative window exactly like an incomplete cash-flow
+        # leg: the values are present but not summable over this window.
+        da_complete = False
+        fcf_complete = False
+        result.setdefault("warnings", []).append(
+            f"Cash-flow-derived TTM figures suppressed: {_cumulative_cf_diag}"
+        )
 
     # Post-impl ISS-058 (zero-context round 8 LOW): two-step `is not None`
     # selection (ISS-220 4.34 pattern applied here too). Pre-fix `_sf(tr)
@@ -1484,6 +1550,17 @@ def compute_adr_eps_check(
         # "UNKNOWN" when no row carries currency — upstream scan cannot
         # prove the selected window is USD-known. Fail-close on
         # non-USD/UNKNOWN window.
+        # Attested year-to-date is authoritative and unsummable. This is the
+        # sibling of compute_adr_valuation_correction's gate — omitting it
+        # here let the SAME input return "authoritatively unsummable" from
+        # one producer and an applied, plausible-looking wrong EPS from the
+        # other (measured: corrected_ttm_eps 1.25 against a correct 1.00).
+        _attested = attested_ytd_basis(window)
+        if _attested is not None:
+            result["check_status"] = "skipped"
+            result["skip_reason"] = _attested
+            result.pop("message", None)
+            return emit_dl3c_root_marker(result)
         for q in window:
             if q.statement_currency != "USD":
                 result["check_status"] = "skipped"

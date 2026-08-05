@@ -1100,3 +1100,283 @@ def iter_aligned_quarter_windows(
             for rp in slice_rps
         ]
         yield (tuple(window), None)  # type: ignore[misc]
+
+
+# ===========================================================================
+# Supplementary guard: YTD-cumulative cash-flow row detection
+# ===========================================================================
+# US 10-Q cash-flow statements are year-to-date by construction. Providers
+# normally de-cumulate them into standalone quarters; when one does not, a
+# fiscal-Qn row carries n quarters of flows while its quarter KEY
+# (report_period / fiscal_period / cross-statement intersection) stays
+# perfectly well-formed. `aligned_quarters` therefore accepts it, and every
+# consumer that SUMS cash-flow values over the window is silently corrupted.
+#
+# Demonstrated in this repo's own stored data:
+#   EME 20260803 cash_flows[2026-Q2] -> TTM FCF understated 28,154,000 (2.40%)
+#   MU  golden   cash_flows[2025-Q2, 2025-Q3] -> TTM D&A overstated ~47%,
+#       which DEFLATES EV/EBITDA (makes the stock look cheaper than truth)
+#
+# Deliberately NOT inside `aligned_quarters`: `scripts/sources/fmp.py`
+# `_financials_yield_aligned_window` uses that function's success as the
+# acceptance gate for a whole FMP financial set, so raising there would
+# reject the replacement set wholesale over a defect that affects only
+# cash-flow-derived aggregates. Consumers call this explicitly on the
+# window they are about to sum, and suppress only the affected lens.
+#
+# It DOES honour an attested `period_value_basis == "ytd"`, and that is not
+# duplicate logic. `scripts.fx_apply.apply_fx_conversion` Step 0 fail-closes
+# on the attested basis, but every consumer reaches that helper only on the
+# NON-USD branch — a USD-native window never calls it, so for USD rows this
+# is the only place the attestation is read at all. Measured: four USD rows
+# tagged `ytd` with cumulative values emitted a TTM 3.35x too high, under
+# `cumulative_check_ran: true` and no errors.
+
+_CUMULATIVE_PROBE_FIELD = "depreciation_and_amortization"
+# A fiscal-Qn YTD row carries ~n quarters of flows. Require the observed
+# ratio to be consistent with THAT quarter index rather than using one flat
+# ratio: measured across every trailing-4 window in the stored corpus, a
+# flat 1.5 would misread ordinary Q4 depreciation step-ups (RKLB 2025-Q4 at
+# 1.68) as contamination, while index scaling separates them cleanly.
+# For a year-to-date fiscal-Qn row the ratio against a standalone-quarter
+# baseline is (Q1+..+Qn)/Q1 ~= n when depreciation is smooth, so the slack
+# below is how far BELOW n a row may sit and still be called cumulative.
+#
+# Known residual false-positive risk, accepted deliberately: a genuine
+# standalone step-up — e.g. an acquisition entering service in Q2, giving
+# Q1=100, Q2=160 — reads 1.60x and clears the Q2 threshold of 1.5. Measured
+# over all 91 trailing-4 windows in the stored corpus plus the golden
+# fixture this never fires (0 false positives; the nearest benign
+# observation is 1.40x), so the threshold is NOT tuned down to chase it.
+# The trade is deliberate and asymmetric: a false positive costs a visibly
+# suppressed lens carrying a warning that names the reason, whereas a false
+# negative is a silently wrong TTM reaching a valuation. Per CLAUDE.md the
+# dominant risk here is the wrong number, not the missing one.
+_CUMULATIVE_RATIO_SLACK = 0.5
+
+
+def _is_positive_finite(value: object) -> bool:
+    """True only for a real, finite, strictly-positive number.
+    Rejects bool (bool is an int subclass), NaN, Inf, numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf")) and value > 0
+
+
+def attested_ytd_basis(window) -> Optional[str]:
+    """Return a diagnostic if any row in `window` DECLARES itself year-to-date
+    via `period_value_basis`, else None.
+
+    This is an attestation, not a heuristic: no probe is needed and it cannot
+    be argued with. It is read here because every consumer reaches
+    `scripts.fx_apply` — the pipeline's other reader of this field — only on
+    the NON-USD branch, so on a USD-native window this is the only place it is
+    read at all.
+
+    Scanned across ALL THREE statement families, matching `fx_apply`'s own
+    scope. An income row declared year-to-date corrupts TTM revenue / EBIT /
+    net income, i.e. P/E, P/S and EV/EBIT — not just the cash-flow lens — so
+    callers must treat an attested window as wholly unsummable rather than
+    suppressing one lens. `attested_ytd_basis` is exported separately from
+    `detect_cumulative_cash_flow` precisely so they can tell the two apart.
+
+    Fiscal Q1 rows are exempt: a year-to-date Q1 IS the standalone Q1, so a
+    window whose Q1 alone carries the tag is perfectly summable.
+    """
+    for q in list(window or ()):
+        match = _FISCAL_PERIOD_RE.fullmatch(q.fiscal_period)
+        if match is not None and int(match.group(2)) == 1:
+            continue  # YTD Q1 == standalone Q1
+        for family in ("income_row", "cash_flow_row", "balance_row"):
+            basis = getattr(q, family).get("period_value_basis")
+            if isinstance(basis, str) and basis.strip().lower() == "ytd":
+                return (
+                    f"{family.replace('_row', '')} row {q.report_period} "
+                    f"({q.fiscal_period}) is ATTESTED year-to-date cumulative "
+                    f"(period_value_basis={basis!r}). TTM aggregates over this "
+                    f"window would double-count earlier quarters."
+                )
+    return None
+
+
+def _usable_q1_anchor(window) -> Optional[float]:
+    """Return the probe value of the window's fiscal-Q1 row when that probe
+    is usable, else None.
+
+    A valid consecutive four-quarter window contains EXACTLY ONE fiscal Q1,
+    and under year-to-date reporting that row is the only one guaranteed to
+    be a standalone quarter (a YTD Q1 IS the Q1). It is therefore the single
+    trustworthy baseline: every other row may itself be cumulative, so any
+    statistic over them (mean, median) is inflated exactly when it matters.
+    """
+    for q in list(window or ()):
+        match = _FISCAL_PERIOD_RE.fullmatch(q.fiscal_period)
+        if match is None or int(match.group(2)) != 1:
+            continue
+        value = q.cash_flow_row.get(_CUMULATIVE_PROBE_FIELD)
+        if _is_positive_finite(value):
+            return float(value)
+    return None
+
+
+def cumulative_detection_ran(window, *, fx_converted: bool = False) -> bool:
+    """True iff `detect_cumulative_cash_flow` was able to examine the WHOLE
+    window — i.e. the fiscal-Q1 row carries a usable probe (the baseline)
+    AND every Q2..Q4 candidate row does too.
+
+    Both halves are load-bearing. Requiring only the anchor would report a
+    completed check while the one row that matters went unexamined: with a
+    usable Q1, an unprobeable Q2 whose OCF/capex ARE cumulative, and ordinary
+    Q3/Q4, the detector skips Q2 and returns None. The consumer would then
+    read "checked and clean" beside a TTM inflated by that row — the exact
+    silent-wrong-number outcome this guard exists to prevent.
+
+    When False the detector's None means "not fully checked", NOT "examined
+    and clean", and consumers must say so.
+    """
+    rows = list(window or ())
+    if attested_ytd_basis(rows) is not None:
+        return True  # attested — no probe needed, and it is authoritative
+    if fx_converted:
+        return False  # ratio is not FX-invariant — see detect_cumulative_cash_flow
+    if _usable_q1_anchor(rows) is None:
+        return False
+    for q in rows:
+        match = _FISCAL_PERIOD_RE.fullmatch(q.fiscal_period)
+        if match is None:
+            return False
+        if int(match.group(2)) == 1:
+            continue  # the anchor itself, already verified usable
+        if not _is_positive_finite(q.cash_flow_row.get(_CUMULATIVE_PROBE_FIELD)):
+            return False  # a candidate row could not be examined
+    return True
+
+
+def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Optional[str]:
+    """Return a diagnostic string if any row in `window` looks like a
+    year-to-date CUMULATIVE cash-flow row, else None.
+
+    KNOWN LIMITS — this is a heuristic over one window, not an attestation.
+    Callers must treat a None as "no evidence found", never as "verified
+    standalone". `cumulative_detection_ran()` reports whether the probe was
+    even usable so consumers can disclose that rather than assume a clean
+    read.
+
+      * D&A is a PROXY for the period basis of the whole cash-flow row. If a
+        provider ever de-cumulated D&A while leaving OCF/capex cumulative —
+        or simply omits D&A — contamination in the summed fields is
+        invisible here. Fail-closing on an absent probe was considered and
+        rejected: it would delete the DCF and EV/EBITDA lenses for every
+        issuer that does not report D&A (a permanent capability loss) to
+        guard a case that appears nowhere in the corpus. The exposure is
+        disclosed instead.
+      * A window with no same-fiscal-year Q1 whose contamination happens to
+        form a smooth progression is undetectable in principle. D&A
+        2025-Q2/Q3/Q4 = 200/300/400 (cumulative, standalone 100) beside a
+        2026-Q1 of 500 is arithmetically identical to four standalone
+        quarters growing linearly; no window-local test can separate them.
+      * The ratio is NOT FX-invariant, so a window whose rows were converted
+        by `scripts.fx_apply` (per-quarter historical rates) cannot be judged
+        here at all. Callers that convert must pass `fx_converted=True`; the
+        window is then reported un-checkable. This costs detection on non-USD
+        ADRs, which is the honest trade: the alternative is a verdict whose
+        error term is an FX move.
+      * A ratio test has a false-negative band by construction. If the
+        standalone run rate FALLS within the fiscal year, a cumulative row
+        compresses toward its baseline and slips under the threshold: Q1=100
+        with a post-disposal standalone Q2 of 40 emits a cumulative Q2 of
+        140, i.e. 1.40x, under the 1.5x bar. The threshold is not lowered to
+        catch it — the nearest BENIGN observation in the corpus is 1.399x, so
+        doing that would trade a documented false negative for a live false
+        positive. `cumulative_check_ran` therefore means "the guard ran over
+        every candidate", never "this window is guaranteed standalone".
+      * Conversely a cross-year Q1 that is structurally SMALLER than the
+        window (a divestiture between years) can push a clean row over its
+        threshold. The two failures pull the baseline in opposite
+        directions, so they cannot both be closed by tuning it. The repo's
+        stated asymmetry decides it: a false positive is a visibly
+        suppressed lens carrying a reason, a false negative is a silently
+        wrong TTM reaching a valuation.
+
+    Pure predicate — never mutates, never raises on ordinary data, and
+    fails OPEN (returns None) whenever the probe field cannot be read.
+    "No heuristic evidence" is not "bad cash flows": failing closed on a
+    dataset that simply omits D&A would delete the DCF and EV/EBITDA
+    lenses for every such issuer.
+
+    Method: compare each Q2..Q4 row's `depreciation_and_amortization`
+    against the window's fiscal-Q1 row. D&A is the probe because it is
+    additive, strictly positive and smooth quarter-to-quarter, so a
+    year-to-date row stands out as an ~n-fold multiple of the run rate. The
+    Q1 row is the baseline because a year-to-date Q1 IS a standalone Q1, so
+    it is the only row guaranteed uncontaminated — a statistic over the
+    other rows is inflated exactly when contamination is widespread. Q1
+    itself is never a candidate, for the same reason.
+    """
+    attested = attested_ytd_basis(window)
+    if attested is not None:
+        return attested
+
+    if fx_converted:
+        # The probe ratio is D&A[Qn] / D&A[Q1]. `scripts.fx_apply` multiplies
+        # each row by its OWN quarter's historical rate, so after conversion
+        # the ratio carries a spurious factor r_n / r_1: a 7% quarterly FX
+        # move turns a genuine 1.60x into 1.488x and the row slips under the
+        # 1.5x bar (and the reverse can manufacture a flag). The ratio is
+        # only meaningful on ONE currency basis, so a converted window is
+        # reported as un-checkable rather than given a distorted verdict —
+        # `cumulative_detection_ran(..., fx_converted=True)` is False to
+        # match, and consumers disclose it like any other non-run.
+        return None
+    rows = list(window or ())
+    if len(rows) < 2:
+        return None
+
+    # Per-row probe values; None = unusable on THAT row only. A single
+    # unusable row must not disable detection for the whole window: the
+    # remaining rows can still establish contamination, and returning early
+    # here was an avoidable false negative (e.g. Q3 D&A null while Q2 is
+    # plainly 2x Q1 and OCF/capex are fully populated — the FCF consumers
+    # would then sum the contaminated window).
+    das: list[Optional[float]] = []
+    for q in rows:
+        value = q.cash_flow_row.get(_CUMULATIVE_PROBE_FIELD)
+        das.append(float(value) if _is_positive_finite(value) else None)
+    if sum(1 for d in das if d is not None) < 2:
+        return None  # fail open — need a probe row AND a baseline
+
+    parsed = [_FISCAL_PERIOD_RE.fullmatch(q.fiscal_period) for q in rows]
+
+    baseline = _usable_q1_anchor(rows)
+    if baseline is None:
+        # No trustworthy baseline. Deliberately NOT falling back to a
+        # statistic over the other rows: the median of the peers is inflated
+        # by contamination in exactly the case this guard exists for. With
+        # D&A 2025-Q2=200 (cumulative), Q3=300 (cumulative), Q4=100
+        # (standalone) and an unusable Q1, every candidate reads under its
+        # threshold (Q2 1.00x, Q3 1.50x, Q4 0.40x) and the window is
+        # pronounced clean while two of its rows double-count. Reporting
+        # "not checked" via cumulative_detection_ran() is the honest answer;
+        # a confident wrong verdict is the failure mode this repo guards.
+        return None
+    for idx, q in enumerate(rows):
+        match = parsed[idx]
+        if not match or das[idx] is None:
+            continue  # unusable probe row, or a shape AlignedQuarter should have caught
+        quarter_index = int(match.group(2))
+        if quarter_index < 2:
+            continue  # YTD Q1 == standalone Q1
+        ratio = das[idx] / baseline
+        threshold = quarter_index - _CUMULATIVE_RATIO_SLACK
+        if ratio >= threshold:
+            return (
+                f"cash_flow row {q.report_period} ({q.fiscal_period}) looks "
+                f"year-to-date cumulative: {_CUMULATIVE_PROBE_FIELD}="
+                f"{das[idx]:,.0f} is {ratio:.2f}x the window's fiscal-Q1 "
+                f"standalone-quarter baseline ({baseline:,.0f}), at or "
+                f"above the {threshold:.1f}x threshold for a fiscal-Q"
+                f"{quarter_index} year-to-date row. Cash-flow-derived TTM "
+                f"aggregates over this window would double-count earlier "
+                f"quarters."
+            )
+    return None

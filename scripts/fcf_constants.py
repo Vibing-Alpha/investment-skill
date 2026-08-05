@@ -8,8 +8,14 @@ in a consumer would silently misclassify outputs.
 
 from typing import Final, FrozenSet
 
-# fcf_selection_reason enum:
-#   6 state-machine terminal states + 2 fail-close failure modes.
+# fcf_selection_reason enum — 9 values:
+#   6 state-machine terminal states,
+#   1 emit-phase failure (shares_unavailable),
+#   2 data-integrity fail-closes (insufficient_quarters_for_aligned_window,
+#     cumulative_cash_flow_suspected).
+# FCF_SELECTION_REASONS below is the single source of truth; every consumer
+# listed in .claude/rules/producer-consumer.md §2 must move in the same
+# commit as this set.
 FCF_SELECTION_REASON_LOW_DIVERGENCE_DEFAULT = "low_divergence_default"
 FCF_SELECTION_REASON_SINGLE_PATH_ONLY = "single_path_only"
 FCF_SELECTION_REASON_NI_SIGN_ANCHOR = "ni_sign_anchor"
@@ -26,6 +32,15 @@ FCF_SELECTION_REASON_SHARES_UNAVAILABLE = "shares_unavailable"
 # statement_metadata_mismatch, or duplicate_report_period).
 # fcf_per_share=None in this case.
 FCF_SELECTION_REASON_INSUFFICIENT_QUARTERS = "insufficient_quarters_for_aligned_window"
+# Post-aggregation data-integrity failure: the aligned window is
+# structurally valid but at least one cash-flow row looks year-to-date
+# CUMULATIVE (US 10-Q cash flows are YTD by construction; a provider that
+# does not de-cumulate emits an n-quarter row under a well-formed quarter
+# key). Summing it double-counts earlier quarters, so TTM FCF is refused
+# rather than emitted wrong. Detected by
+# `scripts.schemas.quarter_window.detect_cumulative_cash_flow`.
+# fcf_per_share=None in this case.
+FCF_SELECTION_REASON_CUMULATIVE_CASH_FLOW = "cumulative_cash_flow_suspected"
 
 # fresh-loop2-cycle2 ISS-020: closed-vocabulary frozenset + validator
 # so consumers can detect typos at emit time. Pre-fix any string was
@@ -40,6 +55,7 @@ FCF_SELECTION_REASONS: Final[FrozenSet[str]] = frozenset({
     FCF_SELECTION_REASON_BOTH_INVALID_NULL,
     FCF_SELECTION_REASON_SHARES_UNAVAILABLE,
     FCF_SELECTION_REASON_INSUFFICIENT_QUARTERS,
+    FCF_SELECTION_REASON_CUMULATIVE_CASH_FLOW,
 })
 
 

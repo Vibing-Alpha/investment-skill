@@ -51,6 +51,14 @@ on invalid/null FCF. The fail-close classes:
   assuming fail-close. (FMP does NOT fix the next two.)
 - **Unknown ADR ratio** → `adr_ratio_correction_required`.
 - **Non-USD annual-only statements** → `fx_unsupported_annual_path`.
+- **Year-to-date CUMULATIVE cash-flow row** → `fcf_selection_reason:
+  cumulative_cash_flow_suspected`. US 10-Q cash flows are YTD by construction;
+  when a provider does not de-cumulate them the row's quarter KEY is still
+  well-formed, so DL4 accepts it and summing the window double-counts earlier
+  quarters. This is a DATA defect, not weak cash generation — do not read it
+  as such. The same run's `historical_multiples.json` will usually have
+  suppressed `ev_ebitda` for the same reason (check its `warnings`); report
+  the two omissions as one cause, not two gaps. FMP does not fix this.
 
 Action: emit the skipped `reverse_dcf` stub exactly as `prompts/evaluate-valuation.md`
 specifies (it gives the exact `reason` per case — `fcf_selection_reason` for the
