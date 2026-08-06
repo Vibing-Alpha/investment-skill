@@ -68,6 +68,75 @@ a round or prior length, suspect this mount quirk, not a producer bug.
 ADR per-share metrics are unreliable — full handling defined in
 `prompts/score-fundamental.md` §ADR Stock Handling.
 
+### Upstream single-FIELD, single-QUARTER currency error → plausible after FX conversion (MRAAY 2026-08-06)
+
+**The named failure mode.** FMP returned, for MRAAY (Murata) quarter ended
+2025-09-30, `reportedCurrency: "JPY"` with `netIncome: 560,547,000` while
+`revenue` on the SAME row was a correct JPY-scale 495,259,791,000. That is a **USD
+figure in a JPY-labelled field, for one field on one row** (net margin reads 0.11%
+vs 12–16% in neighbouring quarters). Reproduced identically on FMP's v3 surface
+(the adapter path — `FMP_BASE_URL` in `scripts/constants.py`) and the `stable`
+surface, so it is a source data error, not an endpoint quirk. Corruption on that
+row is **field-selective**: `net_income`, `research_and_development`,
+`net_income_common_stock`, and the whole cash-flow row EXCEPT
+`depreciation_and_amortization` — **verifying one field does NOT clear the row.**
+
+**Why it is dangerous — FX conversion INVERTS its visibility.** DL3c
+`apply_fx_conversion` correctly obeyed the JPY label and divided by that row's
+factor 148.595, yielding `net_income = 3,772,314`.
+
+| | value | how it reads |
+|---|---|---|
+| pre-conversion | ¥560,547,000 beside ¥82,448,570,000 | 150× gap — glaring |
+| post-conversion | $3.77M inside $3.77M → $162M → $488M → $509M | plausible "recovery off a trough" |
+
+A dimension agent wrote it up as an **earnings-inflection bull argument**. This is
+the canonical instance of "a plausible-looking wrong number silently feeding a
+trade" — the pipeline behaved correctly at every step given its inputs.
+
+**Why the existing layers missed it.** `currency_consistency` fired
+`mixed_unrepairable`, but that status is EXPECTED here (DL3c converts only the
+master set, so within-row mixing is by design) and carries no signal about this
+defect. `anomalous_quarters` was **empty** — its contract is revenue-QoQ /
+gross-margin on income statements only, and deliberately narrow (it exists to stop
+agents discarding genuine cyclical extremes). Typed loaders check shape, not
+cross-row plausibility.
+
+**What actually caught it — use this, it is the reusable move.** Reconciling the
+quarterly series against the company's own annual figure: summing FY-ended-March-2026
+on a JPY basis gives **¥236.4bn corrected vs ¥153.7bn as-is, against ¥233.9bn
+guided** — 1.1% reconciliation when corrected, 34% shortfall when not. Detection
+came from cross-validation against a primary source, not from any detector.
+
+**Decision (codex adversarial review, 2026-08-06): NO detector was added.** A
+proposed cross-row same-field scale-jump surfacer keyed on proximity to
+`implied_fx` was rejected on evidence — on the real 16-quarter artifact it does
+**not** fire for `net_income` (observed/peer-median = 101.8×, outside 148.966 ±20%)
+because the true value ($560.55M) is itself above the cross-quarter median
+($384.07M). It would flag R&D and CFO but miss the field that drove the bad
+conclusion. Base rate is 1 confirmed case in 5 Japanese ADRs (SONY / TOELY / NTDOY
+/ KYOCY clean), and a naive |net margin| < 1% heuristic already false-positived on
+KYOCY 2024-09-30 (−0.14% is a genuine deterioration: neighbours run +36.8bn →
+−0.7bn → −17.7bn). Per the anti-ratchet rule, revisit only if a second independent
+occurrence appears — then the right observation point is immediately before
+mutation in `scripts/fx_apply.py` (raw values still present, per-period FX known),
+emitting to a NEW artifact field, **not** overloaded into `anomalous_quarters`.
+
+**⚠️ OPEN HOLE — not yet fixed.** `prompts/score-fundamental.md` §ADR Stock
+Handling still permits using "YoY/QoQ growth direction of a single field" as a
+currency-INVARIANT signal on `mixed_unrepairable` rows. MRAAY falsifies that: a
+single field's currency basis CAN change between quarters. That sentence is what
+licensed the bad claim. Until it is corrected, an agent hitting
+`mixed_unrepairable` must not treat a same-field trajectory as safe — corroborate
+any load-bearing series against a company-reported period/annual total, and mark it
+`unknown` if no comparable corroboration exists.
+
+**Also stale (documentation drift, harmless but misleading):** CLAUDE.md,
+`rules/units.md` and `scripts/fetch.py` comments describe a "12-field master set";
+`ADR_CORRECT_MONEY_FIELDS` in `scripts/adr/correct.py` actually holds **10** fields
+across 3 statement families (income 4 incl. the `total_revenue` alias, balance 3,
+cash-flow 3). Do not treat "12" as a contract.
+
 ### API Array Order — depends on array TYPE, not data source
 
 Order depends on which array you're reading, not whether the data

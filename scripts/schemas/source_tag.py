@@ -24,8 +24,17 @@ from typing import Any, Mapping
 from scripts.schemas.errors import SchemaError
 
 
+# The descriptor's FIRST character must be neither whitespace nor `]`.
+# `\S` alone let the descriptor start with the tag's own closing bracket, so an
+# empty tag such as `[Filing:]` matched and then ran on to a LATER `]` in the
+# same string — swallowing whatever lay between. Two live consequences (real
+# instances in reports/INTC/…/bq_analysis.json and reports/EME/…): a malformed
+# empty tag could falsely satisfy check_source_tag(), and a following valid
+# `[WebSearch: …]` could be absorbed into the bogus match and thereby escape
+# check_websearch_binding(). Whitespace was already consumed by the preceding
+# `\s*`, so excluding `]` is the only substantive tightening here.
 SOURCE_TAG_RE: re.Pattern[str] = re.compile(
-    r"\[(API|WebSearch|Filing|Calc)\s*:\s*(\S[^\]]*?)\]"
+    r"\[(API|WebSearch|Filing|Calc)\s*:\s*([^\s\]][^\]]*?)\]"
 )
 
 # --- WebSearch host-capability binding (Plan B Task 6) ---------------------

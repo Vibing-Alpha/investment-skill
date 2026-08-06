@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.7.7 — 2026-08-07
+
+- fix(source_tag): empty descriptor no longer swallows the next tag out of validation
+
 ## v1.7.6 — 2026-08-05
 
 - extract_fcf / historical_multiples / adr.correct: detect year-to-date CUMULATIVE cash-flow rows before TTM aggregation. US 10-Q cash flows are year-to-date by construction; when a provider does not de-cumulate them the row's quarter key stays well-formed, so the DL4 aligned-window gate accepts it and every consumer that SUMS the window is silently corrupted. Found in this repo's own stored data: TTM FCF understated 2.40% on one ticker (carried into reverse_dcf), TTM D&A overstated 47% on another, which DEFLATES EV/EBITDA and makes a name look cheaper than truth.
