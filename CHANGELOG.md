@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.8.0 — 2026-08-09
+
+- feat(portfolio): closing-basis price structure + decision-evidence layer — macro.json now carries per-ticker ticker_price_structure (closing-basis prior-high/breakout status, hold detectors for breakout/MA/cluster with reclaim volume, high-water drawdown) and universe_rebound_structure (cohort selloff event + per-member recovery); the decision log persists this evidence and cmd_write refuses decisions whose evidence contradicts the run's macro; /portfolio prompt teaches the two parallel entry paths (closing breakout / repair) with named strength lenses
+
 ## v1.7.7 — 2026-08-07
 
 - fix(source_tag): empty descriptor no longer swallows the next tag out of validation

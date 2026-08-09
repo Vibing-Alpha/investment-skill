@@ -557,6 +557,13 @@ def _compact_macro(macro: Dict[str, Any]) -> Dict[str, Any]:
     # status downgrade: a signal without a reader is not a fix).
     if isinstance(macro.get("rates_status"), dict):
         out["rates_status"] = macro["rates_status"]
+    # Persist what a rationale may cite, so the durable log can verify its own
+    # claims. Pre-fix, every RSI/volume number in decisions.json was
+    # uncheckable because ticker_indicators was dropped at compaction.
+    for _k in ("ticker_price_structure", "universe_rebound_structure",
+               "ticker_indicators"):
+        if isinstance(macro.get(_k), dict):
+            out[_k] = macro[_k]
     return out
 
 
@@ -984,6 +991,122 @@ def _validate_decision_coverage(
     missing = sorted(expected - covered)
     extra = sorted(covered - expected)
     return missing, extra
+
+
+def _validate_decision_evidence(blob, macro, *, constraints):
+    """Fact-vs-fact cross-checks; returns (errors, warnings). Errors refuse
+    the write; warnings print and never block. Everything deliberately NOT
+    checked is listed in the plan's §Honest enforcement boundary."""
+    import math as _math
+    from scripts.schemas.decisions import (
+        CLOSING_HIGH_STATUS_VALUES, LENS_VALUES, PATH_STATUS_VALUES)
+
+    def _finite(x):
+        return (isinstance(x, (int, float)) and not isinstance(x, bool)
+                and _math.isfinite(x))
+
+    errs, warns = [], []
+    tps = macro.get("ticker_price_structure")
+    tps = tps if isinstance(tps, dict) else None
+    urs = macro.get("universe_rebound_structure")
+    urs = urs if isinstance(urs, dict) else {}
+    members = urs.get("members")
+    members = members if isinstance(members, dict) else {}
+    ind = macro.get("ticker_indicators")
+    ind = ind if isinstance(ind, dict) else {}
+
+    for d in blob.get("decisions") or []:
+        t = d.get("ticker")
+        tag = f"decisions[{t}]"
+        entry = d.get("action") in ("buy", "add")
+        blk = (tps or {}).get(t)
+        blk = blk if isinstance(blk, dict) else None
+        truth = (blk or {}).get("closing_high_status")
+        structure_ok = blk is not None and truth not in (None, "unknown")
+
+        lens = d.get("lens_used")
+        if lens is not None and (not isinstance(lens, str) or lens not in LENS_VALUES):
+            errs.append(f"{tag}.lens_used {lens!r} not in {sorted(LENS_VALUES)}")
+        if lens == "cohort_recovery":
+            mem = members.get(t)
+            mem = mem if isinstance(mem, dict) else {}
+            if urs.get("status") != "fresh":
+                errs.append(f"{tag}.lens_used=cohort_recovery but event status is "
+                            f"{urs.get('status')!r} (only 'fresh' authorises it)")
+            if mem.get("status") != "available" or \
+                    not _finite(mem.get("pct_since_cohort_trough")):
+                errs.append(f"{tag}.lens_used=cohort_recovery but members[{t}] is "
+                            f"not an available finite record")
+        elif lens in ("rs_vs_spy", "rs_vs_qqq"):
+            key = "rs_vs_spy_3m" if lens == "rs_vs_spy" else "rs_vs_qqq_3m"
+            row = ind.get(t)
+            val = row.get(key) if isinstance(row, dict) else None
+            if not _finite(val):
+                errs.append(f"{tag}.lens_used={lens} but ticker_indicators[{t}]."
+                            f"{key} is {val!r} (not a finite number)")
+
+        for key in ("breakout_path_status", "repair_path_status"):
+            v = d.get(key)
+            if v is not None and (not isinstance(v, str) or v not in PATH_STATUS_VALUES):
+                errs.append(f"{tag}.{key} {v!r} not in {sorted(PATH_STATUS_VALUES)}")
+            if entry and v is None:
+                errs.append(f"{tag}.{key} is required on action={d.get('action')!r}")
+        _bps, _rps = d.get("breakout_path_status"), d.get("repair_path_status")
+        if entry and isinstance(_bps, str) and _bps in PATH_STATUS_VALUES \
+                and isinstance(_rps, str) and _rps in PATH_STATUS_VALUES \
+                and "qualified" not in (_bps, _rps):
+            errs.append(f"{tag}: entry requires at least one path status "
+                        f"'qualified' — both are non-qualified, which is "
+                        f"internally contradictory")
+
+        obs = d.get("observed_closing_high_status")
+        if obs == "unknown":
+            errs.append(f"{tag}.observed_closing_high_status='unknown' is "
+                        f"meaningless transcription — omit the field instead")
+        if obs is not None and (not isinstance(obs, str) or obs not in CLOSING_HIGH_STATUS_VALUES):
+            errs.append(f"{tag}.observed_closing_high_status {obs!r} not in "
+                        f"{sorted(CLOSING_HIGH_STATUS_VALUES)}")
+
+        if entry and blk is None:
+            errs.append(f"{tag}: action={d.get('action')!r} is "
+                        f"blocked_by_data_integrity — ticker_price_structure is "
+                        f"missing for {t}")
+            continue
+        if entry and blk.get("anchor_session_covered") is not True:
+            errs.append(f"{tag}: action={d.get('action')!r} is "
+                        f"blocked_by_data_integrity — anchor session not covered "
+                        f"for {t} (stale/halted series)")
+            continue
+        # PATH-SENSITIVE integrity: the strategy's two entry paths are
+        # parallel, and repair explicitly does not require a new high — an
+        # incomplete breakout-high history must not block a repair entry.
+        # The producer emits a concrete closing_high_status ONLY under a
+        # complete lookback or proven inception, so the fact-check below
+        # subsumes the old lookback/inception conjunct.
+        if entry and d.get("breakout_path_status") == "qualified" \
+                and truth != "breakout":
+            errs.append(f"{tag}: breakout_path_status='qualified' contradicts "
+                        f"macro closing_high_status={truth!r} (a breakout claim "
+                        f"requires a proven closing-basis breakout)")
+        if entry and obs is None and truth not in (None, "unknown"):
+            errs.append(f"{tag}.observed_closing_high_status is required on "
+                        f"entries when the macro status is concrete")
+        if obs is None and truth == "breakout":
+            warns.append(f"{tag}: macro reports closing_high_status='breakout' but "
+                         f"the decision does not transcribe "
+                         f"observed_closing_high_status (prompt requires it; not "
+                         f"blocking)")
+        if obs is not None:
+            if not structure_ok:
+                errs.append(f"{tag} cites price structure but none exists for {t}")
+                continue
+            if obs != truth:
+                errs.append(f"{tag}.observed_closing_high_status={obs!r} does not "
+                            f"match macro closing_high_status={truth!r}")
+            if blk.get("anchor_session_covered") is not True:
+                errs.append(f"{tag} cites price structure but "
+                            f"anchor_session_covered is not true (stale/halted)")
+    return errs, warns
 
 
 def _sanitize_follow_ups(
@@ -1754,6 +1877,25 @@ def cmd_write(args: argparse.Namespace) -> int:
         return 2
     constraints_active = dict(hard)
     constraints_active["source_hash"] = src_hash
+
+    # Price-structure Task 7: fact-vs-fact cross-check of the decision
+    # evidence against THIS run's macro (basis / entry data-integrity /
+    # entry consistency / declared-lens validity). Errors refuse the write
+    # — a decision contradicting the macro it was authored against is an
+    # audit-trail corruption, and stderr does not survive the session while
+    # the log does. Warnings print and never block. Everything the check
+    # deliberately does NOT catch is enumerated in the plan's §Honest
+    # enforcement boundary and taught in prompts/portfolio-decide.md.
+    _ev_errs, _ev_warns = _validate_decision_evidence(
+        blob, macro, constraints=constraints_active)
+    for _w in _ev_warns:
+        print(f"portfolio_log: [WARN] {_w}", file=sys.stderr)
+    if _ev_errs:
+        print("portfolio_log: REFUSED — decision evidence contradicts this run's "
+              "macro:", file=sys.stderr)
+        for _e in _ev_errs:
+            print(f"  - {_e}", file=sys.stderr)
+        return 2
 
     # Closing round-38: with the compiled principles in hand, range-check
     # every clause-leading #N in principle_cited. An out-of-range tag

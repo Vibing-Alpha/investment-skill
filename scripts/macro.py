@@ -20,6 +20,13 @@ from zoneinfo import ZoneInfo
 from scripts.sources.yahoo_finance import fetch_yahoo_quote_result
 from scripts.sources.adapter_result import ErrorCode
 from scripts.delta.calendar import last_closed_trading_day
+from scripts.indicators import merge_adjusted_closes
+from scripts.price_structure import (
+    INDICATOR_SLICE_SESSIONS,
+    compute_cohort_recovery,
+    compute_ticker_price_structure,
+    select_cohort_event,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -28,6 +35,7 @@ from scripts.delta.calendar import last_closed_trading_day
 MARKET_INDICES = ["SPY", "QQQ", "^DJI"]
 VIX_TICKER = "^VIX"
 _ET = ZoneInfo("America/New_York")
+MAX_EVENT_STALENESS_SESSIONS = 10   # user parameter 2026-08-09
 
 # Price provenance defaults for every failure-path status dict — keys are
 # ALWAYS present so consumers never need .get() ambiguity (feedback
@@ -336,6 +344,11 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
         }
         timestamps = list(chart.get("timestamp", []))
         ohlcv["timestamp"] = timestamps
+        # Price-structure Task 5: a SCALAR key — survives _anchored_ohlcv's
+        # dict copy (only the known LIST keys are overwritten there) — so
+        # compute_ticker_price_structure() can prove/refute a since-
+        # inception high against the true firstTradeDate.
+        ohlcv["first_trade_session"] = _et_date_iso(meta.get("firstTradeDate"))
         rmp = meta.get("regularMarketPrice")
         rmt = meta.get("regularMarketTime")
         # Round-21 F1: a non-positive/non-finite meta quote is not a price —
@@ -617,7 +630,14 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
 
     Returns:
         dict with keys: market, volatility, regime_inputs, rates,
-        ticker_prices, ticker_indicators, as_of
+        ticker_prices, ticker_indicators, ticker_price_structure,
+        universe_rebound_structure, as_of. ``ticker_price_structure`` is a
+        per-ticker closing-basis price-structure block (or ``None`` on
+        fetch failure) from ``scripts.price_structure.
+        compute_ticker_price_structure``; ``universe_rebound_structure`` is
+        the shared cohort selloff/recovery block (``compute_cohort_recovery``
+        wrapping ``select_cohort_event``) over ALL requested tickers —
+        failed tickers stay in the denominator with an empty series.
     """
     tickers = tickers or []
     vendor_aliases = vendor_aliases or {}
@@ -627,21 +647,24 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # ------------------------------------------------------------------
     futures = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        # Market indices (1y for MA200). OHLCV variant: regime anchoring
-        # needs the timestamp array (feedback 2026-06-11 #2).
+        # Market indices (2y — was 1y). OHLCV variant: regime anchoring
+        # needs the timestamp array (feedback 2026-06-11 #2). The 2y range
+        # also serves as the broad-index MARKET CALENDAR consensus below,
+        # which must cover hold episodes up to ~2y old.
         for idx in MARKET_INDICES:
-            futures[pool.submit(_fetch_chart_ohlcv, idx, "1y", "1d")] = ("index", idx)
+            futures[pool.submit(_fetch_chart_ohlcv, idx, "2y", "1d")] = ("index", idx)
 
         # VIX (3mo for MA20) — OHLCV variant, same reason.
         futures[pool.submit(_fetch_chart_ohlcv, VIX_TICKER, "3mo", "1d")] = ("vix", VIX_TICKER)
 
-        # Portfolio tickers (6mo for run-day technical indicators: RSI/MACD/
-        # Bollinger/volume + RSI-divergence lookback 60 need >=74 bars; 5d only
-        # carried current price and dropped volume — plan
-        # 2026-05-27-portfolio-runday-technicals).
+        # Portfolio tickers (2y — was 6mo; price-structure Task 5: hold
+        # detection needs each candidate's own preceding 252 sessions, so
+        # the fetch window must reach back that far. Run-day indicator input
+        # is then sliced BACK to INDICATOR_SLICE_SESSIONS (126) below —
+        # a longer input can flip MACD's crossover read).
         for t in tickers:
             futures[pool.submit(
-                _fetch_chart_ohlcv, vendor_aliases.get(t, t), "6mo", "1d",
+                _fetch_chart_ohlcv, vendor_aliases.get(t, t), "2y", "1d",
             )] = ("ticker", t)
 
         # Treasury yields (5d)
@@ -754,7 +777,13 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         # primary gauges (index vs MA200; drawdown depth as trend-structure
         # proxy). Anchored series only — the live `market` block mixes a
         # pre-market quote with prior-close MAs (the clock hazard this
-        # block exists to prevent). 1y daily fetch ≈ 252 closes ≥ 200.
+        # block exists to prevent).
+        # Price-structure Task 5: the index fetch is now 2y (was 1y) so the
+        # broad-index MARKET CALENDAR consensus below can cover ~2y hold
+        # episodes. high_52w must stay a TRUE 52-week (252-session) high —
+        # re-slice to the trailing 252 closes so the extra year of history
+        # doesn't silently turn this into a 2-year high.
+        closes_thru = closes_thru[-252:]
         high_52w = round(max(closes_thru), 2) if closes_thru else None
         off_52w_high_pct = (
             round((close_at - high_52w) / high_52w * 100, 2)
@@ -882,17 +911,52 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         rates["spread_10y_5y"] = round(y10 - y5, 3)
 
     # ------------------------------------------------------------------
-    # Ticker prices + run-day technical indicators
+    # Broad-index MARKET CALENDAR (price-structure Task 5)
+    # ------------------------------------------------------------------
+    # Consensus of the 3 broad indices (>=2-of-3 vote) — a single-index
+    # source would let one vendor gap delete a real session (and a below-
+    # level close on that session would vanish, fabricating a false
+    # "active" hold that authorizes an entry).
+    _sets = []
+    for _idx in ("SPY", "QQQ", "^DJI"):
+        _tr = raw.get(("index", _idx))
+        _oh = _tr[1] if _tr and isinstance(_tr[1], dict) else {}
+        _ds = {d for d in (_et_date_iso(ts) for ts in
+                           (_anchored_ohlcv(_oh, anchor).get("timestamp") or []))
+               if d is not None}
+        if _ds:
+            _sets.append(_ds)
+    if len(_sets) == 3:
+        # CONSENSUS calendar: a session is real when >=2 of 3 series carry it —
+        # one vendor gap cannot delete a real session, one glitch cannot
+        # invent one.
+        _market_sessions = sorted(d for d in set.union(*_sets)
+                                  if sum(d in s for s in _sets) >= 2)
+    else:
+        # Fewer than 3 sources: completeness is UNPROVEN. A 2-source "vote"
+        # is an intersection — one vendor gap deletes a real session, the
+        # ticker's genuine bar there gets dropped as off-calendar, and a
+        # below-level close can vanish, fabricating a false `active` hold
+        # that authorizes an entry. Money-path rule: no proven calendar ->
+        # every structure fact unknown, entries blocked by data-integrity.
+        _market_sessions = []
+
+    # ------------------------------------------------------------------
+    # Ticker prices + run-day technical indicators + closing-basis
+    # price structure (price-structure Task 5)
     # ------------------------------------------------------------------
     ticker_prices = {}
     ticker_price_statuses = {}
     ticker_indicators = {}
+    ticker_price_structure = {}
+    _series_by_ticker = {}
     for t in tickers:
         triple = raw.get(("ticker", t))
         if triple is None:
             ticker_prices[t] = None
             ticker_price_statuses[t] = _missing_status
             ticker_indicators[t] = None
+            ticker_price_structure[t] = None
             continue
         price, ohlcv, status = triple
         ticker_prices[t] = price
@@ -900,20 +964,76 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             status = dict(status)  # don't mutate a possibly-shared dict
             status["vendor_symbol"] = vendor_aliases[t]
         ticker_price_statuses[t] = status
-        # null when the fetch failed or there are too few bars; otherwise the
-        # raw block (its legs carry their own null/insufficient_data sentinels).
-        # Series anchored to the last completed session (_anchored_ohlcv):
-        # the indicator block's "current bar" is the last COMPLETED one, so
+        if status.get("status") != "PASSED" or not isinstance(ohlcv, dict):
+            ticker_indicators[t] = None
+            ticker_price_structure[t] = None
+            continue
+
+        anchored = _anchored_ohlcv(ohlcv, anchor)
+
+        # Closing-basis series for compute_ticker_price_structure + the
+        # cohort event — exact positional alignment (merge_adjusted_closes
+        # returns a bare close list, scripts/indicators.py:58; the zip
+        # must be explicit so a None at index k does not shift later
+        # indices' dates).
+        ts = anchored.get("timestamp") or []
+        closes = merge_adjusted_closes(anchored.get("close") or [],
+                                       anchored.get("adjclose") or [])
+        vols_arr = anchored.get("volume") or []
+        pairs, vols = [], {}
+        for k, tsv in enumerate(ts):
+            d = _et_date_iso(tsv)
+            if d is None:
+                continue
+            c = closes[k] if k < len(closes) else None
+            if c is not None:
+                pairs.append((d, c))
+            v = vols_arr[k] if k < len(vols_arr) else None
+            if v is not None:
+                vols[d] = v
+        _series_by_ticker[t] = pairs          # cohort input (assembled below)
+        ticker_price_structure[t] = compute_ticker_price_structure(
+            pairs, anchor_session=anchor, market_sessions=_market_sessions,
+            volumes=vols, first_trade_session=anchored.get("first_trade_session"))
+
+        # null when there are too few bars; otherwise the raw block (its
+        # legs carry their own null/insufficient_data sentinels). Series
+        # anchored to the last completed session (_anchored_ohlcv): the
+        # indicator block's "current bar" is the last COMPLETED one, so
         # volume_ratio_vs_ma20 / price_volume_relationship read completed
         # volume, not the mid-session partial bar. `price` (the live quote)
         # is intentionally NOT anchored — display + where-is-price-now-vs-
         # established-bands semantics.
-        if status.get("status") == "PASSED" and isinstance(ohlcv, dict):
-            ticker_indicators[t] = _compute_ticker_indicators(
-                _anchored_ohlcv(ohlcv, anchor), price,
-                bench_returns=bench_returns)
-        else:
-            ticker_indicators[t] = None
+        #
+        # ONE index range, mastered by the timestamp array. Only arrays
+        # POSITIONALLY ALIGNED with it (equal length) are sliced by the
+        # shared range; absent/short optional arrays (adjclose, volume —
+        # macro.py:277 permits them) pass through so their indicator
+        # legs degrade independently, exactly as today. A min() over ALL
+        # lists would let one empty optional array zero the whole block
+        # and kill valid RS/RSI (write-time lens refusal follows).
+        _ts_len = len(anchored.get("timestamp") or [])
+        _start = max(0, _ts_len - INDICATOR_SLICE_SESSIONS)
+        # EVERY positional array is sliced by the SAME timestamp-mastered
+        # range, each keeping its own overlap. Passing a short-but-present
+        # array through unsliced would let merge_adjusted_closes
+        # (indicators.py:58, index-merge over max(len)) overlay OLD
+        # adjusted closes onto RECENT raw closes — corrupting RSI/MACD/
+        # Bollinger/RS. An array with no overlap becomes [] (absent).
+        sliced = {k: ((v[_start:_ts_len] if len(v) > _start else [])
+                      if isinstance(v, list) else v)
+                  for k, v in anchored.items()}
+        ticker_indicators[t] = _compute_ticker_indicators(
+            sliced, price, bench_returns=bench_returns)
+
+    # Cohort recovery over ALL requested tickers (failed -> [], staying in
+    # the denominator — a failed fetch must not silently shrink the universe).
+    _series = {t: _series_by_ticker.get(t, []) for t in tickers}
+    _event = select_cohort_event(
+        _series, market_sessions=_market_sessions, anchor_session=anchor,
+        max_staleness_sessions=MAX_EVENT_STALENESS_SESSIONS)
+    _cohort = compute_cohort_recovery(_event, _series,
+                                      market_sessions=_market_sessions)
 
     return {
         "market": market,
@@ -922,6 +1042,8 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         "rates": rates,
         "ticker_prices": ticker_prices,
         "ticker_indicators": ticker_indicators,
+        "ticker_price_structure": ticker_price_structure,
+        "universe_rebound_structure": _cohort,
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         # ISS-121 (Loop8 cycle 2): per-symbol chart fetch status maps so
         # JSON consumers can distinguish unavailable-due-to-rate-limit /

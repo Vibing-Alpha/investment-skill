@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.7.7" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.8.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -438,6 +438,32 @@ Read the output JSON. This provides:
   run. Authoritative for #2 entry timing and #3/#4 momentum reads (the thesis
   `entry_favorability` is a possibly-stale cross-reference). `null`, or a leg
   reading `insufficient_data`, means that read is unavailable — treat as unknown.
+- `ticker_price_structure[TICKER]` — **closing-basis** price structure at the
+  last completed ET session (the anchor): `anchor_session` / `anchor_close` /
+  `anchor_session_covered` / `session_lag`, `closing_high_status`
+  (`breakout` | `at_prior_high` | `below_prior_high` | `unknown`),
+  `prior_high_close` / `prior_high_date` / `pct_vs_prior_high_close`,
+  `lookback_complete` / `inception_proven`, `high_water_drawdown`,
+  `moving_averages` (`ma20`/`ma50`/`ma200`), `breakout_hold`, `ma_hold`,
+  `cluster_hold`. `null` for a ticker whose fetch failed; inside a present
+  block an unproven fact is `unknown`/`unavailable` — never `false`, never
+  `0`, never imputed. **Independent of the 74-bar `ticker_indicators` gate**:
+  a short-history listing can carry a populated structure block beside a
+  `null` indicator block, and the reverse. This is the ONLY contracted source
+  of closing-basis highs, MA/cluster holds and drawdown —
+  `01_price_data.json:snapshot.week_52_high` is INTRADAY and out of contract
+  (decide.md forbids it).
+- `universe_rebound_structure` — ONE shared cohort selloff/recovery event over
+  all requested tickers (a failed ticker stays in the denominator with an
+  empty series): `status` (`fresh` | `stale` | `ambiguous` |
+  `window_truncated` | `unavailable`) + `reason`, `trough_session` /
+  `peak_session` / `sessions_since_trough` / `peak_truncated`, `modal_count` /
+  `trough_date_counts` / `search_window_sessions` / `max_staleness_sessions`,
+  and `members[TICKER]` = `status` + `pct_since_cohort_trough` /
+  `pct_vs_cohort_peak`. The block carries **no detection boolean and no
+  threshold** — `status` is the whole gate (only `fresh` authorises the
+  recovery lens in decide.md), and a member may read `unavailable` inside a
+  `fresh` event.
 - `chart_statuses.ticker_prices[T].price_as_of` / `stale_meta_quote` /
   `price_conflict_same_ts` — per-ticker price vintage + integrity. **Relay
   any `stale_meta_quote: true`, any `price_conflict_same_ts: true` (the

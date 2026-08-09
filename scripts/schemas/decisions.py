@@ -59,6 +59,15 @@ ORDER_TYPES = frozenset({
     "stop_market",
 })
 
+# Decision-evidence contract (frozen Task 0 of the 2026-08-09
+# portfolio-price-structure plan). These three enums + the four Decision
+# fields below are cross-module contract interfaces consumed by
+# scripts.portfolio_log._validate_decision_evidence (activated Task 7).
+LENS_VALUES = frozenset({"rs_vs_spy", "rs_vs_qqq", "cohort_recovery", "none"})
+PATH_STATUS_VALUES = frozenset({"qualified", "not_qualified", "unavailable"})
+CLOSING_HIGH_STATUS_VALUES = frozenset(
+    {"breakout", "at_prior_high", "below_prior_high", "unknown"})
+
 
 __all__ = [
     "Decisions",
@@ -67,6 +76,9 @@ __all__ = [
     "DECISION_ACTIONS",
     "ORDER_ACTIONS",
     "ORDER_TYPES",
+    "LENS_VALUES",
+    "PATH_STATUS_VALUES",
+    "CLOSING_HIGH_STATUS_VALUES",
     "validate_decisions",
     "load_decisions",
 ]
@@ -82,6 +94,10 @@ class Decision:
     # them when present but do not require them.
     target_weight_pct: float | None = None
     invalidation_trigger: str | None = None
+    lens_used: str | None = None                       # LENS_VALUES
+    observed_closing_high_status: str | None = None    # CLOSING_HIGH_STATUS_VALUES
+    breakout_path_status: str | None = None            # PATH_STATUS_VALUES
+    repair_path_status: str | None = None              # PATH_STATUS_VALUES
 
 
 @dataclass(frozen=True)
@@ -187,10 +203,32 @@ def _validate_decision(d: Mapping[str, Any], idx: int) -> Decision:
                  f"must be in [0, 100], got {target_w}")
     invalidation = _opt_str(d, "invalidation_trigger", path=path)
 
+    lens_used = _opt_str(d, "lens_used", path=path)
+    if lens_used is not None and lens_used not in LENS_VALUES:
+        raise SchemaError(_ARTIFACT, f"{path}.lens_used",
+                          f"{lens_used!r} not in {sorted(LENS_VALUES)}")
+    observed = _opt_str(d, "observed_closing_high_status", path=path)
+    if observed is not None and observed not in CLOSING_HIGH_STATUS_VALUES:
+        raise SchemaError(_ARTIFACT, f"{path}.observed_closing_high_status",
+                          f"{observed!r} not in {sorted(CLOSING_HIGH_STATUS_VALUES)}")
+    bps = _opt_str(d, "breakout_path_status", path=path)
+    if bps is not None and bps not in PATH_STATUS_VALUES:
+        raise SchemaError(_ARTIFACT, f"{path}.breakout_path_status",
+                          f"{bps!r} not in {sorted(PATH_STATUS_VALUES)}")
+    rps = _opt_str(d, "repair_path_status", path=path)
+    if rps is not None and rps not in PATH_STATUS_VALUES:
+        raise SchemaError(_ARTIFACT, f"{path}.repair_path_status",
+                          f"{rps!r} not in {sorted(PATH_STATUS_VALUES)}")
+    if observed == "unknown":
+        raise SchemaError(_ARTIFACT, f"{path}.observed_closing_high_status",
+                          "'unknown' must not be transcribed — omit the field")
+
     return Decision(
         ticker=ticker, action=action, rationale=rationale,
         principle_cited=principle_cited,
         target_weight_pct=target_w, invalidation_trigger=invalidation,
+        lens_used=lens_used, observed_closing_high_status=observed,
+        breakout_path_status=bps, repair_path_status=rps,
     )
 
 

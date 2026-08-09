@@ -112,6 +112,39 @@ You will receive:
    is `null` when unavailable; a leg reading `null`/`"insufficient_data"`
    (e.g. missing volume) means treat that leg as unknown — do NOT assume a
    volume-confirmed breakout.
+
+   It also carries two **closing-basis** blocks, both measured on completed
+   sessions up to the run's anchor session (never a live partial bar):
+
+   - `ticker_price_structure[TICKER]` — per-ticker intrinsic facts:
+     `anchor_session` / `anchor_close` / `anchor_session_covered`,
+     `closing_high_status` (`breakout` | `at_prior_high` | `below_prior_high`
+     | `unknown`), `prior_high_close` / `prior_high_date` /
+     `pct_vs_prior_high_close`, `lookback_complete` / `inception_proven`,
+     `high_water_drawdown`, `moving_averages` (`ma20`/`ma50`/`ma200`),
+     `breakout_hold`, `ma_hold`, `cluster_hold`. The whole block is `null`
+     when that ticker's fetch failed; inside a present block an unproven fact
+     reads `unknown` or `unavailable` — never `false`, never `0`. It is
+     INDEPENDENT of `ticker_indicators`: a young listing can carry a populated
+     structure block beside a `null` indicator block, and the reverse.
+   - `universe_rebound_structure` — ONE shared cohort selloff/recovery event
+     across all requested tickers: `status` (`fresh` | `stale` | `ambiguous` |
+     `window_truncated` | `unavailable`) + `reason`, `trough_session` /
+     `peak_session` / `sessions_since_trough`, `modal_count` /
+     `trough_date_counts`, and `members[TICKER]` = `status` +
+     `pct_since_cohort_trough` / `pct_vs_cohort_peak`. The block carries no
+     detection boolean and no threshold — `status` is the whole gate, and a
+     member can read `unavailable` inside a `fresh` event.
+
+   Every closing-basis fact — the prior closing high, whether the anchor close
+   is a new one, the moving-average and cluster holds, the high-water
+   drawdown, and a ticker's recovery since the shared trough — **must come
+   from** `ticker_price_structure[TICKER]` and `universe_rebound_structure`,
+   never from anywhere else. `01_price_data.json:snapshot.week_52_high`
+   **is INTRADAY and is NOT in this skill's contract** — a different basis
+   whose cutoff differs per ticker, so a breakout read from it is wrong even
+   when it looks right: never read it, never fetch prices yourself, and never
+   hand-compute a moving average, a swing low or a session count.
 4. **Hard constraints** — mechanically enforced limits. You MUST respect
    these. Orders violating them will be rejected by the validation script.
 5. **Investment principles** — the user's investment philosophy in natural
@@ -151,16 +184,24 @@ For each holding and watchlist candidate with analysis data:
    **Technical-timing freshness — use run-day indicators for the gate.** The
    thesis's `entry_favorability`, `technical_levels`, RSI/MACD/Bollinger and
    volume reads are anchored to the thesis date and go stale exactly like
-   ER/CE. For any technical-timing judgment — a #2 entry gate (breakout /
-   overbought / **volume-confirmed**), a #3 momentum-weakening reduce trigger,
-   or a #4 relative-momentum read — the authoritative source is
-   `macro.json:ticker_indicators[TICKER]` (run-day), NOT the thesis. When the
-   run-day read diverges from the thesis read, the run-day read governs; say
-   so in the rationale. When `ticker_indicators[T]` is `null` or a leg reads
+   ER/CE. For any technical-timing judgment — a #2 entry gate (overbought /
+   **volume-confirmed** — the closing-basis breakout leg comes from
+   `ticker_price_structure`, see "Entry evidence" below), a #3
+   momentum-weakening reduce trigger, or a #4 relative-momentum read — the
+   authoritative source is `macro.json:ticker_indicators[TICKER]` (run-day),
+   NOT the thesis. When the run-day read diverges from the thesis read, the
+   run-day read governs; say so in the rationale. When
+   `ticker_indicators[T]` is `null` or a leg reads
    `insufficient_data`, treat that leg as unknown (do not assume volume
    confirmation). A `buy`/`skip` disqualifier MUST be stated in run-day
    technical terms (e.g. "RSI 79.5, pct_b 1.29 above upper band, volume 0.69x
    — parabolic / no volume confirmation"), never as a valuation/ER judgment.
+   **Closing-basis facts are equally run-day, and they have their own
+   producer**: highs, holds, cluster reclaims and drawdown come from
+   `ticker_price_structure[TICKER]`; RSI/MACD/Bollinger/volume come from
+   `ticker_indicators[T]`. Neither block substitutes for the other, and
+   neither is ever hand-computed. How the entry paths use them is in
+   "Entry evidence" below.
    **Whether a metric GATES an action is decided only by the injected principles
    — never by general investing instinct.** Some strategies gate entries on
    valuation/ER; others time entries on technicals and treat valuation
@@ -180,6 +221,99 @@ For each holding and watchlist candidate with analysis data:
    A decision that contradicts a working order without addressing it —
    e.g. `hold` while a full-position GTC sell is working at the broker —
    is incomplete; the log writer flags such conflicts.
+
+#### Entry evidence: two parallel paths, and the ruler that ranks strength
+
+The injected principles own WHICH conditions gate an action. This block owns
+WHICH FACT answers each condition and WHERE that fact comes from; it adds no
+gate of its own and changes no threshold.
+
+**The two entry paths are parallel, not sequential.** On the entry-evidence
+axis a name can qualify through EITHER:
+
+- **Path A — breakout / new-high confirmation.** A closing-basis new high
+  (`closing_high_status: "breakout"` — the anchor close above every close in
+  the producer's completed-session lookback; the producer emits a concrete
+  status only when `lookback_complete` or `inception_proven` is true, else
+  `unknown`) CONFIRMED by volume on the breakout session itself. Volume
+  confirmation is `volume_ratio_vs_ma20 >= 1.5` **on the breakout session
+  itself**, and it confirms a closing breakout — **never as a standalone
+  trigger**: a 1.5x session without a closing-basis new high is not path A.
+  `price_volume_relationship: "bullish_confirmation"` is a DIFFERENT and
+  weaker fact — the last 5 sessions' average volume above **110%** of the
+  prior 20-session average while price rose — and it can never substitute for
+  the single-session 1.5x confirmation.
+- **Path B — repair / reversal.** The injected repair/reversal checklist. Its
+  legs map onto the contracted facts: 放量收复关键均线簇并站稳 →
+  `cluster_hold` (+ its `reclaim_session_volume_ratio`); MACD-RSI 动能转正 →
+  `ticker_indicators[T]`; 更高低点结构 and 派发特征消退 → un-contracted (see
+  below). HOW MANY legs must be satisfied is stated by the injected
+  principle, never here. Path B does NOT require a new high: a
+  `below_prior_high` ticker — or one whose high history is `unknown` because
+  the lookback is truncated — can qualify through it.
+
+**A closing-basis new high is the strongest momentum evidence, but it is not
+the only evidence, and it is not a precondition for the repair path.** When
+neither path fires, that means there is no qualified buy point today —
+it is NOT itself evidence that the name is weak; strength and weakness are
+decided by the injected relative-momentum principle on the named ruler below.
+So evaluate BOTH paths before writing a `skip` or an entry-side disqualifier:
+asserting an OR-principle "not satisfied" after checking only path A is the
+OR-branch collapse the reasoning moves below forbid (move 2).
+
+**Reading the legs — from the block, never by eye:**
+
+- 收复关键均线簇 (reclaiming the key MA cluster) is the `[20, 50, 200]`
+  cluster in `cluster_hold`; the reclaim session's volume is
+  `cluster_hold.reclaim_session_volume_ratio`. 站稳 (held) means
+  **2 consecutive completed market sessions** above the level, read from
+  `cluster_hold.run` or `breakout_hold.consecutive_market_sessions_above` —
+  never counted by eye off a chart.
+- A `cluster_hold.status` of `unavailable` with a non-empty `missing_windows`
+  is NOT a failed leg — the ticker is simply too young for one of the
+  `[20, 50, 200]` windows. Record the leg unavailable; never score it against
+  the ticker. The same holds for an `unavailable` `ma_hold` leg.
+- `breakout_hold` is a SEPARATE fact from `closing_high_status`: the latter
+  says the anchor session printed a new closing high, the former says an
+  EARLIER breakout is still surviving above its frozen level today. A ticker
+  can hold an old breakout without printing a new high, and print a new high
+  with no prior episode to hold. Cite whichever one your claim rests on.
+- Two repair legs are un-contracted: **no field supplies** 更高低点结构 (a
+  higher low) or 派发特征消退 (distribution fading). Mark each
+  `not_yet_observable` in the rationale — never infer them from moving
+  averages, eyeballed swing lows or `price_volume_relationship`, and never
+  count an un-observable leg against the ticker: a leg no ticker in the
+  universe can currently satisfy is not that ticker's relative weakness.
+- `high_water_drawdown` measures the fall from the lookback's high-water peak
+  to the lowest close AFTER it, plus how much of that has been retraced —
+  it is NOT a current-drawdown detector, and must never be cited as evidence
+  that momentum is weakening today.
+
+**Name the ruler.** Two different measures of "strength" are contracted:
+
+- fixed-horizon relative strength — `ticker_indicators[T].rs_vs_spy_3m` and
+  `rs_vs_qqq_3m`, one 3-month endpoint-to-endpoint excess return, which mixes
+  the drawdown and the rebound into a single number;
+- cohort recovery — `universe_rebound_structure.members[T]`
+  `pct_since_cohort_trough` (and `pct_vs_cohort_peak`), measured from the ONE
+  shared trough the whole universe printed.
+
+The two rulers can INVERT each other's ranking. Worked example from a real
+run: a holding sat LAST among the holdings on 3-month relative strength (some
+24 percentage points behind SPY) while being the FASTEST riser off the shared
+cohort trough (about +140% above it) and second-highest of the holdings on
+how much of its drawdown that recovered (about half). Both readings are true
+and they answer different questions — a cross-ticker strength comparison
+built from a MIX of the two is meaningless. So every strength or weakness
+claim must name the ruler it used and record it in `lens_used`.
+
+The cohort-recovery lens is authorized **only when**
+`universe_rebound_structure.status` is `fresh`; on `stale`,
+`window_truncated`, `ambiguous` or `unavailable` it is forbidden — fall back
+to the fixed-horizon RS lens and say so in the rationale, naming the status.
+An event nobody can locate is not a ruler. A `fresh` event with the ticker's
+`members[T].status` reading `unavailable` is the same case: that ticker has no
+recovery number, so it cannot be ranked on this ruler.
 
 **Apply the injected principles faithfully — the recurring failure is
 flattening them, not ignoring them.** The numbered soft principles AND the
@@ -240,7 +374,9 @@ action (or a near-miss) to satisfy it. A genuinely-absent trigger stays absent;
 the point is only that a real candidate cannot disappear *silently*.
 
 Evaluate every trigger below using the **run-day indicators**
-(`ticker_indicators[T]`), not the thesis's possibly-stale technical read. Each
+(`ticker_indicators[T]`) and the **run-day closing-basis structure**
+(`ticker_price_structure[TICKER]` + `universe_rebound_structure`), not the
+thesis's possibly-stale technical read. Each
 trigger is defined by the **injected principles** (the numbered soft principles +
 `principle_notes`), never by this prose — do NOT assert specific principle
 numbers, thresholds, or caps here; read them from what is injected.
@@ -283,6 +419,15 @@ record), it does not apply.
   surfaced, not buried as if it failed the technical gate. A soft preference can
   defer or size-down an entry; it does NOT become a technical gate unless a
   principle says so.
+
+**Both entry paths, every time.** An entry-gate FAILURE is only established
+once BOTH paths of "Entry evidence" above have been evaluated: record
+`breakout_path_status` and `repair_path_status` on the decision, name the leg
+that decided each, and mark un-contracted legs `not_yet_observable` rather
+than failing them. The same applies to a holding whose rationale asserts
+anything on the entry axis (an add candidate, or a rotation target you
+declared unqualified). Whenever the rationale ranks this ticker's momentum
+against others, name the ruler in `lens_used`.
 
 **Earnings-window deferral requires a KNOWN date (fail-closed).** The earnings
 window (`orders.earnings_window_days`, injected) is a named soft preference that
@@ -415,7 +560,11 @@ Schema (write as JSON):
       "invalidation_trigger": "Concrete condition that would flip today's decision (optional).",
       "entry_trigger": "For 'skip' on watchlist: what would change your mind (optional).",
       "watch_priority": "high | medium (optional — use for positions needing close monitoring)",
-      "data_freshness_warning": "Only when thesis data is stale (optional)."
+      "data_freshness_warning": "Only when thesis data is stale (optional).",
+      "observed_closing_high_status": "breakout | at_prior_high | below_prior_high — transcribed verbatim from ticker_price_structure[TICKER].closing_high_status; omit the field entirely when that status is unknown.",
+      "breakout_path_status": "qualified | not_qualified | unavailable",
+      "repair_path_status": "qualified | not_qualified | unavailable",
+      "lens_used": "rs_vs_spy | rs_vs_qqq | cohort_recovery | none — which strength ruler this ticker's momentum claim used."
     }
   ],
   "orders_proposed": [
@@ -442,7 +591,7 @@ Schema (write as JSON):
   "candidate_scan": {
     "summary": "One line: did the rotation/opportunity scan find executable actions this run? If none, say so explicitly (e.g. 'fast tape; scanned; no rotation — strongest candidates fail the entry non-extension condition').",
     "near_misses": [
-      {"ticker": "CRDO", "trigger": "entry breakout present per run-day indicators (new-high break + volume confirm, not over-extended)", "waiting_on": "deferred_by_named_soft_preference: earnings_window_days (next_earnings_date within window)"},
+      {"ticker": "CRDO", "trigger": "entry breakout present (closing_high_status breakout per ticker_price_structure + volume confirm per run-day indicators, not over-extended)", "waiting_on": "deferred_by_named_soft_preference: earnings_window_days (next_earnings_date within window)"},
       {"ticker": "RKLB", "trigger": "continuation add trigger present per run-day indicators (volume-confirmed, not over-extended, room under cap)", "waiting_on": "funding_or_priority: no confirmed rotation source this run"}
     ]
   },
@@ -486,3 +635,49 @@ Requirements:
   authoritative for each ticker's action. An all-hold/all-skip run that omits or
   malforms `candidate_scan` triggers a logger WARN (friction, not a gate; a
   genuinely-justified hold-all stays legitimate).
+- **The four evidence fields** (all optional in the schema, but governed by the
+  requiredness rules below): `lens_used` (`rs_vs_spy` | `rs_vs_qqq` |
+  `cohort_recovery` | `none`), `observed_closing_high_status` (`breakout` |
+  `at_prior_high` | `below_prior_high`), and `breakout_path_status` and
+  `repair_path_status` (each `qualified` | `not_qualified` | `unavailable`).
+  An out-of-vocabulary value is rejected at write time.
+  - On an ENTRY (`buy`/`add`), both path statuses are REQUIRED, at least
+    one must be `qualified` (an entry with both non-qualified is internally
+    contradictory), and `observed_closing_high_status` is REQUIRED whenever
+    the macro's status for that ticker is concrete.
+  - On every OTHER action, record both path statuses whenever the rationale
+    asserts anything on the entry axis, and transcribe
+    `observed_closing_high_status` whenever the macro's status for that ticker
+    is `breakout`, or whenever you cite the ticker's high — an untranscribed
+    `breakout` produces a non-blocking WARN.
+  - `observed_closing_high_status` is a transcription, not a judgment: it
+    **must equal the persisted** `closing_high_status` for that ticker, it is
+    valid only where `anchor_session_covered` is `true`, and when the macro's
+    status is `unknown` you OMIT the field — writing `"unknown"` is rejected.
+  - `lens_used` records the ruler behind the ticker's momentum claim, and a
+    DECLARED lens must be backed by this run's macro: `cohort_recovery`
+    requires a `fresh` event plus an `available` member with a finite
+    `pct_since_cohort_trough`; `rs_vs_spy` / `rs_vs_qqq` require that
+    benchmark's `rs_vs_*_3m` to be a finite number. `none` means the decision
+    makes no cross-ticker momentum claim at all — do not use it as a shortcut
+    around naming a ruler you actually used.
+
+**What is machine-checked, and what is authoring discipline.** The write-time
+validator compares your fields against THIS run's macro; it never reads your
+reasoning. Machine-enforced: on an entry (`buy`/`add`) the PRESENCE of both
+path statuses and their internal consistency (at least one `qualified`), the
+validity of a lens you DECLARE in `lens_used`, and the equality of any
+`observed_closing_high_status` you transcribe — plus that the structure you
+lean on actually exists with a covered anchor session (required on every
+entry, and on any action that transcribes the status).
+NOT enforced — these are authoring requirements you own: the FULL truth of
+either path status, the presence of the path statuses on non-entry actions,
+and NAMING a lens at all. One truth exception the validator DOES enforce: a
+`breakout_path_status: "qualified"` entry claim must match the macro's
+`closing_high_status == "breakout"`. Everything machine-enforced above BLOCKS
+the write; there is exactly ONE non-blocking channel — when the macro reports
+`closing_high_status == "breakout"` and you did not transcribe
+`observed_closing_high_status`, the logger emits a WARN and the write still
+succeeds (visibility only, not a gate). So an unnamed ruler, a `not_qualified`
+you never actually checked, or a rationale resting on another ticker's claimed
+strength is invisible to the machine and stays entirely your responsibility.
