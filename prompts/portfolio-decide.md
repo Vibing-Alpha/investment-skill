@@ -523,6 +523,15 @@ Numbered list of all proposed orders with:
 - Ticker, order type, shares, price, duration
 - Projected cash after all orders
 - Stress test result (pass/fail with key scenario detail)
+- Every validator WARNING, verbatim. Warnings live OUTSIDE `stress_test`,
+  so a PASS can carry material ones — a policy floor breached by the
+  user's own resting broker orders is reported as a warning, never a
+  violation. This summary is where the user sees them.
+- The sequencing `execution_note`, shown in full, whenever any buy in the
+  set is funded by a proposed MARKET SELL in the same set. The validator
+  credits those proceeds, so the set is solvent only if the sell is
+  submitted first and fills. This summary is what the user acts on — it
+  comes BEFORE the decision log exists.
 
 ### Portfolio Health
 - Cash allocation and whether it fits your market view
@@ -577,7 +586,7 @@ Schema (write as JSON):
       "limit_price": null,
       "duration": "gtc | day",
       "linked_decision": "NOK.exit",
-      "execution_note": "Sequencing or tactical note, e.g. 'Submit first, wait for fill'."
+      "execution_note": "Sequencing or tactical note. REQUIRED on ONE order of any set whose buys are funded by a proposed market SELL in the same set (per SET, not per buy — cash is fungible): 'Submit the NOK sell first and wait for a confirmed fill.'"
     }
   ],
   "follow_ups": [

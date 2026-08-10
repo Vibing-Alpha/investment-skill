@@ -5,6 +5,8 @@ Checks position limits, cash floor, and runs 5 stress test scenarios
 before any portfolio orders are placed.
 """
 
+import hashlib
+import json
 import math
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +24,48 @@ _VALID_ACTIONS = {"buy", "sell"}
 # gate — producer-consumer rule #2 (handle ALL values in the vocabulary).
 from scripts.schemas.decisions import MAX_ORDER_SHARES as _MAX_ORDER_SHARES
 from scripts.schemas.decisions import ORDER_TYPES as _VALID_TYPES
+
+# 2026-08-09: order types whose semantics HONOUR a limit price. A ceiling
+# exists only when this type-half AND a usable `limit_price` both hold —
+# each half alone has been a demonstrated hole:
+#   * type-half alone: a `limit` / `loc` buy carrying only an `est_price`
+#     has no ceiling at all, yet would escape bounding on its label. Measured
+#     2026-08-09: est_price 50 against a 200 quote projects at 50, exactly
+#     the understated-buy exposure of a market order.
+#   * limit-half alone: a `market` buy carrying a stray `limit_price` would
+#     escape, and the schema performs no type/price coherence check.
+# `stop` / `stop_market` are absent because they trigger and then execute AT
+# MARKET — the stop price is a TRIGGER, not a ceiling. `moc` has no price
+# protection. `gtc` IS here: it is a duration the schema also accepts as a
+# type, and that shape does carry real limits
+# (tests/test_validate_probe2.py:189). `limit_buy` is the legacy broker
+# spelling of the same semantics and belongs in the SAME set — keying it
+# off the vocabulary instead let a `limit_buy` carrying only an `est_price`
+# escape bounding entirely (measured 2026-08-10: est 50 against a 200 quote
+# projected at 50, passed=True; the schema-spelled `limit` was bounded).
+_LIMIT_HONOURING_TYPES = frozenset(
+    {"limit", "loc", "stop_limit", "gtc", "limit_buy", "limit_sell"}
+)
+# The FIELDS in which an order may state that ceiling. `price` counts, not
+# just `limit_price`: a broker-synced OPEN order carries its resting limit
+# in `price` (portfolio-state.yaml shape; `config_gate._order_ok` accepts
+# it). `est_price` deliberately does NOT — it is an ESTIMATE, so a limit
+# order carrying only one has stated no ceiling. `stop_price` does not
+# either — it is a TRIGGER.
+_CEILING_PRICE_FIELDS = ("limit_price", "price")
+# Open orders have NO type-vocab gate and use a legacy broker vocabulary
+# (`limit_buy` / `stop_buy` / `limit_sell` / `stop_sell`), so the buy branch
+# gates on the schema vocabulary PLUS these rather than on a negative rule
+# (a negative rule would sweep in every unknown string). `stop_buy` triggers
+# and then executes AT MARKET, exactly like schema `stop` / `stop_market`,
+# so a stop of $100 against a $120 quote under-costs a real broker
+# commitment by $20/share (cold codex review 2026-08-10; pre-dates the
+# rotation change, same failure mode C).
+_LEGACY_BUY_TYPES = frozenset({"limit_buy", "stop_buy"})
+# NOTE: no `Final[...]` annotation — the typing import above brings in only
+# Any/Dict/List/Optional/Tuple and the module uses `Final` nowhere. Writing
+# `Final` here without extending that import raises NameError at import time
+# and takes the whole money-path gate down.
 
 
 def _guard_constraints(
@@ -149,6 +193,32 @@ def _validate_order_vocab(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def ticker_prices_fingerprint(prices_doc: Any) -> str:
+    """SHA-256 over the `ticker_prices` map a validation ran against.
+
+    Cold codex review 2026-08-10: live quotes are verdict-determining —
+    they value every holding for the min_cash / max_single_position ratios,
+    and since the 2026-08-09 quote-bounding they also price uncapped market
+    orders. The artifact bound state, constraints and the order set, but
+    NOT prices, so `portfolio_log` accepted a PASS computed against
+    different quotes: validate at AAA=$100 then log against AAA=$50 and the
+    order echo still matches while enrichment persists half the proceeds
+    the validator certified. That is exactly the documented two-concurrent-
+    sessions hazard, and it pre-dates the rotation change.
+
+    ONE implementation, imported by portfolio_log (producer-consumer #3).
+    Hashes the raw mapping as both sides read it from macro.json — not the
+    whole file, so unrelated keys (market / volatility / rates) and
+    formatting cannot cause a spurious refusal.
+    """
+    tp = prices_doc.get("ticker_prices") if isinstance(prices_doc, dict) else None
+    if not isinstance(tp, dict):
+        tp = {}
+    payload = json.dumps(tp, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _usable_price(v):
     """A price usable for projection/constraint math: positive FINITE
     number (bool rejected). Returns the value, else None — callers route
@@ -171,9 +241,14 @@ def _usable_price(v):
     return v
 
 
-def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
-    """Projection price for an order — explicit order prices BEFORE the
-    current-quote fallback.
+def _order_price(
+    order: Dict[str, Any],
+    ticker_prices: Dict[str, float],
+    *,
+    display_only: bool = False,
+):
+    """Projection price for an order — explicit order prices, BOUNDED by the
+    live quote wherever a self-reported price is load-bearing and uncapped.
 
     Cold review 2026-06-11 R2 HIGH-1: the schema/prompt/log all carry
     ``limit_price`` (portfolio_log._enrich_orders costs orders with it), but
@@ -194,17 +269,145 @@ def _order_price(order: Dict[str, Any], ticker_prices: Dict[str, float]):
     insolvent. Buys project at the MAX explicit price (worst-case cost);
     sells at the MIN (worst-case proceeds). Side-ambiguous orders keep
     the legacy chain order; no explicit price → current quote.
+
+    2026-08-09 (rotation solvency): an explicit price is no longer trusted
+    unconditionally, because a self-reported estimate is now load-bearing on
+    both legs of a rotation. A MARKET **sell** projects at the min of its
+    explicit fields AND the quote; a **buy** WITHOUT a real ceiling — no
+    usable ``limit_price``, or a type outside ``_LIMIT_HONOURING_TYPES`` —
+    projects at the max of its explicit fields AND the quote. Either is
+    UNPROJECTABLE without a quote and returns 0, so the proposed-order pass
+    raises ``missing_price_order``. The legacy broker vocabulary is covered
+    where it maps onto these semantics — ``limit_buy`` / ``stop_buy`` for
+    bounding, ``limit_buy`` / ``limit_sell`` for the ceiling rule below;
+    every other legacy or unknown type string keeps its old projection. ``display_only=True``
+    opts a caller out entirely — for rendering a working order's OWN resting
+    price, never for a projection that feeds a verdict.
+
+    2026-08-10: a CAPPED order — a limit-honouring type STATING a ceiling in
+    ``limit_price`` or ``price`` (an ``est_price`` is an estimate, not a
+    commitment) — is projected AT that contractual bound rather than at the
+    extreme of every explicit field. The quote is still not added. A buy
+    takes the max of its stated ceilings; a sell the min of its stated
+    floors, plus its ``stop_price`` when the type is a stop (a stop-limit's
+    trigger also bounds the realistic fill). Costing a limit-100 buy at a
+    stale est_price of 150 was a false REFUSAL, not conservatism — the fill
+    cannot occur there — and it put two numbers in one audit record.
     """
+    # .strip() is load-bearing, not cosmetic. PROPOSED orders pass a strict
+    # exact-match vocab gate, but OPEN orders have none and are hand-synced
+    # from the broker into portfolio-state.yaml — a stray space
+    # (`" market "`) then missed every exact type comparison below while
+    # _is_buy still classified it via `action`, so a working market buy kept
+    # its self-reported price: 1 share estimated at $50 against a $100 quote
+    # returned passed=True with cash_after 0.00 (cold codex review
+    # 2026-08-10; PRE-DATES the rotation change). Tolerant classification,
+    # not rejection, matches this module's existing posture for
+    # user-editable open orders (see _is_buy).
+    otype = str(order.get("type") or "").strip().lower()
+    # `stop_price` participates ONLY for a stop type. Both the proposed-order
+    # schema and `config_gate._order_ok` accept all four price fields on ANY
+    # type, and a trigger is meaningless on an order that has none: a plain
+    # market buy carrying a stray `stop_price: 1000` projected at 1000
+    # instead of its $100 quote — a false REFUSAL with zero violations (cold
+    # codex review 2026-08-10; PRE-DATES the rotation change).
+    _price_fields = (("est_price", "limit_price", "stop_price", "price")
+                     if "stop" in otype
+                     else ("est_price", "limit_price", "price"))
     explicit = [
-        v for v in (
-            _usable_price(order.get(k))
-            for k in ("est_price", "limit_price", "stop_price", "price")
-        ) if v is not None
+        v for v in (_usable_price(order.get(k)) for k in _price_fields)
+        if v is not None
     ]
     if explicit:
+        # A self-reported price is bounded by the live quote where it is
+        # load-bearing AND uncapped. Asymmetric by direction, deliberately:
+        # SELLS are bounded only for `market` — the sole type the funding
+        # credit admits. BUYS are bounded for every uncapped type, because
+        # every buy SPENDS those credited proceeds. With no quote an uncapped
+        # order is unprojectable: return 0 so the proposed-order pass raises
+        # missing_price_order.
+        # A ceiling requires BOTH halves (see _LIMIT_HONOURING_TYPES): the
+        # type must honour a limit AND the order must actually STATE one.
+        # Load-bearing for `gtc`, which the schema accepts as a `type` while
+        # the prompt also models it as a `duration` — a GTC buy limited at
+        # $100 against a $130 quote must project at $100, not $130, or the
+        # persisted est_execution_price becomes a plausible wrong number and
+        # the fill can be falsely rejected.
+        #
+        # See _CEILING_PRICE_FIELDS for why `price` counts and `est_price`
+        # does not: `_is_buy` accepts open orders in ACTION form, so
+        # {action: buy, type: limit, price: 90} is a supported shape, and
+        # keying the ceiling on `limit_price` alone re-priced it to a $100
+        # quote — −$1,000 instead of $0, a false REFUSAL with zero
+        # violations (cold codex review 2026-08-10).
+        ceilings = [v for v in (_usable_price(order.get(k))
+                                for k in _CEILING_PRICE_FIELDS)
+                    if v is not None]
+        capped_by_limit = otype in _LIMIT_HONOURING_TYPES and bool(ceilings)
         if _is_buy(order):
+            # POSITIVE enumeration (schema vocabulary + the legacy broker
+            # buy strings) — a negative rule would sweep in every unknown
+            # type string and silently re-price it.
+            if (
+                not display_only
+                and not capped_by_limit
+                and (otype in _VALID_TYPES or otype in _LEGACY_BUY_TYPES)
+            ):
+                q = _usable_price(ticker_prices.get(order.get("ticker", "")))
+                return 0 if q is None else max(max(explicit), q)
+            if capped_by_limit:
+                # A capped buy CANNOT fill above its stated ceiling, so an
+                # est_price ABOVE it is not conservative — it is wrong.
+                # `max(explicit)` costed limit_price=100 + est_price=150 at
+                # 150: a false REFUSAL, and `decisions.md` then printed
+                # "limit $100" beside an est_cost computed at 150 — two
+                # numbers in one audit record (cold codex review
+                # 2026-08-10). The mirror case (est BELOW the limit) is
+                # unchanged: the ceiling still wins, which is exactly what
+                # test_buy_projects_at_max_explicit_price pins.
+                return max(ceilings)
             return max(explicit)
         if _is_sell(order):
+            if not display_only and otype == "market":
+                q = _usable_price(ticker_prices.get(order.get("ticker", "")))
+                return 0 if q is None else min(min(explicit), q)
+            if capped_by_limit:
+                # The mirror of the buy branch: on a SELL the stated limit
+                # is a FLOOR — the order cannot fill below it — so a stale
+                # est_price under it is not conservative but wrong.
+                # `min(explicit)` projected limit_price=100 + est_price=1 at
+                # 1, understating proceeds 100x: it falsely refused the set
+                # on max_single_position and persisted est_proceeds $10
+                # beside a rendered "limit $100" (cold codex review
+                # 2026-08-10; PRE-DATES the rotation change).
+                # `stop` / `stop_market` sells are NOT limit-honouring, so
+                # the worst-case-at-the-trigger projection that the risk
+                # floor is written around is untouched.
+                #
+                # `stop_price` STAYS in the sell minimum, and dropping it was
+                # a real regression: on a `stop_limit` SELL the trigger also
+                # CAPS the realistic fill from above — trigger $90 with a
+                # $200 floor cannot fill at all once price has fallen to the
+                # trigger — so crediting the $200 floor invented proceeds and
+                # turned a max_single_position breach in `extreme_down` into
+                # a PASS (cold codex review 2026-08-10). The buy branch is
+                # deliberately NOT symmetric here: a limit is a hard ceiling
+                # a rising trigger cannot lift, so folding stop_price into
+                # the buy maximum would over-cost and falsely refuse.
+                # ...and ONLY for a stop type. Folding the trigger into every
+                # capped sell let a stray `stop_price` drag a plain `limit` /
+                # `loc` / `gtc` / `limit_sell` floor down with it — a $100
+                # limit sell carrying an irrelevant `stop_price: 1` projected
+                # at 1 and falsely refused the set on max_single_position
+                # (cold codex review 2026-08-10). Both the proposed-order
+                # schema and `config_gate._order_ok` accept all four price
+                # fields on ANY type, so that shape is reachable.
+                contractual = list(ceilings)
+                trigger = (_usable_price(order.get("stop_price"))
+                           if "stop" in otype else None)
+                if trigger is not None:
+                    contractual.append(trigger)
+                return min(contractual)
             return min(explicit)
         return explicit[0]
     q = _usable_price(ticker_prices.get(order.get("ticker", "")))
@@ -356,7 +559,10 @@ def _apply_orders(
 
     - Buy: deduct cost, add shares
     - Sell: cap at owned shares (never sell more than you own), add proceeds
-    - Uses order's est_price/price first, falls back to ticker_prices
+    - Prices via `_order_price`: direction-aware selection over the order's
+      explicit price fields, BOUNDED by the live quote for uncapped orders
+      (a market sell, or any buy without a real limit ceiling); the quote is
+      the fallback when no explicit price exists at all
     - Skip orders with no price (fail-closed)
     - If ``missing_price_violations`` is a list, append a
       ``missing_price_order`` violation dict for every order skipped due
@@ -388,14 +594,28 @@ def _apply_orders(
         # Fail-closed: skip orders with no price
         if not price or price <= 0:
             if missing_price_violations is not None:
+                # 2026-08-09: an order carrying a perfectly valid est_price is
+                # now unprojectable when the QUOTE is missing (uncapped orders
+                # are quote-bounded). Saying "no est_price" there misdirects
+                # the user into supplying an estimate that already exists.
+                has_explicit = any(
+                    _usable_price(order.get(k)) is not None
+                    for k in ("est_price", "limit_price", "stop_price", "price")
+                )
+                why = (
+                    "its self-reported price is uncapped and there is no live "
+                    "quote to bound it by"
+                    if has_explicit else
+                    "it has no est_price / limit_price / stop_price / price "
+                    "and no ticker_prices fallback"
+                )
                 missing_price_violations.append({
                     "constraint": "missing_price_order",
                     "ticker": ticker,
                     "index": idx,
                     "message": (
-                        f"order[{idx}] ticker={ticker!r} has no est_price / "
-                        f"price and no ticker_prices fallback — "
-                        f"cannot project (fail-closed)"
+                        f"order[{idx}] ticker={ticker!r} cannot be projected: "
+                        f"{why} (fail-closed)"
                     ),
                 })
             continue
@@ -478,7 +698,7 @@ def _check_position_limits(
                     "limit": max_single,
                     "message": (
                         f"{ticker} would be {pct:.1%} of portfolio, "
-                        f"exceeding {max_single:.0%} limit"
+                        f"exceeding {max_single:.1%} limit"
                     ),
                 })
 
@@ -517,7 +737,7 @@ def _check_cash_floor(
                 "current": round(cash_pct, 4),
                 "limit": min_cash,
                 "message": (
-                    f"Cash {cash_pct:.1%} below min_cash {min_cash:.0%} "
+                    f"Cash {cash_pct:.1%} below min_cash {min_cash:.1%} "
                     f"(${proj_cash:,.0f} of ${account_value:,.0f})"
                 ),
             })
@@ -539,14 +759,24 @@ def _run_stress_tests(
 ) -> Dict[str, Any]:
     """Run 5 stress test scenarios using a cash_after helper.
 
-    Each order uses its own price (est_price or price field), falling back to
-    ticker_prices.  No crash multiplier — orders carry their own prices.
+    Each order is priced by `_order_price`: its own explicit price fields,
+    BOUNDED by the live quote when the order is uncapped (market sell, or a
+    buy with no real limit ceiling), with the quote as the fallback when no
+    explicit price exists.  No crash multiplier — orders carry their own
+    prices.
 
     1. base:         proposed market orders only
-    2. all_buy:      all proposed buys + open buys
+    2. all_buy:      proposed market sells + all proposed buys + open buys
     3. all_sell:     all proposed sells + open sells
-    4. extreme_down: all buys + stop sells (stops use their own price field)
+    4. extreme_down: proposed market sells + all buys + stop sells (stops use
+                     their own price field)
     5. defensive:    only stops trigger, no buys
+
+    Scenarios 2 and 4 credit PROPOSED market sells because this module
+    defines market orders as the immediately-executing set (see base). A
+    WORKING market sell is not credited — it may be halted. That the
+    proceeds may fund only PROPOSED buys is enforced separately, by the
+    `working_buys_unfunded` violation in `validate_portfolio`.
     """
     results = {}
 
@@ -567,12 +797,28 @@ def _run_stress_tests(
         "passed": base_cash >= 0,
     }
 
-    # --- all_buy: all proposed buys + open buys ---
+    # 2026-08-09 rotation-solvency fix: a proposed MARKET sell is part of
+    # the immediately-executing state — the rule this module already applies
+    # at base above and asserts in the immediate-state recheck ("only market
+    # orders execute now"). Excluding it made every #4 sell-weak/buy-strong
+    # rotation a hard FAIL for a fully-invested book. Proceeds are
+    # quote-bounded by _order_price.
+    #   market      -> included; this module defines it as immediate
+    #   moc / loc   -> excluded; they execute at the close, so a buy filling
+    #                  earlier in the same session would be unfunded
+    #   limit/stop* -> excluded; contingent, may never fill
+    #   gtc         -> excluded; a duration, not an execution guarantee
+    # Working (open_orders) market sells are excluded too: a still-open
+    # market sell may be halted, so it is not available cash.
+    immediate_proposed_sells = [o for o in market_orders if _is_sell(o)]
+
+    # --- all_buy: all proposed buys + open buys, funded by proposed
+    #     market sells ---
     all_buys = (
         [o for o in proposed_orders if _is_buy(o)]
         + [o for o in open_orders if _is_buy(o)]
     )
-    _, all_buy_cash = _project(all_buys)
+    _, all_buy_cash = _project(immediate_proposed_sells + all_buys)
     results["all_buy"] = {
         "cash_after": round(all_buy_cash, 2),
         "passed": all_buy_cash >= 0,
@@ -598,7 +844,7 @@ def _run_stress_tests(
         o for o in (list(proposed_orders) + list(open_orders))
         if "stop" in str(o.get("type") or "").lower() and _is_sell(o)
     ]
-    extreme_orders = all_buys + stops
+    extreme_orders = immediate_proposed_sells + all_buys + stops
     extreme_holdings, extreme_cash = _project(extreme_orders)
 
     # Shrunk denominator check: position % against crashed account value
@@ -622,7 +868,7 @@ def _run_stress_tests(
                         "current": round(pct, 4),
                         "limit": max_single,
                         "message": (
-                            f"{ticker} at {pct:.1%} exceeds {max_single:.0%} "
+                            f"{ticker} at {pct:.1%} exceeds {max_single:.1%} "
                             f"(shrunk denominator)"
                         ),
                     })
@@ -900,8 +1146,19 @@ def validate_portfolio(
                           f"usable price (fail-closed, no quote "
                           f"substitution)")
             elif not price_ok:
-                reason = ("cannot be priced (no est_price/limit_price/price "
-                          "and no quote)")
+                # 2026-08-09: two distinct causes reach here — no explicit
+                # price at all, or an UNCAPPED order whose self-reported
+                # price has no live quote to bound it by. Naming only the
+                # first sends the user to supply a price that already exists.
+                reason = (
+                    "carries an uncapped self-reported price with no live "
+                    "quote to bound it by (fail-closed)"
+                    if any(_usable_price(o.get(k)) is not None
+                           for k in ("est_price", "limit_price",
+                                     "stop_price", "price"))
+                    else "cannot be priced (no est_price/limit_price/"
+                         "stop_price/price and no quote)"
+                )
             else:
                 reason = (f"has no usable share count (shares="
                           f"{o_shares_val!r}; must be a positive number)")
@@ -968,6 +1225,44 @@ def validate_portfolio(
         + violations
     )
 
+    # Proposed-sale proceeds may fund PROPOSED buys only. A WORKING buy is
+    # already resting at the broker and can fill before the user has read
+    # this run, let alone submitted the sell, so the accepted risk's
+    # residual control ("submit the sell first, wait for a confirmed fill")
+    # cannot reach it.
+    # Only when the credit is actually in play. With no proposed market
+    # sell there is nothing to mask an unfunded working buy, and such a run
+    # already fails `all_buy` exactly as it does today — adding a second
+    # named violation there would change output for runs unrelated to this
+    # relaxation without adding any protection.
+    # A NAMED VIOLATION, never folded into a scenario's `passed`: the
+    # scenarios answer "does this order set produce negative cash", and
+    # extreme_down's `passed` also carries the shrunk-denominator
+    # max_single_position result that an `and` would discard.
+    # `immediate_proposed_sells` is LOCAL to _run_stress_tests — referencing
+    # it here raises NameError. `base_market_orders` is the
+    # validate_portfolio-scope equivalent, already computed above.
+    proposed_market_sells = [o for o in base_market_orders if _is_sell(o)]
+    working_buys = [o for o in projectable_open_orders if _is_buy(o)]
+    if working_buys and proposed_market_sells:
+        _, working_only_cash = _apply_orders(
+            holdings, cash, working_buys, ticker_prices,
+        )
+        if working_only_cash < 0:
+            all_violations.append({
+                "constraint": "working_buys_unfunded",
+                "ticker": None,
+                "current": round(working_only_cash, 2),
+                "limit": 0,
+                "message": (
+                    f"working broker buys need "
+                    f"${-working_only_cash:,.2f} more than pre-trade cash "
+                    f"— proposed market-sale proceeds may fund PROPOSED "
+                    f"buys only, because a resting broker order can fill "
+                    f"before the sell is submitted"
+                ),
+            })
+
     # Overall pass: no violations AND all stress tests pass
     stress_passed = all(s["passed"] for s in stress_test.values())
 
@@ -1000,9 +1295,16 @@ def validate_portfolio(
         [o for o in sanitized_orders if _is_buy(o)]
         + [o for o in projectable_open_orders if _is_buy(o)]
     )
+    # 2026-08-09: this is an INDEPENDENT projection from _run_stress_tests,
+    # so the rotation credit has to be applied here too or the policy floors
+    # stay computed from a buy-only state. Same rule, same source list:
+    # PROPOSED market sells only (`base_market_orders` is the
+    # validate_portfolio-scope market filter already computed above); a
+    # WORKING market sell may be halted and is not available cash.
+    all_fill_orders = [o for o in base_market_orders if _is_sell(o)] + all_fill_buys
     if all_fill_buys:
         fill_holdings, fill_cash = _apply_orders(
-            holdings, cash, all_fill_buys, ticker_prices,
+            holdings, cash, all_fill_orders, ticker_prices,
         )
         # Fill-aware valuation (probe-2 review round-4): value bought
         # tickers at their highest buy price in play — a working stop buy
@@ -1050,16 +1352,34 @@ def validate_portfolio(
                                "proposed orders; resize or drop them.",
                 })
 
+        # 2026-08-09: because the funded state can now CURE a breach, each
+        # floor also needs an `elif` on the working-buys-only baseline —
+        # otherwise a proposed market sell silently erases the pre-existing
+        # warning about a resting order that can fill first. `_breach_or_warn`
+        # is only reached from inside each `if <funded breaches>`, and
+        # `working_buys_unfunded` does not backstop it (that guard tests
+        # cash < 0; a policy FLOOR is already breached at exactly 0).
+        # These reuse base_cash_of / base_account_of / base_holdings_of —
+        # no new projection, and no new violation: warnings only.
         min_cash = normalized_constraints.get("min_cash")
+        base_cash_breach = (min_cash is not None and base_account_of > 0
+                            and base_cash_of / base_account_of < min_cash)
         if (min_cash is not None and fill_account > 0
                 and fill_cash / fill_account < min_cash):
-            pre = (base_account_of > 0
-                   and base_cash_of / base_account_of < min_cash)
             _breach_or_warn(
-                "min_cash_all_fills", pre,
-                f"all-fills state breaches min_cash: if every proposed + "
-                f"working buy fills, cash is {fill_cash / fill_account:.1%} "
-                f"of account (floor {min_cash:.0%})",
+                "min_cash_all_fills", base_cash_breach,
+                f"all-fills state breaches min_cash: if every proposed "
+                f"market sell plus every proposed and working buy fills, "
+                f"cash is {fill_cash / fill_account:.1%} "
+                f"of account (floor {min_cash:.1%})",
+            )
+        elif base_cash_breach:
+            _breach_or_warn(
+                "min_cash_all_fills", True,
+                f"min_cash is breached WITHOUT this run's proposed orders "
+                f"(current holdings plus any working buys): cash is "
+                f"{base_cash_of / base_account_of:.1%} of account "
+                f"(floor {min_cash:.1%})",
             )
         max_holdings = normalized_constraints.get("max_holdings")
         if max_holdings is not None:
@@ -1067,43 +1387,83 @@ def validate_portfolio(
                 1 for t, s in fill_holdings.items()
                 if isinstance(s, (int, float)) and s > 0
             )
+            n_base = sum(
+                1 for t, s in base_holdings_of.items()
+                if isinstance(s, (int, float)) and s > 0
+            )
             if n_positions > max_holdings:
-                n_base = sum(
-                    1 for t, s in base_holdings_of.items()
-                    if isinstance(s, (int, float)) and s > 0
-                )
                 _breach_or_warn(
                     "max_holdings_all_fills", n_base > max_holdings,
                     f"all-fills state breaches max_holdings: if every "
-                    f"proposed + working buy fills, the portfolio holds "
+                    f"proposed market sell plus every proposed and working "
+                    f"buy fills, the portfolio holds "
                     f"{n_positions} positions (limit {max_holdings})",
+                )
+            elif n_base > max_holdings:
+                _breach_or_warn(
+                    "max_holdings_all_fills", True,
+                    f"max_holdings is breached WITHOUT this run's proposed "
+                    f"orders (current holdings plus any working buys): "
+                    f"the portfolio holds "
+                    f"{n_base} positions (limit {max_holdings})",
                 )
         # Probe-2 review round-5: max_single_position at the all-fills
         # state, valued at fill prices — a working breakout stop buy
         # previously passed the cap because its position was valued at the
         # quote while its cash left at the fill proxy.
         max_single = normalized_constraints.get("max_single_position")
-        if max_single is not None and fill_account > 0:
-            for t, sh in fill_holdings.items():
-                fp = _usable_price(fill_prices.get(t))
-                if fp is None or not isinstance(sh, (int, float)) or sh <= 0:
-                    continue
-                pct = (sh * fp) / fill_account
-                if pct > max_single:
-                    pre = False
-                    if base_account_of > 0:
-                        bsh = base_holdings_of.get(t)
-                        bfp = _usable_price(base_prices_of.get(t))
-                        if (bfp is not None and isinstance(bsh, (int, float))
-                                and bsh > 0):
-                            pre = (bsh * bfp) / base_account_of > max_single
-                    _breach_or_warn(
-                        "max_single_position_all_fills", pre,
-                        f"all-fills state breaches max_single_position: if "
-                        f"every proposed + working buy fills, {t} is "
-                        f"{pct:.1%} of account (limit {max_single:.0%}) at "
-                        f"fill prices",
-                    )
+        if max_single is not None:
+            # PER-TICKER, never per-floor: the funded state can breach on a
+            # DIFFERENT name, which would make the floor look "already
+            # reported" while the sold ticker's baseline warning vanishes.
+            reported_max_single = set()
+            if fill_account > 0:
+                for t, sh in fill_holdings.items():
+                    fp = _usable_price(fill_prices.get(t))
+                    if (fp is None or not isinstance(sh, (int, float))
+                            or sh <= 0):
+                        continue
+                    pct = (sh * fp) / fill_account
+                    if pct > max_single:
+                        pre = False
+                        if base_account_of > 0:
+                            bsh = base_holdings_of.get(t)
+                            bfp = _usable_price(base_prices_of.get(t))
+                            if (bfp is not None
+                                    and isinstance(bsh, (int, float))
+                                    and bsh > 0):
+                                pre = ((bsh * bfp) / base_account_of
+                                       > max_single)
+                        reported_max_single.add(t)
+                        _breach_or_warn(
+                            "max_single_position_all_fills", pre,
+                            f"all-fills state breaches max_single_position: "
+                            f"if every proposed market sell plus every "
+                            f"proposed and working buy fills, {t} is "
+                            f"{pct:.1%} of account (limit {max_single:.1%}) "
+                            f"at fill prices",
+                        )
+            # A SOLD ticker is simply absent from fill_holdings, so no branch
+            # inside the loop above can ever see it again — the baseline needs
+            # its own scan, not an `elif`.
+            if base_account_of > 0:
+                for t, bsh in base_holdings_of.items():
+                    if t in reported_max_single:
+                        continue
+                    bfp = _usable_price(base_prices_of.get(t))
+                    if (bfp is None or not isinstance(bsh, (int, float))
+                            or bsh <= 0):
+                        continue
+                    bpct = (bsh * bfp) / base_account_of
+                    if bpct > max_single:
+                        _breach_or_warn(
+                            "max_single_position_all_fills", True,
+                            f"max_single_position is breached WITHOUT this "
+                            f"run's proposed orders (current holdings plus "
+                            f"any working buys): {t} is {bpct:.1%} of "
+                            f"account (limit "
+                            f"{max_single:.1%}) at fill prices",
+                        )
 
     all_violations.extend(unprojectable_violations)
 
@@ -1229,8 +1589,11 @@ def _main():
     # hash at write time — an edit to portfolio-state.yaml between Step 6
     # (validate) and Step 8 (log) previously persisted S0-authored
     # decisions beside an S1 snapshot with no detectable mismatch.
-    import hashlib
     result["state_file_sha256"] = hashlib.sha256(_state_bytes).hexdigest()
+    # ...and to the EXACT quotes it valued that state with (see
+    # ticker_prices_fingerprint). Same posture at the logger: present and
+    # mismatched → REFUSE, absent → legacy WARN.
+    result["ticker_prices_sha256"] = ticker_prices_fingerprint(prices)
 
     write_output(result, args.output)
 

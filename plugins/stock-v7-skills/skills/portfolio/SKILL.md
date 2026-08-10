@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.8.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.9.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -485,8 +485,8 @@ Read the output JSON. This provides:
 ## Step 5: Make Decisions
 
 **First, seal the authoring context** (closing round-27): record WHAT
-state and thesis vintages the decisions are about to be authored
-against — the log writer refuses/warns when they drift before Step 8
+state, thesis and compiled-strategy vintages the decisions are about to
+be authored against — the log writer refuses/warns when they drift before Step 8
 (an S0-authored rationale beside an S1 snapshot previously persisted
 undetected; the validation-time hash only covers validate→log).
 
@@ -517,9 +517,18 @@ out.mkdir(parents=True, exist_ok=True)
 # writer as malformed → hard REFUSE, so never leave a partial file behind.
 import os
 tmp = out / '.decision_ctx.json.tmp'
+compiled_p = pathlib.Path('strategy.compiled.yaml')
+strategy_sha = None
+if compiled_p.exists():
+    strategy_sha = (yaml.safe_load(compiled_p.read_text(encoding='utf-8')) or {}).get('source_hash')
 tmp.write_text(json.dumps({
     'state_file_sha256': hashlib.sha256(state_bytes).hexdigest(),
     'thesis_generated_at': thesis_ga,
+    # Which STRATEGY authored these decisions. Without it a mid-run
+    # principle edit + legitimate recompile let a superseded decision be
+    # logged and attributed to the NEW strategy hash — the rendered log
+    # then showed a sell the user's current principles contradict.
+    'strategy_source_hash': strategy_sha,
 }, indent=2), encoding='utf-8')
 os.replace(tmp, out / '.decision_ctx.json')
 print('decision ctx sealed for', len(tickers), 'tickers')
@@ -648,7 +657,12 @@ VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 Without `--output`, scripts.validate writes to stdout and the JSON is
 lost before Step 8 needs it (codex review 2026-05-22 F7).
 
-**If validation passes** (exit 0): Include stress test results in the output.
+**If validation passes** (exit 0): Include stress test results in the output,
+AND relay every entry of the artifact's top-level `warnings` array verbatim.
+Warnings live OUTSIDE `stress_test`, so a PASS can carry material ones — a
+policy floor breached by the user's own resting broker orders surfaces as a
+warning, never a violation. Until Step 8 writes the log, this presentation is
+the only place the user can see them.
 
 **If validation fails** (the script exits 1 on `passed: false` — an expected
 iteration signal here, NOT a stop-everything error):
@@ -675,6 +689,10 @@ The user may:
 - Confirm ("looks good") → the orders are RECOMMENDATIONS only; the user executes
   them manually at their broker. You NEVER submit/place orders and NEVER describe
   them as submitted/placed/executed (advisory-only — `rules/portfolio-safety.md`).
+  If any buy in the set is funded by a proposed market SELL in the same set, state
+  the sequencing requirement **in this turn** — submit the sell first, wait for a
+  confirmed fill. The user may execute right here; the decision log that renders
+  the `execution_note` is not written until Step 8, so it cannot carry this.
 - Report fills + ask you to update holdings → follow the **holdings-update protocol** below
 - Ask to analyze missing tickers → run the appropriate skill
 

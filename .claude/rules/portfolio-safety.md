@@ -60,12 +60,20 @@ Full matrix + rationale: `rules/portfolio-safety.md` §"Single-root guard".
 
 This system is **advisory-only** — `/portfolio` outputs order RECOMMENDATIONS;
 the user executes manually + maintains `portfolio-state.yaml`. No code submits
-orders (IBKR MCP = auth only). Two invariants:
+orders (IBKR MCP = auth only). Three invariants:
 - **Never** describe a proposed order as submitted/placed/executed; never fill
   `execution_outcomes` / `user_confirmation.status` — the user does, after acting.
 - Editing `portfolio-state.yaml`: show a before/after **diff** → user confirms
   THAT diff → keep the prior version → re-run `config_gate check --portfolio`
   (structure is validated, not correctness — a mistyped share count passes).
+- A proposed buy may be funded by a proposed **market sell** in the same set
+  (validator credits it). So when the set depends on those proceeds, ONE
+  sequencing `execution_note` must accompany it — on any ONE of its orders —
+  telling the user to **submit the sell first and wait for a confirmed fill**.
+  Per SET, not per buy (cash is fungible; per-buy attribution is arbitrary).
+  Nothing machine-enforces this: it is the sole control on the accepted risk.
+  Working broker buys are NOT fundable this way — an unfunded one raises
+  `working_buys_unfunded` (it can fill before the sell is even submitted).
 
 Future automated execution (if ever wired) MUST go through a deterministic gateway
 (machine-verifiable `account_type` + explicit `CONFIRM LIVE <acct> <hash>`, draft

@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.9.0 — 2026-08-10
+
+- Rotation solvency: a proposed market sell can now fund a proposed buy in one validated order set. Order prices are bounded by the live quote wherever a self-reported price is load-bearing and uncapped, and capped orders project at their stated contractual bound. New guards: working_buys_unfunded, a ticker_prices binding on the validator artifact, and a strategy binding on the decision-authoring seal.
+
 ## v1.8.0 — 2026-08-09
 
 - feat(portfolio): closing-basis price structure + decision-evidence layer — macro.json now carries per-ticker ticker_price_structure (closing-basis prior-high/breakout status, hold detectors for breakout/MA/cluster with reclaim volume, high-water drawdown) and universe_rebound_structure (cohort selloff event + per-member recovery); the decision log persists this evidence and cmd_write refuses decisions whose evidence contradicts the run's macro; /portfolio prompt teaches the two parallel entry paths (closing breakout / repair) with named strength lenses

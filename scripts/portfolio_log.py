@@ -1175,12 +1175,15 @@ def _enrich_orders(
     for src in orders:
         o = dict(src)
         ticker = o.get("ticker")
-        # Canonical price extraction (est_price → limit_price → price →
-        # quote), shared with the validator — the old limit_price-or-quote
-        # chain costed an est_price-only order at the live quote while
-        # scripts.validate stress-projected it at est_price, so the audit
-        # record and the validation it attests to disagreed on cash impact
-        # (whole-project review 2026-06-11 C15a).
+        # Canonical price extraction shared with the validator — the old
+        # limit_price-or-quote chain costed an est_price-only order at the
+        # live quote while scripts.validate stress-projected it at est_price,
+        # so the audit record and the validation it attests to disagreed on
+        # cash impact (whole-project review 2026-06-11 C15a). Since
+        # 2026-08-09 the selection is direction-aware AND quote-bounded for
+        # uncapped orders, so real prices MUST be passed here (never
+        # display_only): a stale market-sell estimate would otherwise be
+        # persisted as est_execution_price while the validator used the quote.
         px = _order_price(o, prices if ticker else {}) or None
         shares = o.get("shares") or 0  # fail-open-ok: guarded by `if px and shares:` truthy check below — shares=0 skips notional computation
         if px and shares:
@@ -1210,7 +1213,13 @@ def _fmt(x, dash="—"):
     return dash if x is None else x
 
 
-def _render_md(log: Dict[str, Any]) -> str:
+def _render_md(log: Dict[str, Any],
+               ticker_prices: Optional[Dict[str, Any]] = None) -> str:
+    # 2026-08-10: the renderer had NO price access, so the working-order
+    # line could not agree with the validator's projection. Optional +
+    # defaulting to {} keeps every existing caller working; with no map
+    # the display_only fallback below reproduces the previous output.
+    ticker_prices = ticker_prices or {}
     lines: List[str] = []
     lines.append(f"# Portfolio 决策记录 · {log['date']}")
     lines.append("")
@@ -1358,8 +1367,20 @@ def _render_md(log: Dict[str, Any]) -> str:
             # Canonical price-field vocabulary (C15b): an order in the
             # {type: limit, limit_price: X} shape rendered "@ ?" when this
             # line read only 'price' — the exact visibility this exists for.
+            # 2026-08-10: price the line the SAME way the validator priced
+            # it. An earlier revision passed display_only=True to show the
+            # order's own resting price, but for an UNCAPPED working order
+            # that is a stale self-report: a market buy estimated at $50
+            # against a $200 quote was costed at $200 by the safety math and
+            # rendered "@ 50" here — two numbers for one live broker
+            # commitment. A capped order still shows its own limit (the
+            # quote is not added on that branch), so only the uncapped case
+            # moves. display_only survives as the FALLBACK: with no quote
+            # the projection is 0 (unprojectable) and this line would
+            # otherwise revert to "@ ?", the exact symptom C15b removed.
             from scripts.validate import _order_price
-            oo_px = _order_price(oo, {}) or "?"
+            oo_px = (_order_price(oo, ticker_prices)
+                     or _order_price(oo, {}, display_only=True) or "?")
             lines.append(
                 f"- ⚠ 在途单: {oo.get('type', '?')} {oo.get('shares', '?')}股 "
                 f"@ {oo_px} ({oo.get('duration', 'GTC')})"
@@ -1374,7 +1395,20 @@ def _render_md(log: Dict[str, Any]) -> str:
         lines.append("## 建议订单")
         lines.append("")
         for o in orders:
-            px = o.get("limit_price") or o.get("est_execution_price")
+            # Show the price VALIDATION used — which enrichment already
+            # persisted as est_execution_price. This line previously read
+            # `limit_price` first, so one audit record could carry three
+            # different numbers: a market buy with a stray limit_price was
+            # quote-bounded to $200 by the safety math yet advertised $50.
+            # A re-derivation here was tried and dropped: it has to mirror
+            # the projection's DIRECTION (max over ceilings for a buy, min
+            # for a sell) or it re-introduces the very disagreement it was
+            # added to fix (measured 2026-08-10: rendered $100 beside a
+            # persisted $50 when the two ceiling fields disagreed). Since a
+            # capped order now projects AT its ceiling, est_execution_price
+            # IS the limit for those — so deferring to it is both simpler
+            # and correct by construction.
+            px = o.get("est_execution_price")
             px_str = f"${px}" if px else "Market"
             dur = (o.get("duration") or "gtc").upper()
             action = (o.get("action") or "?").upper()
@@ -1659,9 +1693,10 @@ def _orders_match_validation(blob_orders, validated_orders):
 
     Probe-2 A3 (+ cold-round follow-up): identity fields are (ticker,
     action, type, shares, limit_price, stop_price, est_price, price) —
-    the PRICE fields are load-bearing because validate.py projects with
-    est_price → limit_price → price → quote, so an est_price changed
-    after validation changes every stress number. Compared as an
+    the PRICE fields are load-bearing because validate.py projects from
+    them (direction-aware, and quote-bounded for uncapped orders since
+    2026-08-09), so an est_price changed after validation changes every
+    stress number. Compared as an
     order-insensitive multiset with None-sensitive equality — both lists
     came from the same Step-5 output, so any divergence is a
     transcription/adjustment drift that invalidates the stress results.
@@ -2082,6 +2117,36 @@ def cmd_write(args: argparse.Namespace) -> int:
                         f"predate it; re-affirm the decision.",
                         file=sys.stderr,
                     )
+        # 2026-08-10: ...and WHICH STRATEGY authored them. The seal bound
+        # state and thesis vintages only, so a mid-run principle edit plus a
+        # legitimate recompile let a superseded decision be logged and
+        # stamped with the NEW constraints_active.source_hash — the rendered
+        # log then recommended a sell the user's current principles
+        # contradict, with no warning. `constraints_validated` cannot catch
+        # it (it binds four hard-limit VALUES, which a text-only principle
+        # edit leaves untouched) and `_verify_source_hash` only proves
+        # strategy.yaml matches the compiled file NOW, not that either
+        # matches what authored the decisions. Same posture as the state
+        # binding: present-and-mismatched → REFUSE; absent → legacy WARN.
+        _ctx_strat = _ctx.get("strategy_source_hash")
+        if "strategy_source_hash" not in _ctx:
+            print(
+                "[WARN] portfolio_log: .decision_ctx.json seal carries no "
+                "strategy_source_hash (legacy seal) — cannot verify the "
+                "decisions were authored under THESE principles.",
+                file=sys.stderr,
+            )
+        elif _ctx_strat != src_hash:
+            print(
+                f"portfolio_log: REFUSED — strategy.compiled.yaml changed "
+                f"since the decisions were AUTHORED (Step-5 seal "
+                f"{str(_ctx_strat)[:12]}…, current {str(src_hash)[:12]}…). "
+                f"The decisions were reasoned under DIFFERENT principles "
+                f"than this log would attribute them to. Re-author the "
+                f"decisions against the current strategy.",
+                file=sys.stderr,
+            )
+            return 2
     else:
         print(
             "[WARN] portfolio_log: no .decision_ctx.json seal in "
@@ -2149,6 +2214,37 @@ def cmd_write(args: argparse.Namespace) -> int:
                     "[WARN] portfolio_log: stress-test artifact carries no "
                     "state_file_sha256 binding (legacy validator output) — "
                     "cannot verify the state was unchanged since validation.",
+                    file=sys.stderr,
+                )
+            # Cold codex review 2026-08-10: quotes are verdict-determining
+            # (they value every holding for the ratio checks, and price
+            # uncapped market orders), but nothing bound them — so a PASS
+            # computed at one set of quotes could be logged against another,
+            # with the order echo still matching. This is the concrete shape
+            # of the documented two-concurrent-sessions hazard. Same posture:
+            # present-and-mismatched → REFUSE; absent → legacy WARN.
+            _v_px_sha = v.get("ticker_prices_sha256")
+            if isinstance(_v_px_sha, str) and _v_px_sha:
+                from scripts.validate import ticker_prices_fingerprint
+
+                _cur_px_sha = ticker_prices_fingerprint(macro)
+                if _cur_px_sha != _v_px_sha:
+                    print(
+                        f"portfolio_log: REFUSED — ticker_prices changed "
+                        f"between validation and logging (validator bound "
+                        f"sha {_v_px_sha[:12]}…, current "
+                        f"{_cur_px_sha[:12]}…). The stress verdict was "
+                        f"computed against DIFFERENT quotes than the ones "
+                        f"this log will record. Re-run scripts.validate "
+                        f"against the current macro.json.",
+                        file=sys.stderr,
+                    )
+                    return 2
+            else:
+                print(
+                    "[WARN] portfolio_log: stress-test artifact carries no "
+                    "ticker_prices_sha256 binding (legacy validator output) "
+                    "— cannot verify it validated against THESE quotes.",
                     file=sys.stderr,
                 )
             # Closing round-13 F1: bind the validator artifact to the SAME
@@ -2372,7 +2468,7 @@ def cmd_write(args: argparse.Namespace) -> int:
     # Render MD BEFORE any persistence — a render exception leaves no
     # partial JSON on disk. Both files then land via atomic tmp+rename
     # through cli_utils helpers (matches run_meta.save convention).
-    md_text = _render_md(log)
+    md_text = _render_md(log, (macro or {}).get("ticker_prices") or {})
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
