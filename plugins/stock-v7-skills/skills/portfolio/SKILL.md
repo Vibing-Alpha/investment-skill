@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.9.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.9.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -97,7 +97,7 @@ If it exits non-zero, STOP and show its stderr to the user (config not confirmed
 key missing / portfolio-state malformed) — do NOT run any analysis or produce numbers.
 Then continue below.
 
-## Step 0: Review Prior Run (Cross-Check Follow-ups)
+## Step 0: Review Prior Run (Follow-ups + Unresolved Decisions)
 
 Before assembling today's context, look at what the last run flagged.
 This closes the loop between "what I said I'd watch" and "what I'm
@@ -109,13 +109,43 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.portfolio_log review
 ```
 
-The script prints the most recent prior `decisions.json` (**including an
+On a well-formed prior log the script locates the latest-dated prior
+`decisions.json` (**including an
 earlier run today** — a same-day rerun archives the prior pair as
-`decisions.{run_id}.json/.md` in the same dir, so nothing is clobbered),
+`decisions.{run_id}.json/.md` in the same dir, so nothing is clobbered) and
+prints its PATH — **not** its per-ticker decisions or `orders_proposed` —
 along with:
-- Prior run's confirmation status (pending/accepted/modified/declined)
+- The run's `status`, plus `user_confirmation.status` (pending/accepted/
+  modified/declined)
 - Follow-up events whose date has arrived (`date <= today`)
-- A warning if prior run has no reflection recorded yet
+- A warning if no reflection is recorded — but ONLY when confirmation is
+  `accepted` or `modified`, so silence here does not mean "nothing pending"
+
+**Gate — open the prior `decisions.json` before Step 1.** When `review` exits 0 and prints a prior-run path, you MUST read the file at
+the path it printed. Any NON-ZERO exit means STOP: the review gate did not complete (its schema-validation path returns 1 and prints a
+`File:` line to stderr), so you MUST NOT use it as this run's prior-run
+evidence — repairing it is a separate action. For every prior
+decision whose `action` is neither `hold` nor `skip`, you MUST read its FULL
+`principle_cited` (the citation is multi-clause; the decisive one is NOT
+always the leading `#N`), its
+`rationale` (which may record a user ruling), its
+`invalidation_trigger` (the condition under which that call expires or
+escalates), and ALL linked `orders_proposed` entries. You MUST also read that run's
+`user_confirmation.{accepted_orders,rejected_orders,modified_orders,decision_notes}`
+and `execution_outcomes.{orders_filled,orders_unfilled}` too — `review` prints
+none of these, so an order the user REJECTED or recorded as FILLED is invisible
+and you could re-propose it. Today's decision for each such
+ticker MUST explicitly state **carry forward / supersede / drop** and why — in
+that ticker's Step 5 decision while it is still in holdings or watchlist,
+otherwise in the Step 8 blob's `notes`, since a filled exit or a dropped
+watchlist name leaves no per-ticker decision to carry the verdict. This
+system never places orders and `open_orders` is hand-synced, so broker
+disposition is UNKNOWN unless the user states it; you MUST never infer a fill or a non-fill from its absence there.
+Sequencing: the READING above MUST finish before Step 1; the verdict comes
+later, when those decisions are authored. (2026-08-10: a
+prior `reduce` and a user ruling recorded in its rationale were invisible
+because the prior decisions file was never opened; the next run
+wrote a contradictory `hold`.)
 
 Read those due follow-ups into your reasoning. For each one:
 - Did the flagged catalyst actually hit? (e.g., earnings on the
@@ -123,16 +153,17 @@ Read those due follow-ups into your reasoning. For each one:
 - Did the prior `what_to_watch` condition trigger? If so, the action
   rule associated with it (e.g., "miss → #3 reduce trigger fires")
   should be explicitly addressed in today's decisions.
-- If the prior run was never confirmed, note that — today's decisions
-  may need to re-examine the same tickers.
+- If the prior run was never confirmed, note that.
 
 If no prior run exists (first time), the script says so and you proceed
 normally.
 
 If the command exits non-zero (typically: the prior `decisions.json` fails
 schema validation after a schema change), **STOP**, show its stderr to the
-user, and follow the remediation it prints (hand-fix the prior log, or
-move/rename it so an older compatible run resolves) — do not proceed with
+user, and follow any remediation it prints (hand-fix the prior log, or
+move/rename it so an older compatible run resolves — an unvalidated
+passthrough field can instead exit non-zero with a bare traceback and no
+remediation at all) — do not proceed with
 an unresolved prior log; it is the audit chain today's run builds on.
 
 ## Step 1: Read Portfolio State

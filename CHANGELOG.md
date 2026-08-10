@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.9.1 — 2026-08-11
+
+- portfolio Step 0: the run MUST open the prior decisions.json before Step 1 and explicitly reconcile every prior non-hold/non-skip decision (carry forward / supersede / drop, and why). portfolio_log review prints only the prior run's PATH — never its decisions or proposed orders — so a prior 'reduce', its proposed sell, and a user ruling recorded in that decision's rationale were all invisible, and the next run wrote a contradictory 'hold' on identical anchored prices. The gate also names the confirmation/execution-outcome order fields review never prints (so an order the user rejected or already filled cannot be silently re-proposed), and fail-closes on a non-zero review exit. Doc-layer only — no script changes.
+
 ## v1.9.0 — 2026-08-10
 
 - Rotation solvency: a proposed market sell can now fund a proposed buy in one validated order set. Order prices are bounded by the live quote wherever a self-reported price is load-bearing and uncapped, and capped orders project at their stated contractual bound. New guards: working_buys_unfunded, a ticker_prices binding on the validator artifact, and a strategy binding on the decision-authoring seal.
