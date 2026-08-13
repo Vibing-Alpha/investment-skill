@@ -278,3 +278,60 @@ def count_word_equivalents(text):
     cjk_chars = len(_CJK_CHAR_RE.findall(text))
     non_cjk_tokens = len(_CJK_CHAR_RE.sub(" ", text).split())
     return non_cjk_tokens + round(cjk_chars / _CJK_CHARS_PER_WORD)
+
+
+# --- Segmented-revenues filing-notes fallback (ONE implementation) ----------
+# The structured segmentation feed answers empty for many issuers, but the
+# revenue mix is often recoverable from the filing's revenue-disaggregation
+# note. When that note was persisted, a FAILED segmented category is demoted
+# to PARTIAL and re-sourced rather than left as a flat failure.
+#
+# TWO call sites need this rule and they see the evidence in DIFFERENT shapes:
+#   * scripts/fetch.py Category F2 reads `filing_content` (item -> text), which
+#     is populated only when Category F ran in the SAME process.
+#   * scripts/score_business/validation_merge.py reads the merged filing
+#     entry's `items_detail` (item -> char count), which is how the fact
+#     survives into the artifact.
+# score-business fetches in two phases with DISJOINT category sets, so F2
+# (gated on 02_financial_data) and the filing (gated on 05_filing_summary)
+# never run in the same process there — which is why the merge has to
+# re-evaluate the rule once both halves are known. Keeping the rule here
+# rather than copying it into the merge is `.claude/rules/producer-consumer.md`
+# §3: one implementation, not two.
+_REVENUE_NOTES_10K = "10k_revenue_notes"
+_REVENUE_NOTES_10Q = "10q_revenue_notes"
+
+
+def revenue_notes_availability(item_keys):
+    """Return (has_10k, has_10q) from any iterable of filing item names.
+
+    Accepts either mapping the callers hold — `filing_content` (item -> text)
+    or `items_detail` (item -> char count) — since both are keyed by the same
+    item names. A None/empty input reads as "no notes", never as unknown.
+    """
+    keys = set(item_keys or ())
+    return (_REVENUE_NOTES_10K in keys, _REVENUE_NOTES_10Q in keys)
+
+
+def promote_segmented_on_filing_notes(entry, *, has_10k, has_10q):
+    """Apply the FAILED -> PARTIAL filing-notes promotion to a category entry.
+
+    Returns a NEW dict (callers hold references into their own inputs, so this
+    must not mutate in place). Idempotent and FAILED-only: a PASSED feed, an
+    already-promoted PARTIAL, or a run with no persisted notes comes back
+    unchanged apart from the availability flags, which always describe what
+    was actually persisted.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    updated = dict(entry)
+    available = has_10k or has_10q
+    updated["filing_revenue_notes"] = {
+        "10k_available": has_10k,
+        "10q_available": has_10q,
+        "fallback_status": "AVAILABLE" if available else "UNAVAILABLE",
+    }
+    if updated.get("status") == "FAILED" and available:
+        updated["status"] = "PARTIAL"
+        updated["source"] = "filing_revenue_notes"
+    return updated

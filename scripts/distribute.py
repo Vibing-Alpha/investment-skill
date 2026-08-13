@@ -176,8 +176,8 @@ def parse_frontmatter(skill_md: Path) -> dict[str, str]:
     # frontmatter is between the first two '---' fences
     try:
         end = lines.index("---", 1)
-    except ValueError:
-        return {}  # fail-open-ok: malformed frontmatter → {} → check() reports missing name/description (fail-closed downstream)
+    except ValueError:  # fail-open-ok: malformed frontmatter → {} → check() appends a problem for BOTH missing keys (verified fail-closed downstream)
+        return {}
     keys: dict[str, str] = {}
     for ln in lines[1:end]:
         if ln and not ln[0].isspace() and ":" in ln:
@@ -1022,7 +1022,7 @@ def _interpreter_version(pybin: str) -> tuple[int, int, int] | None:
         return None
     try:
         parts = tuple(int(x) for x in r.stdout.strip().split("."))
-    except ValueError:
+    except ValueError:  # fail-open-ok: unparseable version → None → doctor emits _FAIL "could not execute" (verified fail-closed at the single call site)
         return None
     return parts[:3] if len(parts) >= 3 else None
 

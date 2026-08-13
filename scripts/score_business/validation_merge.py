@@ -30,6 +30,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from scripts.cli_utils import (
+    promote_segmented_on_filing_notes,
+    revenue_notes_availability,
+)
+
 
 def is_live_entry(entry: Any) -> bool:
     """An entry is 'live' (carries real data) if it's a dict with a PRESENT,
@@ -118,6 +123,26 @@ def merge_validation(
         # entry (the branch above) is real evidence and stands on its own;
         # a stub is not, and the missing key is exactly what the
         # stored-validation shape check exists to catch.
+    # The segmented-revenues filing-notes fallback is a CROSS-PHASE fact and
+    # can only be settled here. fetch.py's Category F2 owns the rule, but it
+    # is gated on `02_financial_data` while the filing that supplies its
+    # evidence is gated on `05_filing_summary` — and score-business puts those
+    # two in DISJOINT phases, so in phase 1 `filing_content` is empty and in
+    # phase 2 F2 never runs. Measured before the fix: across 41 stored
+    # validations the promotion had fired 0 times, and 22 of the 32 carrying
+    # `filing.items_detail` listed a *_revenue_notes item while claiming
+    # `fallback_status: "UNAVAILABLE"` in the same file. The rule itself lives
+    # in cli_utils so this is not a second implementation
+    # (`.claude/rules/producer-consumer.md` §3).
+    seg_entry = merged_cats.get("segmented_revenues")
+    if isinstance(seg_entry, dict):
+        merged_filing = merged_cats.get("filing")
+        items_detail = (merged_filing or {}).get("items_detail") if isinstance(merged_filing, dict) else None
+        has_10k, has_10q = revenue_notes_availability(items_detail)
+        merged_cats["segmented_revenues"] = promote_segmented_on_filing_notes(
+            seg_entry, has_10k=has_10k, has_10q=has_10q,
+        )
+
     merged["categories"] = merged_cats
 
     # Probe-2 C2a: the top-level status must describe the MERGED map, not

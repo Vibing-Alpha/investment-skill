@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.9.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.9.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -82,7 +82,9 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 > log one session's decisions against the other's prices. Do not run
 > /portfolio in two sessions at once; sequential same-day reruns are
 > fine (the earlier log is archived). Also do NOT edit
-> portfolio-state.yaml while a run is in flight — the validator now
+> portfolio-state.yaml **or strategy.yaml** while a run is in flight — a
+> mid-run policy edit is compiled at Step 2 but only re-compared at Step 8, so
+> Step 7 would present orders sized under the pre-edit values. The validator now
 > binds its state hash and the logger refuses on mismatch.
 
 ## Preflight: Money-path config

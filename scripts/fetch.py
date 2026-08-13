@@ -42,6 +42,10 @@ from scripts.constants import (
 )
 from scripts.cli_utils import write_output as _cli_write_output
 from scripts.cli_utils import write_text_atomic as _cli_write_text_atomic
+from scripts.cli_utils import (
+    promote_segmented_on_filing_notes,
+    revenue_notes_availability,
+)
 from scripts.sources.yfinance_guard import yfinance_call
 from scripts.sources.yahoo_finance import YfinanceFallbackOutcome
 from scripts.sources.adapter_result import (
@@ -2727,29 +2731,28 @@ def _main_impl(
                 segmented_source = "fmp_fallback"
                 print("    FMP segmentation fallback: filled", file=sys.stderr)
         segmented_data = segmented_result.data if isinstance(segmented_result.data, dict) else {}
-        has_10k_revenue_notes = "10k_revenue_notes" in filing_content
-        has_10q_revenue_notes = "10q_revenue_notes" in filing_content
-        category_statuses["segmented_revenues"] = _derive_category_status(
-            segmented_result,
-            extra_keys={
-                "periods": segmented_data.get("periods", 0),
-                **({"data_source": segmented_source} if segmented_source else {}),
-                "filing_revenue_notes": {
-                    "10k_available": has_10k_revenue_notes,
-                    "10q_available": has_10q_revenue_notes,
-                    "fallback_status": (
-                        "AVAILABLE"
-                        if (has_10k_revenue_notes or has_10q_revenue_notes)
-                        else "UNAVAILABLE"
-                    ),
-                },
-            },
+        # `filing_content` is populated ONLY when Category F ran in THIS
+        # process. It is empty whenever the caller scoped --categories to a
+        # set that excludes the filing (score-business's phase-1 probe does
+        # exactly that), in which case no promotion can be decided here and
+        # the merge settles it later from the filing entry's `items_detail`.
+        # The rule itself lives in cli_utils so both sites share ONE
+        # implementation (`.claude/rules/producer-consumer.md` §3).
+        has_10k_revenue_notes, has_10q_revenue_notes = revenue_notes_availability(
+            filing_content
         )
-        # Conditional FAILED → PARTIAL promotion (mirror pre-migration)
-        if (segmented_result.status == "FAILED"
-                and (has_10k_revenue_notes or has_10q_revenue_notes)):
-            category_statuses["segmented_revenues"]["status"] = "PARTIAL"
-            category_statuses["segmented_revenues"]["source"] = "filing_revenue_notes"
+        category_statuses["segmented_revenues"] = promote_segmented_on_filing_notes(
+            _derive_category_status(
+                segmented_result,
+                extra_keys={
+                    "periods": segmented_data.get("periods", 0),
+                    **({"data_source": segmented_source} if segmented_source else {}),
+                },
+            ),
+            has_10k=has_10k_revenue_notes,
+            has_10q=has_10q_revenue_notes,
+        )
+        if category_statuses["segmented_revenues"].get("source") == "filing_revenue_notes":
             print(
                 "    Status: PARTIAL "
                 "(API empty, promoted via Filing Revenue Notes fallback)",

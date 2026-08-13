@@ -191,7 +191,7 @@ def _days_since_thesis(ticker, reports_root=None):
         return None
     try:
         run = datetime.datetime.strptime(d.name, "%Y%m%d").date()
-    except ValueError:
+    except ValueError:  # fail-open-ok: non-YYYYMMDD run dir → None → a DISPLAY field only; routing reads staleness.state, whose own date parse fail-closes to stale_thesis in portfolio_classify
         return None
     return (today_et() - run).days
 

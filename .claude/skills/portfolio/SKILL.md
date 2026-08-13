@@ -82,7 +82,9 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 > log one session's decisions against the other's prices. Do not run
 > /portfolio in two sessions at once; sequential same-day reruns are
 > fine (the earlier log is archived). Also do NOT edit
-> portfolio-state.yaml while a run is in flight — the validator now
+> portfolio-state.yaml **or strategy.yaml** while a run is in flight — a
+> mid-run policy edit is compiled at Step 2 but only re-compared at Step 8, so
+> Step 7 would present orders sized under the pre-edit values. The validator now
 > binds its state hash and the logger refuses on mismatch.
 
 ## Preflight: Money-path config

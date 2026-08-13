@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.9.2 — 2026-08-13
+
+- fix(fetch): the segmented-revenues filing-notes fallback now settles at merge time — a ticker whose structured segmentation feed is empty but whose revenue mix IS recoverable from the filing's disaggregation note was recorded as a flat data loss, and the artifact claimed fallback_status UNAVAILABLE while the note sat beside it on disk. The promotion was unreachable in the two-phase score-business fetch (its rule ran in the phase that had no filing; the filing arrived in the phase where the rule was skipped). segmented_revenues is auxiliary, so no decision or gate changes.
+
 ## v1.9.1 — 2026-08-11
 
 - portfolio Step 0: the run MUST open the prior decisions.json before Step 1 and explicitly reconcile every prior non-hold/non-skip decision (carry forward / supersede / drop, and why). portfolio_log review prints only the prior run's PATH — never its decisions or proposed orders — so a prior 'reduce', its proposed sell, and a user ruling recorded in that decision's rationale were all invisible, and the next run wrote a contradictory 'hold' on identical anchored prices. The gate also names the confirmation/execution-outcome order fields review never prints (so an order the user rejected or already filled cannot be silently re-proposed), and fail-closes on a non-zero review exit. Doc-layer only — no script changes.
