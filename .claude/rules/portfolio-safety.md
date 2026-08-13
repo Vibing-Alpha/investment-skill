@@ -10,7 +10,7 @@ constraint schema is visible from turn 1.
 | Key | Type | Range | Enforced by |
 |---|---|---|---|
 | `max_single_position` | decimal | [0.0, 1.0] | `validate._guard_constraints` |
-| `max_sector` | decimal | [0.0, 1.0] | (stub — `invalid_config` until sector mapping lands) |
+| ~~`max_sector`~~ | — | — | **REFUSED by `compile_strategy` (exit 1)** — sector lookup unimplemented, so every run would fail closed. Delete the line; an older example shipped it and it never enforced anything |
 | `min_cash` | decimal | [0.0, 1.0] | `validate._check_cash_floor` |
 | `max_holdings` | int | ≥ 1 | `validate._check_max_holdings` |
 
@@ -25,23 +25,25 @@ belt-and-suspenders layer: any value outside [0, 1] surfaces as
 
 Three layers (full text at canonical source):
 1. **Risk floor** — portfolio survives extreme scenario (all limits fill + all stops trigger)
-2. **Investment discipline** — weak technicals ≠ disqualify, but raise margin; within 7d of earnings no chase; thesis falsification → exit; hard-constraint breach → market sell; conviction → market order
+2. **Investment discipline** — weak technicals ≠ disqualify, but raise margin; within the configured earnings window (`orders.earnings_window_days`) no chase; thesis falsification → exit; hard-constraint breach → market sell; conviction → market order
 3. **Portfolio management** — rising risk → raise cash; excess cash → deploy by CE rank; concentrate in edge sectors
 
 Read `rules/portfolio-safety.md` before modifying default-principle
-extraction logic or the compile step in `.claude/skills/portfolio/SKILL.md`.
+resolution or the compile step (`scripts/compile_strategy.py`, invoked by
+`.claude/skills/portfolio/SKILL.md` Step 2).
 
 ## Enforcement
 
-- **Compile stage**: `.claude/skills/portfolio/SKILL.md` Step 2 coerces
-  percent → decimal via `cli_utils.normalize_percent_fraction`
+- **Compile stage**: `scripts/compile_strategy.py` projects `risk:` onto
+  `hard_constraints` (refusing unknown keys) and coerces percent → decimal via
+  `cli_utils.normalize_percent_fraction`. Re-derives every run — no cache branch
 - **Validate stage**: `scripts/validate.py` rejects out-of-range + vocab-
   invalid orders; tuple contract preserved for stress tests
 - **Audit stage**: `scripts/audit_fail_open.py` pattern F catches raw-
   percent literals like `max_single_position = 35`
-- **Log stage**: `scripts/portfolio_log.py` verifies `source_hash`
-  matches `strategy.yaml` current principles before writing any
-  decision log
+- **Log stage**: `scripts/portfolio_log.py` verifies `source_hash` via the
+  shared `schemas.strategy.canonical_policy_hash` — covering `principles` +
+  `principle_notes` + `risk` — before writing any decision log
 
 ## Single-root guard — dual standard (quick-ref)
 

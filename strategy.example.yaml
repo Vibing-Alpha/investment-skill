@@ -5,13 +5,16 @@
 output_language: zh-CN            # zh-CN | en-US
 
 # Investment principles (used by /portfolio)
-# Write each principle as natural language. The system extracts quantifiable
-# limits as hard constraints and uses the rest to guide LLM reasoning.
-# Remove this section to use defaults from rules/portfolio-safety.md.
-# Other skills (/score-business, /investment-thesis) use risk:/exit:/scoring: below.
+# Natural-language guidance for the decision agent. These are NOT parsed for
+# numbers — write every enforceable limit under `risk:` below.
+#
+# A number written ONLY here is NOT enforced. That used to be how it worked,
+# and it was the fail-open this design removed: a limit sitting in prose
+# could silently never bind, while the decision log kept attesting it.
+#
+# Remove this section to use the defaults in rules/portfolio-safety.md.
 principles:
-  # - "single-stock position capped at 20% of total equity"
-  # - "keep at least 10% cash"
+  # - "let winners run; cut the weakest name on rotation"
   # - "do not chase highs going into earnings"
 
 # Mandate
@@ -31,8 +34,6 @@ scoring:
 # Risk limits
 risk:
   max_single_position: 0.20       # single stock cap
-  max_sector: 0.50                # single sector cap
-  cash_target: 0.10               # reference target, not hard limit
 
 # Exit rules
 exit:
@@ -44,6 +45,4 @@ exit:
 
 # Order preferences
 orders:
-  broker: IBKR                    # IBKR | paper
-  default_duration: gtc           # day | gtc
   earnings_window_days: 7

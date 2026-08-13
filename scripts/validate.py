@@ -719,12 +719,34 @@ def _check_position_limits(
     return violations
 
 
+# S1 tolerance. The comparison below runs on binary floats, so an
+# economically neutral rotation (an equal-value sell and buy) can move the
+# ratio in the last bits — a bare `<` would call that "worse" and BLOCK a
+# legitimate trade. 1e-9 is ~7 orders of magnitude above that noise and far
+# below any meaningful change. Deliberately NOT display rounding: at 0.1
+# percentage points a real 4.04% -> 3.96% deterioration reads 4.0% -> 4.0%
+# and is let through. See the plan's §0 S1 and its two regressions.
+_RATIO_EPSILON = 1e-9
+
+
 def _check_cash_floor(
     proj_cash: float,
     account_value: float,
     constraints: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Check min_cash constraint.  Returns structured violation dicts."""
+    """Check min_cash constraint.  Returns structured violation dicts.
+
+    ⚠ A "buy gate" variant of this check — violation only when the proposed set
+    made the ratio WORSE — was written and then CUT. `min_cash` is deliberately
+    unconfigured (see the plan's §5), so the gate protected nothing today, and
+    shipping dormant comparison machinery is what the anti-ratchet rule
+    refuses. If a floor is ever armed and a low-cash BOOK turns out to demand
+    forced sales, that is the evidence the gate lacked — reinstate it then.
+
+    The S1 margin comparison in the all-fills path is independent of this and
+    stays: it closes a demonstrated fail-open where proposed orders deepened an
+    existing breach and were reported as pre-existing.
+    """
     violations: List[Dict[str, Any]] = []
     min_cash = constraints.get("min_cash")
 
@@ -847,16 +869,40 @@ def _run_stress_tests(
     extreme_orders = immediate_proposed_sells + all_buys + stops
     extreme_holdings, extreme_cash = _project(extreme_orders)
 
+    # S4 — value residual shares at the market level THIS scenario established.
+    # A stop that fires is evidence about the market: the price reached it, so
+    # the shares still held are worth that, and marking them at the pre-trigger
+    # quote overstates them. Reproduced: a partial stop left the survivors at
+    # the old quote and reported 78.1% where the scenario's own price gives
+    # 90.9% — a real cap breach, missed.
+    #
+    # Two bounds, both load-bearing:
+    #   * LOWEST triggered stop wins — firing several means the price fell
+    #     through all of them.
+    #   * The mark may only move DOWN. `_order_price` can exceed the live
+    #     quote, and substituting it then ERASES a breach: with spot $1 under a
+    #     $10 trigger, raising the mark turned a real 92.42% into 90.91%.
+    extreme_prices = dict(ticker_prices)
+    for o in stops:
+        t = o.get("ticker")
+        if not t:
+            continue
+        p = _usable_price(_order_price(o, ticker_prices))
+        if p is None:
+            continue
+        cur = _usable_price(extreme_prices.get(t))
+        extreme_prices[t] = p if cur is None else min(cur, p)
+
     # Shrunk denominator check: position % against crashed account value
     extreme_passed = extreme_cash >= 0
     extreme_violations = []
 
     max_single = constraints.get("max_single_position")
     if max_single is not None and extreme_cash >= 0:
-        crashed_value = _calc_account_value(extreme_holdings, ticker_prices, extreme_cash)
+        crashed_value = _calc_account_value(extreme_holdings, extreme_prices, extreme_cash)
         if crashed_value > 0:
             for ticker, shares in extreme_holdings.items():
-                p = _usable_price(ticker_prices.get(ticker))
+                p = _usable_price(extreme_prices.get(ticker))
                 if p is None:
                     continue
                 pct = _calc_position_pct(shares, p, crashed_value)
@@ -1361,13 +1407,26 @@ def validate_portfolio(
         # cash < 0; a policy FLOOR is already breached at exactly 0).
         # These reuse base_cash_of / base_account_of / base_holdings_of —
         # no new projection, and no new violation: warnings only.
+        # S1 — the downgrade compares MARGINS, not a bare "was it already
+        # breached". A boolean let ANY pre-existing working-order breach
+        # excuse an arbitrarily worse proposed state: baseline 4%, proposed
+        # 1% under a 5% floor returned passed=True with only a warning. That
+        # is worse than the state-only case — here the operator IS proposing
+        # the orders that deepen it.
         min_cash = normalized_constraints.get("min_cash")
-        base_cash_breach = (min_cash is not None and base_account_of > 0
-                            and base_cash_of / base_account_of < min_cash)
+        base_cash_ratio = (base_cash_of / base_account_of
+                           if base_account_of > 0 else None)
+        base_cash_breach = (min_cash is not None and base_cash_ratio is not None
+                            and base_cash_ratio < min_cash)
         if (min_cash is not None and fill_account > 0
                 and fill_cash / fill_account < min_cash):
+            _not_worsened = (
+                base_cash_breach
+                and fill_cash / fill_account
+                >= base_cash_ratio - _RATIO_EPSILON
+            )
             _breach_or_warn(
-                "min_cash_all_fills", base_cash_breach,
+                "min_cash_all_fills", _not_worsened,
                 f"all-fills state breaches min_cash: if every proposed "
                 f"market sell plus every proposed and working buy fills, "
                 f"cash is {fill_cash / fill_account:.1%} "
@@ -1392,8 +1451,11 @@ def validate_portfolio(
                 if isinstance(s, (int, float)) and s > 0
             )
             if n_positions > max_holdings:
+                # Integer count: no tolerance, and a higher count IS worse
+                # even when the baseline already breached.
                 _breach_or_warn(
-                    "max_holdings_all_fills", n_base > max_holdings,
+                    "max_holdings_all_fills",
+                    n_base > max_holdings and n_positions <= n_base,
                     f"all-fills state breaches max_holdings: if every "
                     f"proposed market sell plus every proposed and working "
                     f"buy fills, the portfolio holds "
@@ -1425,6 +1487,9 @@ def validate_portfolio(
                         continue
                     pct = (sh * fp) / fill_account
                     if pct > max_single:
+                        # Downgrade only when the baseline already breached
+                        # AND the proposed set did not push this ticker
+                        # HIGHER — a deeper breach is created damage.
                         pre = False
                         if base_account_of > 0:
                             bsh = base_holdings_of.get(t)
@@ -1432,8 +1497,9 @@ def validate_portfolio(
                             if (bfp is not None
                                     and isinstance(bsh, (int, float))
                                     and bsh > 0):
-                                pre = ((bsh * bfp) / base_account_of
-                                       > max_single)
+                                base_pct = (bsh * bfp) / base_account_of
+                                pre = (base_pct > max_single
+                                       and pct <= base_pct + _RATIO_EPSILON)
                         reported_max_single.add(t)
                         _breach_or_warn(
                             "max_single_position_all_fills", pre,

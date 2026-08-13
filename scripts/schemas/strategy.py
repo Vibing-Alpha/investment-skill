@@ -186,3 +186,74 @@ def load_compiled_strategy(path) -> CompiledStrategy:
         soft_principles=tuple(soft),
         principle_notes=dict(notes),
     )
+
+
+# ---------------------------------------------------------------------------
+# Canonical policy hash — the SINGLE formula, deliberately PURE
+# ---------------------------------------------------------------------------
+#
+# F4 grew out of two things: the hash covered only `principles`, so a policy
+# value written under `risk:` was a cache hit and the decision log kept
+# attesting the superseded policy; and the formula was hand-matched in two
+# places (SKILL.md's inline snippet and portfolio_log._verify_source_hash),
+# which is a drift surface by construction.
+#
+# This function is the one formula. It **validates nothing and refuses
+# nothing** — that separation is load-bearing. Validation lives in
+# scripts.compile_strategy, which owns one path; the hash is needed by every
+# path, including the orchestration fallback for a null/absent `principles`.
+# Welding them together forces that fallback to choose between computing a
+# DIFFERENT hash (after which the logger refuses a fresh install permanently)
+# and running validation it is explicitly not meant to run.
+
+_HASHED_POLICY_KEYS = ("principles", "principle_notes", "risk")
+
+
+def canonical_policy_hash(source) -> str:
+    """SHA-256 over the decision policy in `strategy.yaml`.
+
+    Covers `principles`, `principle_notes` and `risk` — every policy input the
+    OPERATOR can edit. Absent and present-null normalize alike, so the two
+    spellings of "not configured" cannot force a spurious recompile, and
+    mapping keys are sorted so YAML key order does not change the hash.
+
+    ⚠ **Scope.** When `principles` is empty the effective soft policy is the
+    canonical default text in `rules/portfolio-safety.md`, which this hash does
+    NOT cover. That text is a version-controlled repo file, not user config, so
+    it cannot drift per-install — but the hash does not attest it, and saying
+    it covers "every authoring input" would overclaim.
+
+    Totality matters because `portfolio_log` hashes the RAW `yaml.safe_load`
+    output before any validation runs: `default=` never applies to mapping
+    KEYS, so an unquoted date key beside a string key raised `TypeError` from
+    `sort_keys`, and a `!!set` iterates in hash-randomised order — one policy
+    hashed three different ways under three interpreter seeds. Both are fatal
+    across a process boundary: the config compiles, then the logger refuses it
+    as stale, permanently.
+
+    The supported contract is narrower than that (`compile_strategy` requires
+    `principle_notes` to be a string→string mapping), so the coercions below
+    only ever fire on input the compiler would refuse anyway. They exist to
+    keep this function TOTAL for its pre-validation caller, not to bless exotic
+    policy.
+    """
+    import hashlib
+    import json
+
+    doc = source if isinstance(source, dict) else {}
+    payload = {k: _stable_for_hash(doc.get(k)) for k in _HASHED_POLICY_KEYS}
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                   default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _stable_for_hash(value):
+    """Coerce to a JSON-dumpable, order-stable shape. See the note above."""
+    if isinstance(value, dict):
+        return {str(k): _stable_for_hash(v) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        return sorted(repr(v) for v in value)
+    if isinstance(value, (list, tuple)):
+        return [_stable_for_hash(v) for v in value]
+    return value

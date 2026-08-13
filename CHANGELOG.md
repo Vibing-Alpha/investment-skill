@@ -3,6 +3,13 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.10.0 — 2026-08-13
+
+- ACTION REQUIRED for existing installs — if your `strategy.yaml` has `risk.cash_target` or `risk.max_sector`, delete those lines. `/portfolio` now stops with a message naming the key: neither ever enforced anything (`cash_target` had no consumer; `max_sector` needs sector lookup that is not implemented, so it would fail closed on every run).
+- Hard constraints now come from `strategy.yaml`'s `risk:` block instead of being read out of your principle prose, and `strategy.compiled.yaml` is re-derived by a deterministic compiler on every run — there is no cache branch. Previously a limit you wrote under `risk:` could be silently ignored while the decision log kept attesting the superseded policy, because the freshness hash covered only `principles`. It now covers `principles` + `principle_notes` + `risk`, so any policy edit takes effect on the next run.
+- Validator: a proposed order that DEEPENS an existing constraint breach is no longer filed as merely 'pre-existing' — the all-fills check now compares margins per constraint, so only a set that leaves the breach no worse is downgraded to a warning. And the crash scenario values a stopped ticker at its stop price rather than the pre-trigger quote, which had let a real concentration breach pass on the shrunken denominator.
+- If your `strategy.yaml` has no `principles:` (the shipped example ships them commented out), the ten canonical default principles are now compiled into the artifact. Previously it could be written with an empty principle list, which silently disabled citation-range validation in the decision log.
+
 ## v1.9.2 — 2026-08-13
 
 - fix(fetch): the segmented-revenues filing-notes fallback now settles at merge time — a ticker whose structured segmentation feed is empty but whose revenue mix IS recoverable from the filing's disaggregation note was recorded as a flat data loss, and the artifact claimed fallback_status UNAVAILABLE while the note sat beside it on disk. The promotion was unreachable in the two-phase score-business fetch (its rule ran in the phase that had no filing; the filing arrived in the phase where the rule was skipped). segmented_revenues is auxiliary, so no decision or gate changes.

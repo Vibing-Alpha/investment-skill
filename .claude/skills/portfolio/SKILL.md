@@ -190,114 +190,83 @@ Extract:
   the broker and the data vendor disagree on a symbol (ADR depositary
   changes); Step 4 feeds the vendor side to the price fetch
 
-## Step 2: Compile Principles
+## Step 2: Compile Policy
 
-Read `<captured-abs-ROOT>/strategy.yaml`. Extract the `principles:` field.
+Hard constraints come from `strategy.yaml`'s **`risk:` block**, projected by
+code. They are NOT extracted from the prose of `principles` — that extraction
+was the F4 fail-open: a value written under `risk:` was never read, the hash
+covered only `principles`, so an edit produced a cache hit and the decision log
+kept attesting the superseded policy.
 
-**If `strategy.yaml` exists and has `principles:`:**
-1. Compute hash of the current principles list (pipe via stdin to
-   avoid shell-quoting issues with special characters):
-   ```bash
-   cd "<captured-abs-ROOT>"
-   PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-   "$PYBIN" -c "
-   import hashlib, json, sys, yaml
-   sys.stdin.reconfigure(encoding='utf-8')  # Windows cp936: strategy.yaml principles are UTF-8 (e.g. zh-CN) — must match portfolio_log._verify_source_hash's open(encoding='utf-8') or the source_hash diverges
-   data = yaml.safe_load(sys.stdin)
-   principles = data.get('principles', [])
-   print(hashlib.sha256(json.dumps(principles, ensure_ascii=False).encode()).hexdigest())
-   " < strategy.yaml
-   ```
-   Check if `strategy.compiled.yaml` exists and its `source_hash` matches.
-   (NB: `source_hash` covers ONLY `principles` — the identical formula
-   `scripts/portfolio_log._verify_source_hash` re-checks before writing the
-   log, so the two MUST stay in lockstep. `principle_notes` are NOT hashed;
-   their freshness is handled by the content comparison in step 2 below, so a
-   notes-only edit still propagates without touching the hash.)
-2. If hash matches: read cached `hard_constraints`, `soft_principles`,
-   and `principle_notes`. **Cache-hit disclosure (probe-2 A4):** the
-   `source_hash` covers the extraction INPUT (principles), not the
-   extracted constraints — a bad prior extraction persists as long as the
-   principles text is unchanged. So on every cache hit, RELAY the cached
-   constraints to the user in one line (e.g. "使用缓存约束:
-   max_single_position=0.35, min_cash=0.20, max_holdings=8") — and if
-   `hard_constraints` is EMPTY, say explicitly that NO numeric floors
-   will be enforced this run so the user can catch a lost constraint and
-   ask for a recompile. **Notes-freshness guard:** because `source_hash`
-   does NOT cover `principle_notes`, after a hash match ALSO compare
-   `strategy.yaml`'s `principle_notes` against the compiled file's; if they
-   differ in ANY way — missing, empty, OR edited (a `framework` /
-   `fundamental_break_definition` / `conflict_priority` / `leverage_policy`
-   tweak leaves the principles-only hash matching) — treat the cache as STALE
-   and recompile (Step 3 path). Otherwise the load-bearing notes silently
-   arrive stale or empty.
-3. If hash mismatches or file missing:
-   a. Parse each principle — identify quantifiable constraints
-      (numbers, percentages, absolute limits).
-   b. Extract hard constraints using the canonical keys from
-      `rules/portfolio-safety.md`: `max_single_position`, `max_sector`,
-      `min_cash`, `max_holdings`.
-   c. If any hard constraints were extracted, present them to the user
-      for confirmation. If none extracted, skip confirmation.
-   d. Normalize percent-point input to decimal fraction (see
-      "Constraint Normalization" below), then write
-      `strategy.compiled.yaml` with `source_hash`, `hard_constraints`,
-      `soft_principles`, and `principle_notes` (copy the notes block
-      verbatim from `strategy.yaml` — do NOT drop it; the position-action
-      principle (currently #3) and others reference it via "见附注", and
-      Step 5 injects it).
-
-**If `strategy.yaml` is missing or has no `principles:`:**
-- Check if `strategy.yaml` has a `risk:` section (backward compat):
-  map `risk.max_single_position` → `max_single_position`, etc.
-- Otherwise use defaults from `rules/portfolio-safety.md`.
-- Default principles produce 0 hard constraints — skip confirmation.
-- Apply the same normalization before writing (backward-compat `risk:`
-  values may be in percent-point form).
-- **Always write `strategy.compiled.yaml`** (even with empty
-  `hard_constraints: {}`), so validate.py's `--constraints` flag
-  always has a valid file to read.
-
-### Constraint Normalization
-
-When compiling hard_constraints, normalize percent-point input to
-decimal fraction before writing `strategy.compiled.yaml`. The canonical
-format per `rules/portfolio-safety.md` is `[0.0, 1.0]` decimal. Accept
-either decimal (`0.35`) or percent-point (`35`) input for ergonomics;
-the compiled file MUST be decimal.
-
-Use `scripts.cli_utils.normalize_percent_fraction` (Task 0.1) for the
-actual coercion. Its canonical rules are:
-- `None` → `None` (skip)
-- `0.0 ≤ value ≤ 1.0` → returned unchanged
-- `1.0 < value ≤ 100.0` → divided by 100
-- otherwise → raise `ValueError`
-
-Apply the helper only to fraction-typed keys (`max_single_position`,
-`max_sector`, `min_cash`). `max_holdings` is an integer count and must
-pass through untouched.
-
-Example compile snippet:
-
-```python
-from scripts.cli_utils import normalize_percent_fraction
-
-FRACTION_KEYS = {"max_single_position", "max_sector", "min_cash"}
-
-def _compile_hard_constraints(raw):
-    """Normalize percent-point -> decimal for the compiled file."""
-    out = {}
-    for k, v in raw.items():
-        out[k] = normalize_percent_fraction(v) if k in FRACTION_KEYS else v
-    return out
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.compile_strategy \
+  --strategy strategy.yaml \
+  --output   strategy.compiled.yaml
+echo "COMPILE_EXIT=$?"
 ```
 
-Why normalize at compile and not at validate time: the compiled file is
-the single source of truth that downstream consumers (`validate.py`,
-`portfolio_log`, audit readers) load. Normalizing once here ensures
-every consumer sees `0.35`, not `35`. `validate.py` still keeps a
-fail-closed guard that rejects values `> 1.0` as belt-and-suspenders,
-but it is not the primary coercion point.
+**There is no cache-hit branch.** The compiler re-derives and atomically
+rewrites on every run, so a hand-edited or stale `strategy.compiled.yaml`
+cannot survive into a decision. Do not add one back.
+
+Branch on the printed `COMPILE_EXIT`:
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| `0` | compiled and written | continue below |
+| `1` | the configuration is INVALID | **STOP.** Show the compiler's stderr to the user and run nothing else. A malformed `principles:` or `risk:` block is a setup error, not a state to compile around — and `config_gate` validates neither, so this is the only gate on it |
+
+**On exit 0, READ `<captured-abs-ROOT>/strategy.compiled.yaml` now.** The
+compiler writes it SILENTLY — it prints nothing on a normal run — so nothing
+else in this skill puts the compiled policy in front of you. Its
+`hard_constraints`, `soft_principles` and `principle_notes` are exactly what
+Step 5 items 2–4 inject into the decision; without this read the disclosure
+below is impossible and decisions are authored with NO principles and NO notes,
+while `portfolio_log` still attests them. (An earlier revision lost this read
+when the cache-hit branch that used to carry it was deleted.)
+
+**Then RELAY the compiled constraints to the user, every run, in one line** —
+e.g. `本轮生效约束: max_single_position=0.35`. If `hard_constraints` is EMPTY,
+say explicitly that **no numeric floors will be enforced this run**, so a lost
+constraint is visible rather than silent. This disclosure replaces the old
+extraction confirmation: there is no longer a guess to confirm, but the
+operator still needs to see what is actually armed.
+
+**Nothing else to do.** The compiler emits a COMPLETE policy on every path:
+when `strategy.yaml` has no `principles:`, it compiles the canonical defaults
+itself and says so on stderr. Do NOT hand-write or patch
+`strategy.compiled.yaml` — earlier revisions had orchestration repair the file
+here, which left the shipped configuration misreporting its own policy and
+silently disabled citation-range validation in the decision log.
+
+### What the compiler does
+
+- `hard_constraints` is a pure projection of `risk:` — the three ARMABLE
+  canonical keys from `rules/portfolio-safety.md` (`max_single_position`,
+  `min_cash`, `max_holdings`) and nothing else. An unknown key inside `risk:`
+  is REFUSED, not dropped: dropping it is F4's exact signature, where the
+  constraint the operator intended never binds. The fourth canonical key,
+  `max_sector`, is refused for the opposite reason — sector lookup is
+  unimplemented, so `validate.py` fails closed and every run would refuse;
+  the compiler says so and tells the operator to delete the line.
+- Percent-point input is coerced to decimal via
+  `scripts.cli_utils.normalize_percent_fraction`, so `35` becomes `0.35` and a
+  human number cannot arm a 3500% cap. Applied only to the three fraction keys
+  — `max_holdings` is an integer count and passes through untouched
+  (`rules/units.md`).
+- `principles` → `soft_principles` and `principle_notes` are copied
+  **verbatim**. Do not drop the notes: the position-action principle
+  (currently #3) and others reference them via "见附注", and Step 5 injects
+  them.
+- `source_hash` covers `principles` + `principle_notes` + `risk` — every input
+  that can change what is enforced or what authoring is told. Absent and
+  present-null normalize alike, so the two spellings of "not configured" do not
+  force a spurious recompile.
+- The write is atomic (`os.replace`), so a refusal or a crash leaves the
+  previous policy intact rather than a truncated file every consumer refuses.
+
 
 ## Step 3: Classify each ticker (delta-era staleness)
 
@@ -585,12 +554,15 @@ Assemble the full context and reason through the decision framework:
    explicitly reconcile it (keep / cancel / supersede) in its rationale** —
    the log writer attaches the order snapshot to the decision and warns on
    direction conflicts (e.g. `hold` beside a full-size open sell).
-2. Hard constraints (from compiled principles)
+2. Hard constraints — the compiled `hard_constraints`, a projection of
+   `strategy.yaml`'s `risk:` block (NOT extracted from principle prose)
 3. Soft principles (numbered #1–#N, from compiled `soft_principles` — injected verbatim)
 4. Principle notes (from compiled `principle_notes` — injected verbatim):
    `framework` (总纲: 基本面选股 / 技术面择时 — frames HOW to read #1–#N),
    `fundamental_break_definition` (the ONLY mandatory-exit trigger, cited via "见附注" by the position-action principle, currently #3),
    `conflict_priority`, `leverage_policy`. Do NOT omit — these are load-bearing.
+   Items 2–4 all come from the `strategy.compiled.yaml` you read in Step 2; if
+   you did not read it, go back and read it before authoring anything.
 5. Macro snapshot (from Step 4)
 6. Per-ticker data (BQ summary + thesis, from Step 3)
 7. Current prices + run-day technical indicators (`ticker_prices` and

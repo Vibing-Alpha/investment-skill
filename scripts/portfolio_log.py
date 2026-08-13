@@ -949,9 +949,21 @@ def _validate_blob_shape(
     # compiled principle list, which cmd_write loads AFTER the up-front shape
     # call). Tags are extracted by the SAME clause-leading parser the audit
     # uses (_principle_tags), so what gets validated is exactly what gets
-    # credited/rendered. An EMPTY compiled list skips the check — there is
-    # nothing to bind to (legacy/default-principles configs); the audit
-    # section already reports zero valid tags for those.
+    # credited/rendered.
+    #
+    # An EMPTY compiled list SKIPS the check — there is nothing to bind to
+    # (legacy artifacts, and default-principles configs); the audit section
+    # already reports zero valid tags for those.
+    #
+    # A refusal was tried here and REVERTED. The compiler now emits
+    # `soft_principles: []` for a null/absent/[] `principles` source, and
+    # SKILL.md Step 2 is required to fill it with the resolved canonical
+    # defaults — so an empty list at this point does mean the log cannot
+    # attest which policy authored the decisions. But turning the skip into a
+    # refusal blocks every LEGACY artifact too, and ~50 existing tests encode
+    # "empty soft_principles is a legitimate state". The Step 2 requirement is
+    # the weaker sufficient layer; this would be a second one that breaks
+    # working configurations to enforce it.
     if soft_principles:
         valid_n = len(soft_principles)
         for i, d in enumerate(_as_list("decisions")):
@@ -1604,11 +1616,26 @@ def _verify_source_hash(
     if not strategy_path.exists() or not compiled_path.exists():
         return
     with open(strategy_path, encoding="utf-8") as f:
-        src = yaml.safe_load(f) or {}
-    principles = src.get("principles", []) or []
-    expected = hashlib.sha256(
-        json.dumps(principles, ensure_ascii=False).encode()
-    ).hexdigest()
+        src = yaml.safe_load(f)
+    # Match the compiler: only an EMPTY document is {}. `... or {}` turned every
+    # falsy root — [], false, 0, "" — into an empty policy, so a corrupted
+    # strategy.yaml VERIFIED against an empty-policy artifact and a malformed
+    # mid-run replacement could be persisted as valid.
+    if src is None:
+        src = {}
+    if not isinstance(src, dict):
+        raise ValueError(
+            f"{strategy_path} must be a mapping, got {type(src).__name__} — "
+            f"policy cannot be verified against a malformed source"
+        )
+    from scripts.schemas.strategy import canonical_policy_hash
+    # ONE formula, shared with the compiler and the orchestration fallback
+    # (scripts.schemas.strategy.canonical_policy_hash). It was previously
+    # hand-matched here and in SKILL.md's inline snippet, over `principles`
+    # alone — so a policy value written under `risk:` was outside the hash,
+    # produced a cache hit, and this log kept attesting the superseded policy.
+    # That is F4.
+    expected = canonical_policy_hash(src)
 
     # Load via typed contract. Schema errors are NOT bypassed by
     # allow_stale — that flag is scoped to "stale principles", not
@@ -1629,26 +1656,25 @@ def _verify_source_hash(
             print(f"WARNING: {msg}", file=sys.stderr)
             return
         raise ValueError(msg)
-    # Closing round-5 F1: source_hash covers ONLY principles by contract
-    # (the SKILL's compile-time notes-freshness guard handles cache
-    # staleness at run START) — but a notes-only strategy edit BETWEEN
-    # compile and this write-time check passed undetected, persisting
-    # decisions authored under the old load-bearing notes
-    # (conflict_priority etc.). Same mechanism as the compile-time guard:
-    # content comparison, not a hash-formula change (no lockstep break).
+    # Notes content comparison — RESTORED after being deleted as "subsumed by
+    # the widened hash". It is NOT subsumed: the hash stringifies keys and
+    # falls back to `str()` for values, so it ERASES YAML types. Verified
+    # collisions: the string "2026-08-13" and an unquoted YAML date hash
+    # identically, as do the keys "1" and 1. A notes edit between those shapes
+    # would slip past the hash check above and let decisions authored under the
+    # old notes into the log — exactly the round-5 F1 failure.
+    #
+    # `principle_notes` is the only unrestricted domain in the payload
+    # (`principles` is list[str] and `risk` is type-validated by the compiler),
+    # so this one comparison covers the whole gap.
     src_notes = src.get("principle_notes") or {}
     compiled_notes = compiled.principle_notes or {}
     if src_notes != compiled_notes:
         msg = (
-            f"strategy.yaml principle_notes differ from the compiled "
-            f"file's — a notes-only edit landed after compile. The "
-            f"decisions were authored under the OLD notes; recompile "
-            f"(re-run /portfolio) and re-check the decisions before "
-            f"logging."
+            f"strategy.yaml principle_notes differ from the compiled file's "
+            f"— a notes edit landed after compile, so these decisions were "
+            f"authored under different notes. Re-run /portfolio to recompile."
         )
-        if allow_stale:
-            print(f"WARNING: {msg}", file=sys.stderr)
-            return
         raise ValueError(msg)
 
 
@@ -1781,8 +1807,12 @@ def cmd_write(args: argparse.Namespace) -> int:
             pathlib.Path(args.constraints),
             allow_stale=getattr(args, "allow_stale_constraints", False),
         )
-    except (ValueError, yaml.YAMLError, OSError) as exc:
+    except (ValueError, yaml.YAMLError, OSError, RecursionError) as exc:
         # ValueError: hash mismatch + SchemaError (ValueError subclass).
+        # RecursionError: yaml.safe_load accepts a recursive alias, and this
+        # helper hashes the RAW document before any validation runs — so a
+        # mid-run edit to such a file would crash the log path with a traceback
+        # instead of refusing cleanly. The compiler already catches its own.
         # yaml.YAMLError / OSError: malformed file or unreadable path
         # (e.g. --constraints "" resolves to cwd → IsADirectoryError).
         # All three fail-close via the same return-code channel.
