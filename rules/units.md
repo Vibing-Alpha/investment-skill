@@ -88,7 +88,7 @@ These fields MUST have the stated unit across producer + consumer:
 | `adr_units` | ADR units (count) | adr/correct | adr/correct internal |
 | `adr_ratio` | ordinary shares per ADR | adr/correct | prompts (informational) |
 | `us_5y`, `us_10y`, `spread_10y_5y` | percent (e.g. 4.5) | macro | rates_fallback, thesis |
-| `max_single_position`, `max_sector`, `min_cash` | decimal [0, 1] | strategy.compiled.yaml | validate, portfolio |
+| `max_single_position`, `min_cash` | decimal [0, 1] | strategy.compiled.yaml | validate, portfolio |
 
 ## DL3c post-FX-conversion convention
 

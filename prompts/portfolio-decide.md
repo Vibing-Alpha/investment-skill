@@ -484,9 +484,49 @@ After per-ticker analysis:
    would breach concentration limits, which gets priority? Explain
    your reasoning.
 4. **Order design** — For each action, design a specific order:
-   - Type: market, limit, or stop
-   - Shares: how many (consider position sizing relative to conviction)
-   - Price: for limit/stop orders, at what level and why
+   - Type: one of `gtc`, `limit`, `loc`, `market`, `moc`, `stop`,
+     `stop_limit`, `stop_market` (the full schema vocabulary — see the
+     `orders_proposed` example below)
+   - Shares: how many (consider position sizing relative to conviction).
+     Integer or fractional — both are schema-valid
+   - Price: which field to use is fixed per type. **Authoring contract for
+     PROPOSED orders** — this says what to EMIT, not what the validator
+     accepts (it tolerates more shapes than a prompt should produce):
+     - `limit` / `loc` / `gtc` → `limit_price`
+     - `stop` / `stop_market` → `stop_price` (a TRIGGER; execution is at market)
+     - `stop_limit` → **both** `stop_price` and `limit_price`, in the
+       relationship that is MARKETABLE WHEN THE TRIGGER FIRES, which is
+       direction-dependent: on a **sell** the trigger fires as price falls, so
+       `limit_price` must be **≤** `stop_price`; on a **buy** it fires as price
+       rises, so `limit_price` must be **≥** `stop_price`. The reverse shape is
+       not an order that never fills — it triggers and then RESTS until price
+       comes back to the limit, if it ever does — but it is not the protection
+       or the entry you intended, so do not author it.
+       ⚠ Even the correct relationship does not guarantee a fill: price can gap
+       straight through the limit and the order rests. Nothing downstream models
+       that — the projection has no way to express "this order does not fill",
+       so a stop-limit the share ledger has room for is costed at its projected
+       price with its shares moved as if it had filled
+       (`rules/portfolio-safety.md`, "Known limitation").
+       So do not lean on a stop-limit where a guaranteed exit is what the
+       decision needs: a plain `stop` executes at market once triggered.
+     - `market` / `moc` → no price field required **when a usable live quote
+       exists for the ticker**; `est_price` is an estimate, never a
+       commitment. With no quote, an uncapped buy is unprojectable and is
+       refused as `missing_price_order`, and an `est_price` does NOT rescue
+       it.
+
+     ⚠ **Do not propose a `buy` or `add` at all on a ticker whose quote
+     failed this run** — no order type rescues it. No quote means no
+     `ticker_price_structure`, and the decision log refuses an entry that
+     has none, so there is no route to a logged entry. Do not reason from
+     which types validation happens to accept; the entry cannot be logged
+     either way.
+
+     Do **not** emit the legacy `price` field on a proposed order: the code
+     reads it as an alternative ceiling for limit-honouring types, but it is
+     documented as the broker / open-order shape and using it here would be
+     ambiguous. State the level and why, whichever field you use.
    - Duration: GTC or day order
 
 ### Phase 4: Anti-Hallucination Compliance
@@ -584,6 +624,8 @@ Schema (write as JSON):
       "type": "market | limit | stop | stop_limit | stop_market | moc | loc | gtc",
       "shares": 1000,
       "limit_price": null,
+      "stop_price": null,
+      "est_price": null,
       "duration": "gtc | day",
       "linked_decision": "NOK.exit",
       "execution_note": "Sequencing or tactical note. REQUIRED on ONE order of any set whose buys are funded by a proposed market SELL in the same set (per SET, not per buy — cash is fungible): 'Submit the NOK sell first and wait for a confirmed fill.'"
@@ -608,6 +650,11 @@ Schema (write as JSON):
   "notes": ["Structural observations about the portfolio state (cash level, sector concentration, earnings density, etc.)."]
 }
 ```
+
+⚠ The `orders_proposed` object above is a **shape template**: it lists every
+price field the contract permits, not the fields any one order carries. Which
+one to fill is fixed by the order's type — see the authoring contract in Phase 3
+item 4 ("Order design"). Leave the others null.
 
 Requirements:
 - Every ticker in holdings + watchlist MUST appear in `decisions[]`

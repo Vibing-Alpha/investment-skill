@@ -75,9 +75,12 @@ _FRACTION_KEYS = frozenset({"max_single_position", "max_sector", "min_cash"})
 # Keep this list and the rule file's prose in step; the rule file says the code
 # is authoritative so a drift is a doc fix, not an enforcement question.
 _DEFAULT_PRINCIPLES = (
+    # "all buys" / "all stops", NOT "all limit buys" / "all stop losses":
+    # validate.py's extreme_down is proposed market sells + EVERY proposed and
+    # open buy regardless of type + stop sells. The narrower wording told the
+    # decision agent a stop_limit or gtc buy was out of scope when it is not.
     "After any proposed trade executes, the portfolio must survive an "
-    "extreme scenario where all limit buys fill and all stop losses "
-    "trigger.",
+    "extreme scenario where all buys fill and all stops trigger.",
     "Weak technicals do not disqualify a fundamentally strong company, "
     "but require a larger margin of safety for entry.",
     # No numeral here: the window is configured as orders.earnings_window_days

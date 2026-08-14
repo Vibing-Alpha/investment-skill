@@ -1313,17 +1313,24 @@ def validate_portfolio(
     stress_passed = all(s["passed"] for s in stress_test.values())
 
     # Feedback 2026-06-11 #3c: with no open orders the all_buy/extreme_down/
-    # defensive scenarios collapse into each other (field run: all_buy ==
-    # extreme_down == 36,209.72, PASS reported on a vacuous stress). Say so
-    # instead of silently reporting strong-looking coverage.
+    # defensive scenarios cover only what THIS run proposes, so a PASS can
+    # look stronger than it is (field run: all_buy == extreme_down ==
+    # 36,209.72). Say so instead of silently reporting strong-looking
+    # coverage.
+    #
+    # The message states COVERAGE, not equalities. An earlier wording claimed
+    # "extreme_down == all_buy, defensive == current cash", which holds only
+    # when the proposed set has no stop sells — with one, a probe gave
+    # all_buy=-400 / extreme_down=0 / defensive=400 against cash 0, and this
+    # text is relayed VERBATIM to the user by the /portfolio skill.
     warnings: List[str] = []
     if not open_orders:
         warnings.append(
-            "open_orders is empty/absent in portfolio-state.yaml — stress "
-            "scenarios all_buy/extreme_down/defensive degenerate to "
-            "proposed-orders-only (extreme_down == all_buy, defensive == "
-            "current cash). Sync broker open orders into the state file "
-            "for meaningful stress coverage."
+            "open_orders is empty/absent in portfolio-state.yaml — the "
+            "all_buy/extreme_down/defensive scenarios therefore stress only "
+            "the orders proposed this run; no resting broker order is "
+            "included in any of them. Sync broker open orders into the state "
+            "file for meaningful stress coverage."
         )
 
     # Probe-2 A1 + round-24 F1 — policy floors at the ALL-FILLS state.

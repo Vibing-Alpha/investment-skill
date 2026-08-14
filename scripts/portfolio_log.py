@@ -1903,7 +1903,7 @@ def cmd_write(args: argparse.Namespace) -> int:
         )
         print(
             "  Positions without a share count cannot be valued. Add the "
-            "'shares' field (integer) or remove the ticker from "
+            "'shares' field (positive number) or remove the ticker from "
             "portfolio-state.yaml, then re-run.",
             file=sys.stderr,
         )

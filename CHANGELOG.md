@@ -3,6 +3,15 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.11.0 — 2026-08-14
+
+- /portfolio: order recommendations may now use the full order vocabulary (gtc, limit, loc, market, moc, stop, stop_limit, stop_market) and fractional shares — the decision prompt previously allowed only market/limit/stop, which was narrower than the system has accepted for some time. Each type now states which price field it carries.
+- /portfolio: a run STOPS when a HELD position has no usable price, instead of quietly proceeding on a partial book. Previously nothing refused this before the recommendations reached you.
+- /portfolio: no buy/add is proposed on a ticker whose price fetch failed — such an order could pass validation and then leave the run unable to write its decision log.
+- /portfolio: a stale validator result from an earlier run can no longer be read as this run's; only (clean exit + this run's own artifact + passed) is accepted.
+- /portfolio: the stress-test warning shown when open_orders is empty no longer claims scenario equalities that are false whenever a stop sell is proposed; it now states what was actually covered.
+- Docs: the stress-scenario descriptions, order/price rules and default risk principle now match validate.py exactly (share-ledger caps, stop-limit non-fill, stop SELLS in Defensive). The 2026-04-07 portfolio design spec is marked SUPERSEDED — it described a constraint-extraction and caching architecture that no longer exists.
+
 ## v1.10.0 — 2026-08-13
 
 - ACTION REQUIRED for existing installs — if your `strategy.yaml` has `risk.cash_target` or `risk.max_sector`, delete those lines. `/portfolio` now stops with a message naming the key: neither ever enforced anything (`cash_target` had no consumer; `max_sector` needs sector lookup that is not implemented, so it would fail closed on every run).

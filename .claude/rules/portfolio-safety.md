@@ -24,7 +24,7 @@ belt-and-suspenders layer: any value outside [0, 1] surfaces as
 ## Default principles (when user has no `principles:` field)
 
 Three layers (full text at canonical source):
-1. **Risk floor** — portfolio survives extreme scenario (all limits fill + all stops trigger)
+1. **Risk floor** — portfolio survives extreme scenario (all buys fill + all stops trigger — any type, not just limits)
 2. **Investment discipline** — weak technicals ≠ disqualify, but raise margin; within the configured earnings window (`orders.earnings_window_days`) no chase; thesis falsification → exit; hard-constraint breach → market sell; conviction → market order
 3. **Portfolio management** — rising risk → raise cash; excess cash → deploy by CE rank; concentrate in edge sectors
 
@@ -66,8 +66,35 @@ orders (IBKR MCP = auth only). Three invariants:
 - **Never** describe a proposed order as submitted/placed/executed; never fill
   `execution_outcomes` / `user_confirmation.status` — the user does, after acting.
 - Editing `portfolio-state.yaml`: show a before/after **diff** → user confirms
-  THAT diff → keep the prior version → re-run `config_gate check --portfolio`
-  (structure is validated, not correctness — a mistyped share count passes).
+  THAT diff (**the automatic `nav_peak` ratchet is exempt from CONFIRMATION —
+  #9 puts refresh on the system, so it is DISCLOSED and applied without asking —
+  but not exempt from deferral**) →
+  **DEFER the write until after the decision log is written** → keep the prior
+  version → write → re-run `config_gate check --portfolio` (structure is
+  validated, not correctness — a mistyped share count passes; **restore the kept
+  version if it fails** — stopping alone would leave a malformed state file to
+  poison the next run). The deferral
+  covers ALL sanctioned writers (nav_peak ratchet, peak reconfirmation, fill
+  update): the validator and the authoring seal both bind a `state_file_sha256`
+  and `portfolio_log` refuses against both, so a mid-run write costs the run its
+  log — but ONLY for a fill THIS run's own recommendations caused; any other
+  (completed before the run, or a working order filling mid-run) is synced
+  BEFORE analysis and the run restarted, as is a log that succeeded only with
+  the "no seal (legacy flow)" warning,
+  or the log durably records recommendations made against stale holdings.
+  If logging fails, fix what the message names and retry — **never write state to
+  get past a refusal** (the first error cannot prove the file is unchanged; most
+  checks precede the hash comparisons). An unrepairable refusal ends the run with
+  no log and no write. Combine multiple pending changes into ONE write; if the post-write check fails,
+  restore the kept version and stop — the change is UNRESOLVED: a **fill** needs
+  syncing before the next analysis (the broker moved, the file did not), while a
+  **ratchet/reconfirmation** moved nothing (nothing recovers the ratchet — the
+  next run recomputes from its own NAV; the reconfirmation is asked again). A refusal whose remedy requires EDITING state (e.g. absent
+  `open_orders`) also ends the run — make that edit as a pre-analysis sync and
+  start over. Residual:
+  a change lost to that, or to a session ending first, is re-established next run
+  — a fill is re-reported (ONLY then — an unreported fill is undetectable, since
+  the log holds a proposed order and a fill is never inferred); a missed ratchet is simply not written.
 - A proposed buy may be funded by a proposed **market sell** in the same set
   (validator credits it). So when the set depends on those proceeds, ONE
   sequencing `execution_note` must accompany it — on any ONE of its orders —

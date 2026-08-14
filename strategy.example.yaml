@@ -21,7 +21,6 @@ principles:
 mandate:
   style: concentrated_growth      # concentrated_growth | diversified_value | balanced
   edge: [AI, semiconductors, space]
-  return_target: "50%+ annual"
 
 # BQ scoring dimension weights (must sum to 1.0)
 # Remove this section to use defaults: fundamental=0.35, forward=0.35, industry=0.30
@@ -34,14 +33,6 @@ scoring:
 # Risk limits
 risk:
   max_single_position: 0.20       # single stock cap
-
-# Exit rules
-exit:
-  hard_triggers:
-    - thesis_break
-    - valuation_exhausted
-    - risk_escalation
-  stop_loss_atr_multiplier: 2.0
 
 # Order preferences
 orders:

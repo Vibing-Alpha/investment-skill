@@ -20,7 +20,7 @@ ever disagree, the code is authoritative and this section is the fix.
 ### Layer 1 — Risk Floor
 
 - After any proposed trade executes, the portfolio must survive an
-  extreme scenario where all limit buys fill and all stop losses trigger.
+  extreme scenario where all buys fill and all stops trigger.
 
 ### Layer 2 — Investment Discipline
 
@@ -81,12 +81,25 @@ compile-stage coercion:
   REFUSES the key outright (exit 1), no compiled artifact can carry it.
   This validator branch is the belt-and-suspenders layer for a
   hand-written `--constraints` file, not a reachable production state.
-- **Order vocabulary** (HIGH-11/12): `action ∈ {buy, sell}`,
-  `type ∈ {market, limit, stop}`, `shares > 0` integer. Whitespace,
-  case variants, non-int/float shares are rejected strictly via
-  `invalid_action` / `invalid_type` / `invalid_shares`.
-- **Missing order price** (HIGH-13): an order with no `est_price` /
-  `price` and no `ticker_prices` entry emits `missing_price_order`.
+- **Order vocabulary** (HIGH-11/12): `action ∈ {buy, sell}`;
+  `type ∈ {gtc, limit, loc, market, moc, stop, stop_limit, stop_market}`;
+  `shares` is an integer **or float** satisfying `0 < shares < 1e15`
+  (fractional shares are a real broker feature and schema-valid).
+  Booleans, non-finite values, whitespace / case variants and other types
+  are rejected strictly via `invalid_action` / `invalid_type` /
+  `invalid_shares`. ⚠ A locally-narrowed `{market, limit, stop}` set was
+  itself the HIGH defect; do not reintroduce it.
+- **Missing order price** (HIGH-13): with no usable live quote for the
+  ticker, an order is refused unless it states a usable price in a field
+  its OWN TYPE consults — `est_price` / `limit_price` / `price` on any
+  type, plus `stop_price` only on a `stop*` type. Given such a field it
+  splits by DIRECTION: a **buy** is still refused unless it is
+  limit-honouring (`limit` / `loc` / `stop_limit` / `gtc`) **and** states a
+  ceiling in `limit_price` or `price` (an `est_price` is an estimate, not a
+  ceiling); a **sell** is refused only when its type is `market`. So a
+  `moc` / `limit` / `loc` / `gtc` SELL carrying ONLY `stop_price` is
+  refused — a non-stop type never reads that field. Refusal emits
+  `missing_price_order`.
 - **Missing holding price** (HIGH-14): when any ratio constraint is
   active (`min_cash`, `max_single_position`, `max_sector`), holdings
   without a price emit `missing_price` and fail the validation.
@@ -97,19 +110,46 @@ The stress test runs unconditionally, even with zero hard constraints.
 It verifies that the proposed order set does not produce negative cash
 under 5 scenarios:
 
-1. **Base** — only market orders execute
-2. **All-buy** — proposed market sells execute, and all proposed +
-   existing limit buys fill
-3. **All-sell** — all proposed + existing limit sells fill
+1. **Base** — only proposed market orders execute
+2. **All-buy** — proposed market sells execute, plus **all** proposed and
+   open buys fill — no type restriction: a `stop_limit` or `gtc` buy is in
+   scope
+3. **All-sell** — **all** proposed and open sells fill (again, any type)
 4. **Extreme-down** — proposed market sells execute, all buys fill + all
    stops trigger (uses crashed account value as denominator for
    position-% checks)
-5. **Defensive** — all stops trigger, no buys fill
+5. **Defensive** — all stop SELLS trigger, no buys fill. "Stops" here and
+   in Extreme-down means stop orders on the sell side only: a resting
+   `stop_buy` is collected as a buy, so it fires in All-buy and
+   Extreme-down but NOT in Defensive (verified: cash 100 with a resting
+   2-share `stop_buy` at 10 leaves Defensive at 100, while All-buy and
+   Extreme-down go to 80)
+
+⚠ On the SELL side, "all" is capped cumulatively by the share ledger:
+orders are applied in sequence and each is TRIMMED to the shares the
+position still holds — so one that meets a partly-exhausted position
+contributes only the remainder, and one that finds nothing left
+contributes nothing. It is a partial cap, not a skip. Verified against a
+10-share position with two resting 7-share `stop_limit` sells projected
+at $89: `all_sell` / `extreme_down` / `defensive` each return $890 —
+(7 + 3) × 89, not (7 + 7) × 89 = $1,246, and not 7 × 89 = $623 as a
+skip-the-whole-order rule would give. Buys have no such cap. This is a
+ledger limit, not a fill model; see "Known limitation" below for what the
+projection still cannot express.
+
+The five descriptions above assume each order's side is unambiguous. A
+hand-synced entry whose `action` and `type` disagree (`action: buy` with
+`type: limit_sell`) matches BOTH classifiers, is accepted, and is applied
+as a BUY by whichever leg selects it — so `all_sell` SPENDS cash on it
+(verified: 10 shares held, cash 100, such an order for 2 @ 10 → `all_sell`
+`cash_after` 80, where a sell fill would give 120).
 
 Proposed **market** orders in BOTH directions are part of the
-immediately-executed state that every scenario builds on — that is what
-"only market orders execute" means at Base, and scenarios 2 and 4 build on
-the same state rather than discarding its sell leg. What those scenarios
+immediately-executed state that **Base, All-buy and Extreme-down** build on
+— that is what "only market orders execute" means at Base, and scenarios 2
+and 4 build on the same state rather than discarding its sell leg. NOT
+every scenario: All-sell is all proposed and open sells with no proposed
+market buy, and Defensive is stops only with no buys at all. What those scenarios
 stress is the **contingent** orders (limit / stop / close-auction), which
 may or may not fill. A WORKING (already-resting broker) market sell is
 excluded: it may be halted, so it is not available cash.
@@ -154,10 +194,19 @@ estimate produced false refusals plus a `decisions.md` line reading
 contract and is ignored.
 
 Known limitation, unchanged by the above: the projection has no way to
-express "this order does not fill". A stop-limit sell whose floor sits
-above its trigger is credited at the trigger and its shares removed,
-where in reality it would rest unfilled. Fixing that needs a non-fill
-concept in the projection, not a price rule.
+express "this order does not fill", so a stop-limit the share ledger has
+room for is costed at its projected price with its shares moved as if it
+had filled. (Running out of shares DOES stop it — a second stop-limit
+sell on an exhausted position is simply not projected — but that is the
+ledger, not a fill model.) Two distinct
+ways that is wrong, and the limitation is not confined to the first:
+an inverted shape (a sell whose limit sits ABOVE its trigger, a buy whose
+limit sits below) is not marketable when the trigger fires — it rests
+until price returns to the limit, if ever; and even a correctly ordered
+stop-limit rests unfilled when price gaps through its limit. Fixing
+either needs a non-fill concept in the projection, not a price rule —
+so the control on the inverted shape lives in the authoring prompt
+(`prompts/portfolio-decide.md`, order design), not here.
 
 Sell-side stop projections are unchanged — stops use their own price
 field — so the risk-floor scenario keeps its current meaning.
@@ -264,10 +313,54 @@ a recommendation mis-reported as "done" makes the user think they hold a positio
 don't (or vice-versa) — corrupting cash, weights, and every later decision.
 
 **2. Manual holdings-update protocol.** Editing `portfolio-state.yaml` is the only
-holdings mutation, and it is user-confirmed. Before writing it the agent MUST: (a) show
+holdings mutation, and — except the automatic ratchet noted below — it is
+user-confirmed — **except the automatic `nav_peak`
+ratchet**, which principle #9 assigns to the system ("刷新职责在系统") and which
+therefore owes DISCLOSURE (show the computation) rather than confirmation. The
+deferral rule below applies to it exactly like the others; only the confirmation
+step does not. Before writing it the agent MUST: (a) show
 a before/after **diff** of the specific fields changing; (b) get the user to confirm
-**that diff** (not a vague "looks good"); (c) keep the prior version (so a wrong edit is
-reversible); (d) re-run `python3 -m scripts.config_gate check --portfolio` after writing.
+**that diff** (not a vague "looks good") — **for the automatic ratchet, (b) is
+DISCLOSURE of the computation instead, never a pause for agreement**; (c) keep the prior version (so a wrong edit is
+reversible); (d) re-run `python3 -m scripts.config_gate check --portfolio` after writing, restoring the kept prior version if it fails;
+**(e) DEFER the write itself until AFTER the decision log is written.** (a)–(b)
+happen while the user is present; (c)–(d) happen last. This applies to every
+sanctioned writer alike — the `nav_peak_usd` ratchet, the peak reconfirmation
+write, and the fill-driven holdings update. Why: the validator binds a
+`state_file_sha256` over `portfolio-state.yaml` and the authoring seal binds the
+same hash, and `portfolio_log write` re-hashes the file and REFUSES against both
+— so a mid-run write silently costs the run its decision log. Deferring costs
+nothing *within* a run: a reported fill MUST be logged after the recommendation
+it followed (the logger builds `portfolio_before` from the state it is handed),
+and this run's OWN ratchet cannot change its own verdict (at a new high the
+drawdown is non-positive against either peak). **Never write state to get past a
+logger refusal:** the first error cannot tell
+you whether the file still matches what the run bound (most checks precede the
+hash comparisons), so a write there can land a stale diff. An unrepairable
+refusal ends the run with no log and no write. **Residual:** a change lost that
+way, or to a session that ends first, is re-established next run — a fill is
+re-reported — **and only then**; nothing detects an unreported one, since the log
+holds a PROPOSED order and a fill is never inferred from it — and a missed ratchet is simply not written; if it was not, an
+observed high is gone should NAV fall first. Multiple pending changes in one run
+(a new high AND a fill) combine into ONE diff and ONE write. If the post-write
+`config_gate` check fails, restore the kept prior version and stop — the change
+is then UNRESOLVED, not cancelled, and which part matters: a **fill** means the
+broker moved though the file did not (sync it before the next analysis), while a
+**ratchet or reconfirmation** moved nothing at the broker (nothing recovers the
+ratchet — the next run recomputes from its own NAV, so a fallen NAV loses the
+high; the reconfirmation is simply asked again).
+A refusal whose remedy REQUIRES editing state — an absent `open_orders` key, for
+instance — likewise ends the run: make that edit as a pre-analysis sync and start
+over, never mid-run.
+⚠ **Deferral covers only a fill THIS run's own recommendations caused.** Any
+other fill — completed before the run started, or a pre-existing working order
+that filled mid-run — must be synced BEFORE analysis and the run restarted.
+Likewise a log that succeeds only with the "no seal (legacy flow)" warning
+proves authoring→validation stability not at all: restart rather than write — deferring it would durably log recommendations authored against
+holdings that were already stale.
+A state-hash mismatch at log time means the file moved mid-run, which the
+single-writer rule forbids: that run cannot be logged and is restarted from the
+beginning, with the pending write NOT applied.
 Why: `config_gate` validates portfolio-state *structure* (shares > 0, cash ≥ 0, shapes)
 but NOT *correctness* — `100` mistyped as `1000` is structurally valid and would silently
 feed every future decision; the diff-confirm + reversibility is the control that fits.

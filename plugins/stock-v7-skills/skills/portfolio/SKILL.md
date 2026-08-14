@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.10.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.11.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -172,20 +172,39 @@ an unresolved prior log; it is the audit chain today's run builds on.
 
 Read `<captured-abs-ROOT>/portfolio-state.yaml` (the project root).
 
-If the file does not exist, ask the user for their current holdings,
-cash balance, and watchlist tickers. Create the file from their response.
+⚠ **First, if the user has already reported a fill that completed BEFORE this
+run** — sync it into the file now, using the SAME protocol Step 9 uses:
+**diff → user confirms → keep the prior file as `.bak` → write → re-run the
+Preflight → restore the `.bak` if it fails**, then stop. Do not skip the backup:
+a malformed write here is not caught by anything later and would strand every
+future run, and "STOP" alone leaves it in place. Everything downstream (macro prices, decisions, sizing, cash
+checks) is derived from what you read here, so authoring against known-stale
+holdings would present actionable recommendations that are wrong. This is the
+ONLY point where a state write precedes the decision log; fills that arise from
+THIS run's recommendations are deferred to Step 9 instead.
 
 Extract:
 - `holdings`: dict of ticker → {shares, cost_basis}
 - `cash`: number
 - `watchlist`: list of tickers
-- `open_orders`: the broker's working GTC orders. **The key itself is
-  REQUIRED** — if it is ABSENT, stop at this step and ask the user to sync
-  their broker's working orders (or confirm there are none, then write
-  `open_orders: []`). An absent key is exactly how a working full-clear GTC
-  sell goes unseen by the decision engine; Step 8 hard-refuses to write the
-  log without the key. Whenever holdings/cash are synced from the broker,
-  the broker's working orders are part of the SAME sync.
+- `open_orders`: the broker's working GTC orders. **Required** — Preflight
+  has already refused an absent key, so it is present here. But Preflight has
+  checked only that the key is PRESENT and that each entry carries a ticker, a
+  string `type`, and positive shares and price. It does **not** check the type
+  vocabulary, and nothing downstream does either: an open order typed
+  `nonsense` passes both Preflight and validation **provided its side is
+  inferable some other way** — it passes with `action: buy` and is refused
+  without it as `unprojectable_open_order`. So what is enforced is a
+  recognizable SIDE, never a type vocabulary — and not even an unambiguous
+  side: a hand-sync typo like `{action: buy, type: limit_sell}` matches BOTH
+  classifiers, is accepted, and is then treated as a BUY wherever a scenario
+  selects it — including `all_sell`, which spends cash on it. Preflight also
+  cannot tell
+  whether the list is COMPLETE or whether it matches the broker. So the sync
+  obligation is unchanged: this must be the broker's full working-order set —
+  whenever holdings/cash are synced from the broker, the working orders are
+  part of the SAME sync. An absent or partial list is exactly how a working
+  full-clear GTC sell goes unseen by the decision engine.
 - `symbol_aliases`: optional `{KEY: {vendor: SYM, broker: SYM}}` map when
   the broker and the data vendor disagree on a symbol (ADR depositary
   changes); Step 4 feeds the vendor side to the price fetch
@@ -215,8 +234,8 @@ Branch on the printed `COMPILE_EXIT`:
 
 | Exit | Meaning | What to do |
 |---|---|---|
-| `0` | compiled and written | continue below |
-| `1` | the configuration is INVALID | **STOP.** Show the compiler's stderr to the user and run nothing else. A malformed `principles:` or `risk:` block is a setup error, not a state to compile around — and `config_gate` validates neither, so this is the only gate on it |
+| `0` | a fresh `strategy.compiled.yaml` was written | continue below |
+| any non-zero | **STOP.** Show the compiler's stderr to the user, run nothing else, and do **not** fall back to a `strategy.compiled.yaml` already on disk — it is a previous run's policy. Do not infer the cause from the number; READ the stderr. The common case is an invalid configuration (a malformed `principles:` or `risk:` block — a setup error, not a state to compile around, and `config_gate` validates neither, so this is the only gate on it), but an unwritable output path exits non-zero with a raw traceback and no amount of editing `strategy.yaml` fixes it, and a bad flag exits from `argparse` before any compiling happens |
 
 **On exit 0, READ `<captured-abs-ROOT>/strategy.compiled.yaml` now.** The
 compiler writes it SILENTLY — it prints nothing on a normal run — so nothing
@@ -426,15 +445,37 @@ in-shell as `$ETDAY` inside EVERY block that touches `reports/portfolio/`
 "today" lands the run in the wrong dir and Step 8 hard-rejects a non-ET
 dir; this derives it correctly everywhere).
 
-If the block exits non-zero (malformed `symbol_aliases` FATAL, or the macro
-fetch itself fails), **STOP** and show the stderr to the user — do not
-proceed to decisions on a partial/unaliased price set.
+A non-zero exit means alias construction, CLI validation, output writing, or an
+unexpected macro error failed: **STOP** and show the stderr to the user.
+Individual market / ticker / rate fetch failures do **NOT** exit non-zero — they
+are recorded in `macro.json` as `FAILED` / `PARTIAL` with null or explicitly
+qualified data and the command exits 0, so **read the artifact before
+proceeding**:
+
+- **Any HELD ticker whose price fails `validate._usable_price` ⇒ STOP.** That
+  predicate, in full: an `int` or `float`, **not** a `bool`, finite if a float,
+  and `0 < price < 1e15`. It is the predicate the ratio math uses, and it
+  deliberately differs from the logger's, which accepts an explicit `0` as a
+  legitimate delisted-at-zero quote. Do not author decisions against a partial
+  book. Downstream refusals exist but land at Step 8 — **after** the user may
+  already have acted on Step 7's recommendations — and the validator's own
+  missing-price gate only arms when a ratio constraint is set.
+- A **watchlist-only** ticker without a price ⇒ continue the run, but say so,
+  and treat ITS indicators and price structure as **unknown** (never neutral).
+  It cannot carry a `buy` / `add` this run, whatever the order type — no
+  quote means no `ticker_price_structure`, and Step 8 refuses an entry
+  without one. Some shapes are stopped earlier, at Step 6, but do not rely
+  on that: the ones that get through leave the run unloggable.
+  (`portfolio-decide.md` states this as an authoring rule.)
+  Regime is NOT affected: `regime_inputs` is built only from the market indices
+  and VIX, so a failed ticker quote must not downgrade macro evidence.
 
 Read the output JSON. This provides:
 - Broad market trend data (SPY, QQQ, ^DJI with MAs)
 - VIX + VIX MA20
 - Interest rates
-- Current prices for all portfolio tickers
+- Current prices for the portfolio tickers whose quote fetch SUCCEEDED — a
+  failed one is null, and null is not neutral (see the STOP above)
 - `ticker_indicators[TICKER]` — run-day technical indicators (RSI, MACD,
   Bollinger, ATR, volume confirmation, RSI divergence), computed fresh this
   run. Authoritative for #2 entry timing and #3/#4 momentum reads (the thesis
@@ -568,6 +609,10 @@ Assemble the full context and reason through the decision framework:
 7. Current prices + run-day technical indicators (`ticker_prices` and
    `ticker_indicators` from macro) — the latter govern the #2 entry-timing
    gate and #3/#4 momentum reads, not the thesis's stale `entry_favorability`.
+   The two are provided INDEPENDENTLY and neither is guaranteed: a price only
+   where that ticker's quote fetch succeeded, indicators only where there was
+   ALSO enough history (a `PASSED` fetch with a short series yields `null`
+   indicators). Carry each absence through as **unknown** — never as neutral.
 8. **Earnings-window soft preference** — `orders.earnings_window_days` from
    `strategy.yaml` (default 7; mark it "defaulted" if the field is absent), and
    each ticker's `next_earnings_date` resolved from the per-ticker thesis/BQ
@@ -650,6 +695,12 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
+# Clear any stale artifact FIRST. Step 8 deliberately KEEPS this file on a
+# refusal, and `scripts.validate` exits 1 WITHOUT writing when its inputs are
+# unreadable — so without this, a run whose validate dies early would send you
+# to read the PREVIOUS run's verdict, possibly a stale PASS. Guarded: an
+# unguarded `rm -f` that itself fails leaves exactly that hazard.
+rm -f "$VALIDATOR_OUTPUT" || { echo "FATAL: cannot clear stale validator output: $VALIDATOR_OUTPUT" >&2; exit 1; }
 
 "$PYBIN" -m scripts.validate \
   --state portfolio-state.yaml \
@@ -662,17 +713,39 @@ VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 Without `--output`, scripts.validate writes to stdout and the JSON is
 lost before Step 8 needs it (codex review 2026-05-22 F7).
 
-**If validation passes** (exit 0): Include stress test results in the output,
+**Do NOT read the exit code as a two-way signal.** The artifact can be written
+*before* an error path, so a non-zero exit does not prove the validator had no
+opinion — and an early input failure exits non-zero having written nothing at
+all. Judge the PAIR (exit code + the artifact this run just wrote):
+
+> **Exactly one combination is an accepted validation: exit 0, the artifact this
+> run just wrote, readable, with `passed` exactly `true`.** Then continue.
+> The one recognised iteration case is a non-zero exit whose freshly written
+> artifact reads `passed: false` — the order set genuinely did not clear; use
+> the order-adjustment loop below. **Every other combination — including exit 0 with
+> a missing, unreadable, malformed or `passed: false` artifact — is a tool
+> failure: STOP and show stderr. Do not read violations from it.**
+
+**On an accepted validation:** include stress test results in the output,
 AND relay every entry of the artifact's top-level `warnings` array verbatim.
 Warnings live OUTSIDE `stress_test`, so a PASS can carry material ones — a
 policy floor breached by the user's own resting broker orders surfaces as a
 warning, never a violation. Until Step 8 writes the log, this presentation is
 the only place the user can see them.
 
-**If validation fails** (the script exits 1 on `passed: false` — an expected
-iteration signal here, NOT a stop-everything error):
-- Read the violations from the output.
-- Adjust the order set to resolve violations.
+**On the iteration case** (`passed: false` in this run's freshly written
+artifact — an expected signal here, NOT a stop-everything error):
+- **Read the whole artifact, never one field.** Enumerate the top-level
+  `violations` array AND every `stress_test` scenario whose `passed` is
+  false; a scenario that names its own `violations` counts those too. Any
+  combination occurs, so no single field is the failure: a failed scenario
+  is never copied into the top-level array (an empty array beside
+  `passed: false` is normal); a scenario failing purely on cash carries no
+  `violations` key at all; one failing on a constraint at its crashed
+  valuation carries a nested one while its `cash_after` stays positive; and
+  `cash_after` is rounded to two decimals, so a real deficit can read
+  `-0.0`. Collect every failing element first, then decide the fix.
+- Adjust the order set to resolve them.
 - Re-run the ORDER-WRITE block above with the revised array FIRST, then
   re-run validation — the validator reads `.proposed_orders.json`, not
   the conversation; skipping the rewrite re-validates the old order set
@@ -706,30 +779,70 @@ user reports actual fills and asks to update positions — never on your own ini
 **Sole exception — the `nav_peak_usd` ratchet (bookkeeping, not position data):** when the
 user's principles define a NAV-peak-anchored rule (e.g. a drawdown circuit breaker) and
 run-day NAV (holdings × run-day macro prices + cash) exceeds the stored `nav_peak_usd`,
-update `nav_peak_usd` + `nav_peak_as_of` in the same run WITHOUT waiting for a fill
-report — monotonic increase only, touch no other field, SHOW the computation (prices
-used + arithmetic) in the run output, and re-run the Preflight `config_gate check
---portfolio` after writing. Without this exception a no-fill run that makes a new NAV
+`nav_peak_usd` + `nav_peak_as_of` are updated in the same run WITHOUT waiting for a
+fill report — monotonic increase only, touch no other field, and SHOW the computation
+(prices used + arithmetic) in the run output. Like every other writer here the write
+itself lands in **Step 9**, after the log; "same run" means this run, not this step.
+Without this exception a no-fill run that makes a new NAV
 high leaves the stored peak stale and understates every later drawdown — silently
 suppressing the circuit breaker. The same exception covers the breaker's
 staleness-reconfirmation write: when the principle's fail-closed branch fires
 (`nav_peak_usd` OR `nav_peak_as_of` missing, or `nav_peak_as_of` past its
 staleness bound) and the user
-reconfirms the peak in-run, update `nav_peak_as_of` to the run date (and
+reconfirms the peak in-run, `nav_peak_as_of` moves to the run date (and
 `nav_peak_usd` only UPWARD, if the user supplies a higher corrected value) — a
 user-confirmed bookkeeping write, not a fill; without it the stale-peak branch
-deadlocks (reconfirmation required but no authorized writer). Holdings / cash /
-open_orders remain strictly below:
+deadlocks (reconfirmation required but no authorized writer). It too is agreed
+here and written in Step 9. Holdings / cash /
+open_orders remain strictly below.
+
+⚠ **What decides a fill's handling is WHOSE it is, not when it landed.**
+- **Caused by the recommendations you are presenting right now** → defer to
+  Step 9, together with the ratchet and any reconfirmation. The log then records
+  the pre-fill recommendation the user actually acted on, which is correct.
+- **Any other fill** — one that had already completed when the run started, or a
+  pre-existing working GTC order that filled mid-run (a normal event, not the
+  conceded concurrency gap) — → **sync it as a Step-1 pre-analysis update and
+  start the run over.** Its decisions were authored against holdings that are now
+  wrong, and deferring it would durably log a stale recommendation.
+
+⚠ **Otherwise NOTHING in this step WRITES the file. Every sanctioned write is
+DEFERRED to Step 9, after Step 8 has logged.** Step 5 seals a `state_file_sha256` over
+`portfolio-state.yaml` and Step 6 binds the same hash; `portfolio_log write`
+re-hashes the file and **REFUSES (exit 2)** against BOTH bindings if it moved in
+between. So writing here silently costs the run its decision log — and that is
+true of all three writers alike (the ratchet, the reconfirmation write, and the
+fill-driven holdings update). **Agree the change now; apply it after the log.**
+
+Deferring costs nothing *within* a run: at a new high the breaker verdict is the
+same against the old peak and the new one, a reconfirmation whose result would
+change the advice is a new run, and a reported fill MUST be logged after the
+recommendation it followed, never before (`portfolio_log` builds
+`portfolio_before` from the state it is handed, so writing the fill first would
+file a post-fill recommendation in place of the pre-fill one the user acted on).
+
+**Residual, named and accepted.** The pending change lives only in this
+conversation, so a session that ends before Step 9 — or a log that cannot be
+written at all — loses it. A **fill** is recovered only if the user re-reports
+it: nothing detects an unreported one, because the log holds a PROPOSED order
+and this system never infers a fill from that. A **ratchet** is simply not
+written, so if NAV falls before the next run that high is gone and the peak
+stays low. Say so when a write is left pending, so the operator knows it is on
+them. No recovery machinery is built for this: the trigger is a session dying
+inside one step, which has not happened, and the fix for the demonstrated bug
+does not depend on it.
+
+In this step you therefore only AGREE the change:
 1. Show a **before/after diff** of the exact fields changing (e.g. `MU shares: 50 → 100`,
    `cash: 12000 → 3000`, **including `open_orders` — the broker's working GTC
    orders are part of the position sync, not an optional extra**) and have the
-   user confirm **that diff** — not a vague "looks good".
-2. Keep the prior file (e.g. copy to `portfolio-state.yaml.bak`) so a wrong edit is reversible.
-3. Write the update, then re-run the Preflight block above
-   (`"$PYBIN" -m scripts.config_gate check --portfolio`, with its `cd`/`PYBIN`
-   prelude) — if it fails, STOP and show stderr (a malformed write must not stand).
-`config_gate` validates STRUCTURE, not correctness (a mistyped `1000`-for-`100` is
-structurally valid) — the user confirming the diff is the control that catches wrong numbers.
+   user confirm **that diff** — not a vague "looks good". The `nav_peak_usd`
+   ratchet is the exception to *confirmation*, not to *disclosure*: SHOW its
+   computation (prices used + arithmetic) in the run output.
+2. Carry it forward as a **PENDING write**. A run can produce more than one at
+   once (a new high AND a reported fill): combine them into **ONE diff covering
+   every applicable change**, never one instead of the other. Do not touch the
+   file. Step 9 applies it in a single write.
 
 This is a conversation, not a pipeline. Stay responsive to the user's
 questions and adjustments.
@@ -792,7 +905,7 @@ ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et
   --constraints strategy.compiled.yaml \
   --stress-test "reports/portfolio/$ETDAY/.validator_output.json" \
   --output-dir "reports/portfolio/$ETDAY" \
-  || { echo "FATAL: portfolio_log write REFUSED — decisions.json was NOT written. The validator output is KEPT at reports/portfolio/$ETDAY/.validator_output.json; fix the decisions blob per the stderr above and re-run THIS step (do not proceed)." >&2; exit 1; }
+  || { echo "REFUSED: portfolio_log write — decisions.json was NOT written. The validator output is KEPT at reports/portfolio/$ETDAY/.validator_output.json. See 'If the log write refuses' below — fix and re-run this step; do NOT write state to get past it." >&2; exit 1; }
 
 # Clean up the validator output (its content is now in decisions.json).
 # $ETDAY is re-derived in THIS block (Step 6's shell variables do not
@@ -813,7 +926,97 @@ you: `portfolio_before`, `macro` with regime classification,
 `principle_audit.cited_this_run` + `not_cited_this_run`,
 `user_confirmation` placeholders, and `execution_outcomes` placeholders.
 
-Tell the user where the log landed and mention that `execution_outcomes`
-+ `user_confirmation.status` are left blank for them to update after
-they act. Do not offer to update those yourself — they reflect real
+Tell the user where the log landed and mention that
+`user_confirmation.status` is initialized to `pending`, and the confirmation
+and execution-detail fields are left empty/null, for **the user** to update
+after they act. Do not offer to update those yourself — they reflect real
 execution, not your proposals.
+
+### If the log succeeded but WARNED that the seal was absent
+
+Check this **before** anything else, and regardless of whether a write is
+pending — Step 9 is skipped on an all-hold run, so this cannot live there.
+
+If Step 8 printed `no .decision_ctx.json seal ... (legacy flow)` it still exits
+0, but it verified only validation→logging, never authoring→validation. Step 5
+always writes a seal in this flow, so its absence means something went wrong:
+**write nothing, and restart.** ⚠ **The log it just wrote is already on disk and
+is what Step 0 will read** — tell the user it is UNVERIFIED for the authoring
+window and that the restart's log supersedes it (a same-day rerun archives the
+prior pair). Until that rerun completes, the unverified log stands.
+
+### If the log write refuses
+
+**Fix what the message names and re-run this step.** Every refusal states its
+own remedy — a malformed blob wants the blob fixed, and a state-hash mismatch (`portfolio-state.yaml changed
+...`) means the file moved mid-run, which this skill forbids: that run cannot be
+logged at all and restarts from the beginning.
+
+⚠ **A MALFORMED SEAL is a restart too, not a repair — and this OVERRIDES the
+remedy that message prints.** `.decision_ctx.json`
+being unreadable is detected BEFORE the state hash can be compared, so it
+destroys the only evidence of whether the file moved. Rebuilding the seal — or
+re-authoring to produce a new one — would stamp the CURRENT state as though it
+had been the authoring state, and the logger's own offer to "delete the file and
+proceed unsealed" throws the check away entirely. Do neither: **discard the run
+and restart from the beginning**, exactly as for a mismatch.
+
+⚠ **If the remedy requires touching `portfolio-state.yaml`, this run is over.**
+Some refusals do ask for that — an absent `open_orders` key tells you to write
+`open_orders: []` or sync the broker's working orders. Doing it here would move
+the file the run is bound to, so: **make that edit as a Step-1 sync and restart
+from the beginning**, exactly as a state-hash mismatch does. The current run's
+pending change is NOT applied; it is re-established in the fresh run.
+
+⚠ **And never write state merely to get past a refusal.** You cannot tell from
+the error whether the file still matches what this run bound — most checks run
+BEFORE either hash is compared, so a blob or seal error says nothing about it.
+If a refusal cannot be repaired at all, the run ends with **no log and no state
+write**: say so plainly and start fresh. The user re-reports the fill there.
+The ratchet is recomputed from the fresh run's own NAV — which recovers the high
+only if NAV has not fallen meanwhile; if it has, that high is gone (see the
+residual note in Step 7).
+
+## Step 9: Deferred state writes
+
+**Skip this step unless Step 7 produced a PENDING write.** This is where the
+holdings-update protocol's execution half lives — deliberately after Step 8, so
+`portfolio-state.yaml` is byte-identical from the Step-5 seal through the
+Step-8 log and neither hash binding can refuse. Do not move it earlier, and do
+not write from Step 7.
+
+⚠ **Reached only after Step 8 logged successfully.** A refused log never leads
+here — see its section — which is why no re-basing rule is needed: the successful
+log proves `portfolio-state.yaml` is still byte-identical to what Step 7 agreed
+against.
+
+Apply exactly what Step 7 carried forward, as **one write** — the change the
+user confirmed AND the automatic ratchet it disclosed, if both apply (the
+ratchet needs no agreement; #9 puts refresh on the system, and pausing for it
+would leave `nav_peak_usd` stale-low). No re-derivation, no additions:
+
+1. **Keep the prior file** (e.g. copy to `portfolio-state.yaml.bak`) so a wrong
+   edit is reversible.
+2. **Write the combined change**, and nothing else. For the `nav_peak_usd`
+   ratchet: monotonic increase only, touch no other field.
+3. **Re-run the Preflight block** (`"$PYBIN" -m scripts.config_gate check
+   --portfolio`, with its `cd`/`PYBIN` prelude) — if it fails, **restore the
+   `.bak` from step 1**, then STOP and show stderr. Restoring is the point of
+   keeping it: "STOP" alone leaves the bad file in place, and because this step
+   runs AFTER the log, a malformed `portfolio-state.yaml` would poison the next
+   run's preflight rather than this one's.
+   ⚠ **After restoring, the change is UNRESOLVED, not cancelled** — but say which
+   part, because the pending write may hold more than one thing and they recover
+   differently:
+   - **a fill** — the broker moved even though the file did not. Treat it next
+     run the way a pre-run fill is treated: **sync it before any analysis.**
+   - **the ratchet** — nothing at the broker moved, and nothing recovers it: the
+     next run simply recomputes from its own NAV, so if NAV has fallen the high
+     is gone (the accepted residual above).
+   - **a peak reconfirmation** — nothing at the broker moved either; the next
+     run meets the same fail-closed branch and asks again.
+
+`config_gate` validates STRUCTURE, not correctness (a mistyped `1000`-for-`100`
+is structurally valid) — the user agreeing the diff in Step 7 is the control
+that catches wrong numbers (for the automatic ratchet, the control is the
+computation you disclosed there).

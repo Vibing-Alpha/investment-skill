@@ -18,9 +18,11 @@ is visible from turn 1.
 
 ## Hard rules (most frequently violated)
 
-1. `strategy.compiled.yaml` constraints (`max_single_position`, `max_sector`,
-   `min_cash`) are ALWAYS decimal [0.0, 1.0]. Raw percent (35) is coerced
-   at compile time via `cli_utils.normalize_percent_fraction`.
+1. `strategy.compiled.yaml` constraints (`max_single_position`, `min_cash`)
+   are ALWAYS decimal [0.0, 1.0]. Raw percent (35) is coerced at compile time
+   via `cli_utils.normalize_percent_fraction`. (`max_sector` is NOT in this
+   list: `compile_strategy` exits 1 on it, so it never reaches the compiled
+   file — see `rules/portfolio-safety.md`.)
 2. `extract_fcf` and `historical_multiples` 3-state currency gate:
    USD-native (no cert), supported non-USD (FX-convert via
    `scripts.fx_apply.apply_fx_conversion` + emit cert), unsupported
