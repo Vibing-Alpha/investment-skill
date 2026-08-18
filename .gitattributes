@@ -53,3 +53,23 @@ scripts/dev/    export-ignore
 # prompts + SKILL.md (unknown≠zero, subagent heredoc .md-write, atomic vocab update);
 # stripping them would leave dangling citations in the shipped files.
 .claude/rules/development.md  export-ignore
+
+# The operator's own trading record. Committed to the dev repo, and PUSHED, as
+# its off-site backup (SKILL.md's commit-and-push protocol) — a commit that
+# never leaves this machine is not a backup, since it lives in the same clone
+# as the data it protects and a lost machine loses both (F4, external review).
+# Never published. publish.py's guard_private_paths aborts if either survives.
+reports/track-record/ export-ignore
+trade-journal.jsonl    export-ignore
+
+# The track-record TOOL itself (I5, whole-branch review). Not merely a skill
+# lacking a doc: it is bound to THIS operator's Phase-0 freeze decisions
+# (D1-D6, from their specific broker connection/retention/account shape) and
+# to their backup arrangement above. docs/ (the freeze file Step 1 hard-STOPs
+# on) is already export-ignored, and the published Makefile.dist carries no
+# track-record target — so a published recipient would get a skill in their
+# description context that can only ever stop at Step 1. Same category as
+# scripts/publish.py / scripts/release.py: personal instrument, not a
+# general-purpose skill.
+.claude/skills/track-record/ export-ignore
+scripts/track_record/         export-ignore

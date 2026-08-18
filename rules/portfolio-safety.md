@@ -208,6 +208,34 @@ either needs a non-fill concept in the projection, not a price rule —
 so the control on the inverted shape lives in the authoring prompt
 (`prompts/portfolio-decide.md`, order design), not here.
 
+### KNOWN ISSUE — `extreme_down` double-applies an ambiguous-side stop
+
+**Open, not fixed. Recorded 2026-08-14; found by cold review of the
+doc-contract cleanup.** Tracked as dev-repo issue #6. Read this before
+editing `_run_stress_tests`.
+
+An open order whose `action` and `type` disagree on side — `{action: buy,
+type: stop_sell}` or `{action: sell, type: stop_buy}` — matches BOTH
+classifiers. `extreme_down` sums `immediate_proposed_sells + all_buys +
+stops` (`validate.py:869`), and such an order is collected into `all_buys`
+AND `stops`, so it is applied **twice**. Reproduction: 10 X held, cash
+1000, X at 10, one resting 2-share order of either shape → `extreme_down`
+`cash_after` 960, while every other scenario gives 980 and a well-formed
+`{action: sell, type: stop_sell}` gives 1020.
+
+**Severity is bounded, and the direction is why.** `_apply_orders` gives
+BUY precedence whenever both classifiers match, so a double-applied order
+always SPENDS twice — verified for both ambiguous shapes. It can therefore
+cause a false REFUSAL (the scenario looks poorer than reality), never a
+false PASS. It also requires a self-contradictory hand-synced
+`open_orders` entry, which nothing upstream rejects (see the `open_orders`
+bullet in the `/portfolio` skill's Step 1).
+
+**Fixing it is money-path work**, not a doc change: de-duplicating the legs
+alters every `extreme_down` number, so it needs the full rigor path
+(`CLAUDE.md`) — golden-fixture review included. Deliberately deferred
+rather than patched in place.
+
 Sell-side stop projections are unchanged — stops use their own price
 field — so the risk-floor scenario keeps its current meaning.
 

@@ -3,6 +3,12 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.11.1 — 2026-08-18
+
+- /portfolio KNOWN ISSUE (open, not fixed): an open order whose `action` and `type` disagree on side — `{action: buy, type: stop_sell}` or `{action: sell, type: stop_buy}` — is counted TWICE in the `extreme_down` stress scenario, because it matches both the buy classifier and the stop classifier. The direction is bounded: a double-applied order always spends twice, so it can cause a false REFUSAL of your orders, never a false pass. It needs a self-contradictory hand-written `open_orders` entry, which nothing currently rejects. Full write-up and reproduction in `rules/portfolio-safety.md`; fixing it changes every `extreme_down` number, so it is deferred to the money-path rigor path rather than patched.
+- /score-business + /investment-thesis KNOWN ISSUE (open, not fixed): for a non-USD-statement ADR, a quarter can arrive with `net_income`, operating cash flow and capex each under-converted by exactly one FX factor while `revenue` and `operating_income` are converted correctly — and NO detector fires, because neither of `detect_anomalous_quarters`'s two signals has those fields as an input. Observed on MRAAY: a published `corrected_pe` of 82.963 against a restated 56.09, a ~48% overstatement that reached `bq_analysis.json` and `summary.md` with `anomalous_quarters` empty. Unlike the issue above the direction is NOT bounded — the same row understates margins and growth while overstating P/E. Detection currently rests on the scoring agents noticing; the pipeline contributes nothing. Full write-up in `rules/units.md`.
+- No behaviour change in this release. Both entries above are disclosures of defects that already existed, written down where the agent reads them.
+
 ## v1.11.0 — 2026-08-14
 
 - /portfolio: order recommendations may now use the full order vocabulary (gtc, limit, loc, market, moc, stop, stop_limit, stop_market) and fractional shares — the decision prompt previously allowed only market/limit/stop, which was narrower than the system has accepted for some time. Each type now states which price field it carries.

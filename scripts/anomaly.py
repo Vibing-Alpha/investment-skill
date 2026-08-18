@@ -143,6 +143,18 @@ def detect_anomalous_quarters(
     that would manufacture a fake margin anomaly — the system's own rule says not
     to compute margins from those rows. Revenue QoQ stays (revenue is always in
     the USD master set), so a real revenue peak is still surfaced.
+
+    KNOWN ISSUE (open, 2026-08-14) — these two signals cannot see a corrupt row
+    whose `revenue` and `gross_profit` are intact but whose BOTTOM LINE is not.
+    MRAAY's quarter ended 2025-09-30 had `net_income`/OCF/capex each exactly
+    1/148.5944 of true (that quarter's own DL3c rate) and this returned `[]`:
+    revenue-QoQ was correctly silent, the margin signal was correctly disabled
+    (`margin_reliable=False`; forcing it on flags all 15 transitions as noise),
+    and `net_income` is not an input here at all. A `net_income / revenue` signal
+    would be currency-safe on that path — both are DL3c master-set fields — but
+    needs threshold calibration against real cyclical swings and loss-making
+    quarters. Full write-up + why it is deferred: rules/units.md, "KNOWN ISSUE"
+    (dev-repo issue #7). Money-path — do not patch without the full-rigor path.
     """
     if not isinstance(income_statements, list):
         return []

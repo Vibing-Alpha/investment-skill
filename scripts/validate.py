@@ -866,6 +866,15 @@ def _run_stress_tests(
         o for o in (list(proposed_orders) + list(open_orders))
         if "stop" in str(o.get("type") or "").lower() and _is_sell(o)
     ]
+    # KNOWN ISSUE (open, 2026-08-14) — an open order whose `action` and `type`
+    # disagree on side ({action: buy, type: stop_sell}) matches BOTH
+    # classifiers, lands in `all_buys` AND `stops`, and is applied TWICE here.
+    # Bounded: `_apply_orders` gives buy precedence, so a double-apply always
+    # spends twice — a false REFUSAL, never a false PASS. Reproduction +
+    # rationale for deferring: rules/portfolio-safety.md, "KNOWN ISSUE"
+    # (dev-repo issue #6).
+    # De-duplicating changes every extreme_down number, so it is money-path
+    # work — do not patch it here without the full-rigor path.
     extreme_orders = immediate_proposed_sells + all_buys + stops
     extreme_holdings, extreme_cash = _project(extreme_orders)
 

@@ -1,5 +1,21 @@
 # Reports (output, not source)
-reports/
+reports/*
+# Exception: the track-record archive and journal are the operator's own
+# record — irrecoverable once the broker's retention window rolls — and a
+# CONFIRMED PUSH of the dev repo's git history is their off-site backup (a
+# local-only commit is not: it lives in the same clone as the data it
+# protects, so losing the machine loses both the record and the "backup" —
+# F4, external review). Kept OUT of the published snapshot by export-ignore
+# in .gitattributes, enforced by publish.py's private-path guard.
+!reports/track-record/
+# (No negation is needed for tests/fixtures/track_record/reports/: the
+# rule above is `reports/*`, and a pattern containing a mid-string
+# slash matches only relative to this file's own directory, so the
+# fixture tree was never excluded. Four lines of comment used to
+# justify two negations that could not fire — verified by removing
+# them and re-running `git check-ignore`.)
+# reports/{quarter}/ layout (pinned SPY.csv lives at the same relative path
+# a real run would use) -- it is checked-in fixture data, not output.
 
 # User strategy (personal config)
 strategy.yaml

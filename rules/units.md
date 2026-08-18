@@ -116,6 +116,48 @@ production code outside `scripts/fx_apply.py` reading this field is a
 Pattern AD HIGH finding. The escape `# pre-conversion-currency-read-ok:
 <reason>` is reserved for the audit/debug-only path.
 
+### KNOWN ISSUE — a bottom-line-only corrupt quarter has no detector signal
+
+**Open, not fixed. Recorded 2026-08-14; found during a `/score-business`
++ `/investment-thesis` run on MRAAY.** Tracked as dev-repo issue #7.
+Read this before editing `scripts/anomaly.py` or the FX application in
+`scripts/fx_apply.py`.
+
+On MRAAY (unsponsored ADR, JPY statements, FMP fallback) the quarter
+ended 2025-09-30 carries `net_income`, `net_cash_flow_from_operations`
+and `capital_expenditure` each **exactly 1/148.5944** of true — the
+reciprocal of that quarter's OWN DL3c window rate — while `revenue` and
+`operating_income`, sibling fields of the same 12-field master set, were
+converted exactly once. `anomalous_quarters` was an **empty array**.
+Published `corrected_pe` 82.963 against a restated 56.09: a ~48%
+overstatement that reached `bq_analysis.json` and `summary.md`.
+
+**This is not a mis-gated check — it is a defect class with no signal.**
+`detect_anomalous_quarters` has two signals and neither can fire:
+`revenue` on the corrupt row is correct, so revenue-QoQ is correctly
+silent; and the gross-margin signal is correctly disabled by
+`fetch.py`'s `margin_reliable=False` on `mixed_unrepairable`, because
+`gross_profit` is native JPY against a USD `revenue` (ratio 6357% —
+forcing it on flags all 15 quarter transitions, pure noise). `net_income`,
+OCF and capex are **not detector inputs at all**.
+
+**The direction is not bounded**, unlike issue #6: understated earnings
+overstate P/E and understate FCF yield, but the same row understates
+margins and growth, so the composite effect on a decision is not
+one-signed. Detection currently rests on model judgment — three scoring
+agents caught it independently; the pipeline contributed nothing.
+
+**Fixing it is money-path work** (FX + TTM aggregation) and needs the
+full rigor path. Candidate direction, deliberately not implemented: a
+**net-margin signal** (`net_income / revenue`) is currency-safe exactly
+where the gross-margin signal is not, since both fields are in the DL3c
+USD master set — but it needs threshold calibration against real
+cyclical swings and genuine loss-making quarters first.
+
+Whether the extra division is ours (`apply_fx_conversion` applied twice)
+or an already-USD row from FMP converted uniformly is **not localized**;
+separating them needs a live FMP probe of the raw pre-conversion row.
+
 ## Compile-time / runtime enforcement
 
 Three layers:

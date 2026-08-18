@@ -3951,6 +3951,12 @@ def _main_impl(
         # On the mixed-currency-unrepairable path gross_profit can be native while
         # revenue is USD, so skip the margin signal (revenue QoQ stays valid — it
         # is always in the USD master set).
+        # KNOWN ISSUE (open, 2026-08-14) — disabling the margin signal here is
+        # CORRECT (forcing it on flags every transition as noise), but it leaves
+        # this path with revenue-QoQ as its ONLY signal, so a row whose revenue is
+        # intact while net_income/OCF/capex are FX-divided twice passes clean.
+        # MRAAY 2025-09-30: anomalous_quarters == [] while corrected_pe shipped
+        # ~48% overstated. rules/units.md "KNOWN ISSUE" (dev-repo issue #7).
         _margin_reliable = (
             financial_output.get("currency_consistency", {}).get("status")
             != "mixed_unrepairable"
