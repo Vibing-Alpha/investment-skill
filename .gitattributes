@@ -62,14 +62,24 @@ scripts/dev/    export-ignore
 reports/track-record/ export-ignore
 trade-journal.jsonl    export-ignore
 
-# The track-record TOOL itself (I5, whole-branch review). Not merely a skill
-# lacking a doc: it is bound to THIS operator's Phase-0 freeze decisions
-# (D1-D6, from their specific broker connection/retention/account shape) and
-# to their backup arrangement above. docs/ (the freeze file Step 1 hard-STOPs
-# on) is already export-ignored, and the published Makefile.dist carries no
-# track-record target — so a published recipient would get a skill in their
-# description context that can only ever stop at Step 1. Same category as
-# scripts/publish.py / scripts/release.py: personal instrument, not a
-# general-purpose skill.
+# The track-record ORCHESTRATION layer stays private; the RUNTIME ships.
+#
+# The skill is what binds this tool to one operator. Its commit-and-push
+# protocol pushes with no refspec to whatever `origin` the clone has — and a
+# marketplace recipient's origin is the PUBLIC org repo, with the published
+# .gitignore's `!reports/track-record/` making the broker archive and the
+# intent journal committable out of the box. A recipient who points origin at
+# their own public fork to make the backup work would publish their trade
+# history. `publish.py`'s private-path guard runs on the MAINTAINER's snapshot
+# and is inert on their machine. Until a backup topology exists that is
+# correct for a stranger, the orchestration layer does not ship. Step 1's
+# hard-STOP on the (export-ignored) freeze file is the deterministic second
+# gate that keeps it that way.
+#
+# `scripts/track_record/` DOES ship: it is a verbatim archiver with
+# fail-closed coverage gates, an append-only journal with whole-file topology
+# validation, and a quarterly renderer whose every number degrades to
+# `unavailable (reason)` rather than guess. It runs no git, takes no
+# orchestration decisions, and depends only on stdlib plus
+# `scripts.sources.yfinance_guard`. Its own README states what it is not.
 .claude/skills/track-record/ export-ignore
-scripts/track_record/         export-ignore
