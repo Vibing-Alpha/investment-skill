@@ -1,7 +1,7 @@
 # `scripts.track_record` — broker-fact archiver, intent journal, quarterly render
 
-A runtime, not a workflow. Four modules and a CLI; no orchestration layer
-ships with them, deliberately (see **What does not ship** below).
+Four modules and a CLI. A Claude Code skill that drives them ships alongside
+at `.claude/skills/track-record/`; the CLI is equally usable on its own.
 
 ```
 python3 -m scripts.track_record pull   --root reports/track-record/raw < envelope.json
@@ -11,8 +11,11 @@ python3 -m scripts.track_record unlinked
 python3 -m scripts.track_record report --quarter 2026Q2
 ```
 
-Standard library only, plus `scripts.sources.yfinance_guard` for the one
-network call (the benchmark fetch). Python 3.10+.
+Standard library for everything except the one network call: the first
+benchmark pin of a quarter fetches via `yfinance` (pinned in
+`requirements.txt`, installed by setup) behind `scripts.sources.yfinance_guard`.
+Archiving, journalling and every count work with no third-party import and no
+network at all. Python 3.10+.
 
 ## What it is for
 
@@ -25,10 +28,17 @@ free.*
 - **`archive.py`** — writes each tool response to disk verbatim, before
   anything parses it, then answers whether the archived pulls actually cover
   a requested UTC window. Files are never overwritten and never deleted.
-  Publishing is atomic: bytes land in a same-directory stage file and are
-  linked into place, so an interrupted write leaves nothing under an archive
-  name.
-- **`journal.py`** — an append-only JSONL of intent events
+  Publishing is atomic where the filesystem allows it: bytes land in a
+  same-directory stage file and are hardlinked into place, so an interrupted
+  write leaves nothing under an archive name. Where hardlinks are refused
+  (some network and FUSE mounts, exFAT), it falls back to claiming the name
+  and replacing it — exclusivity is kept, atomicity is not, and a process
+  killed in that window leaves a ZERO-BYTE file. That file blanks the tool's
+  figures until it is removed, and the refusal it produces says so and says
+  deleting it loses nothing.
+- **`journal.py`** — a JSONL of intent events, appended and never rewritten
+  by this module (the skill's correction step edits a line in place, and says
+  so)
   (`thesis_opened` / `thesis_superseded` / `orders_linked` /
   `thesis_retired` / `prediction_resolved`). Every append validates the
   COMPLETE resulting fold — duplicate declarations, dangling references,
@@ -44,20 +54,67 @@ free.*
 **Every number degrades to `unavailable (reason)` rather than guess**, and
 the reason names what was missing. A coverage gap, a conflicting execution, a
 corrupt benchmark pin, an unparseable archive file — each blanks the figures
-it feeds and no others. The motivating failure was not a trading loss: it was
+it feeds, and the others keep rendering.
+
+Two of those are wider than "this quarter", deliberately, and it is worth
+knowing which before it happens. An **unparseable archive file** blanks that
+tool's figures in EVERY quarter, not only the one it was pulled for: its
+`args` cannot be read, so there is no way to tell which window it covered,
+and an archive that cannot be fully read cannot prove coverage of any window.
+The refusal names the file; the archive never deletes anything, so clearing
+it is yours to do. A **conflicting execution** — the same `trade_id`
+archived twice with different content — blanks fills, orders and
+order_unknown for the quarter that execution falls in, and leaves every other
+quarter alone. The motivating failure was not a trading loss: it was
 ad-hoc analysis producing five mutually contradictory conclusions and six
 plausible, report-ready wrong numbers. A refusal must never look like a value.
 
-## What does not ship, and why
+## Your files stay on your disk — which is not the same as unseen
 
-**The orchestration layer.** The skill that drives this CLI stays private,
-because its backup protocol pushes to whatever `origin` a clone has — correct
-for its author's private repo, wrong for anyone who installed from a public
-one. Until a backup topology exists that is right for a stranger, shipping
-the workflow would be shipping a way to publish your own trade history.
+Nothing here runs `git`, uploads, or copies anything anywhere. The archive,
+the journal and the benchmark pin are written under your working tree and
+stay there — **backing them up is yours to arrange**, and the skill's job is
+only to keep telling you which files are unprotected.
 
-**The operator's data and their Phase-0 evidence.** The archive, the journal,
-and the probe figures the frozen decisions were read off are all private.
+Two things follow that are easy to miss:
+
+- The published `.gitignore` excludes `reports/track-record/` and
+  `/trade-journal.jsonl` so a routine `git add -A` in this clone cannot
+  commit them. If you move them, keep them out of any repository you do not
+  control.
+- The **skill** hands file contents to a model: it reads the journal to find
+  due predictions, shows you a line before and after a correction, and reads
+  the quarterly report back to you. That is how it works, not a leak — but it
+  is not the same as "the data stays on disk". Use the CLI directly if you
+  want the archive built without any of it passing through a model.
+
+Not published: the recording operator's own data, and the probe figures their
+frozen decisions were read off. The rulings in
+`.claude/skills/track-record/references/ibkr-freeze.md` (repo-relative — it
+ships beside the skill, not beside this package)
+stand on their own and each names what it was read from.
+
+## One limit worth stating
+
+Numbers are read with the standard JSON parser, so every decimal becomes a
+binary64 float before it is archived. A response carrying more precision
+than that holds — more than about 17 significant digits — would be stored
+slightly changed, in a file whose whole premise is that it is verbatim.
+
+Not fixed, and the reason is measurable rather than a shrug: across 6874
+numeric values in the live archive, not one differs from its source text
+after that round trip. IBKR sends prices and sizes that binary64 represents
+exactly. Preserving arbitrary precision would mean a `Decimal` pipeline
+through every arithmetic path in the package, to defend against a shape
+this feed does not produce.
+
+## Before the first run
+
+You need the **IBKR MCP server** connected to your agent and answering — this
+tool only reads it, and cannot install or authenticate it for you. Confirm
+`get_account_positions` returns your account before starting; if the five
+tools named above are not available, stop, because nothing here has another
+data source.
 
 ## Scope, stated as disqualifying conditions
 
@@ -82,7 +139,7 @@ and the probe figures the frozen decisions were read off are all private.
 ## Status
 
 Experimental. One operator, one IBKR connection. The first hour of real use
-falsified a frozen decision that nine cold review cycles had left standing —
+falsified a frozen decision that a long review had left standing —
 the broker restates settled `order_id`s, which the conflict rule had been
 reading as a corrupted execution. Expect the same of the remaining rulings
 until a second account has exercised them.

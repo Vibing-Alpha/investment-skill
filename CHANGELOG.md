@@ -3,6 +3,15 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.13.0 — 2026-08-20
+
+- pull takes --response FILE instead of stdin. The steady-state per-session payload drops from ~331KB to ~61KB, so the tool no longer depends on your harness persisting an oversized tool result to a file — the limitation v1.12.0 shipped with is gone. SCOPE widens accordingly: Codex, Cursor and OpenCode are expected to work and are UNTESTED; say which harness you are on when you report a capture.
+- NEW subcommand: due --journal <path> --as-of <Z> — the outstanding predictions past their deadline, as CSV. The skill no longer asks an agent to read the journal and compare timezone-aware deadlines by hand; that comparison is arithmetic and is now tested code.
+- Completeness is decided at READ time over the whole archive, not trusted from the value stored when a pull was archived. A stored verdict goes stale the moment a fuller pull arrives, so two operators pulling in a different order got different permanent facts from identical evidence. coverage_gap, report and pull now all reduce the same way.
+- Trades coverage is the UNION of complete pulls' windows. A quarter no longer needs one envelope covering all of it, which is what forced the 331KB pull; small rolling captures now compose. Every other tool keeps its single-envelope rule unchanged.
+- Instrument identity comes from the fills' own company_name instead of a positions snapshot, so a trade is journaled under the ticker it had AT THE TRADE rather than today's. unlinked gains an eighth column carrying that name, with ?MISSING-ON-SOME and ?CONFLICTING as distinct outcomes — absence and disagreement end differently. The journal accepts company_name_at_trade as an identity.
+- report names on stderr any stretch of the quarter that only one pull observed. summary.md is unchanged byte-for-byte: the disclosure is stderr-only by design, so a rendered report stays comparable across runs.
+
 ## v1.12.0 — 2026-08-18
 
 - NEW: `scripts.track_record` — a broker-fact archiver, an append-only intent journal, and a quarterly summary renderer, as a runtime you invoke directly (`python3 -m scripts.track_record pull|tag|open|unlinked|report`). Standard library only. It exists because broker history expires and the reasoning behind a trade cannot be reconstructed from a fill afterwards; it preserves both and computes almost nothing on top. The property worth reading it for: every number degrades to `unavailable (reason)` rather than guess, and the reason names what was missing — a coverage gap, a conflicting execution, a corrupt benchmark pin each blank the figures they feed and no others. See `scripts/track_record/README.md`.

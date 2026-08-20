@@ -54,32 +54,19 @@ scripts/dev/    export-ignore
 # stripping them would leave dangling citations in the shipped files.
 .claude/rules/development.md  export-ignore
 
-# The operator's own trading record. Committed to the dev repo, and PUSHED, as
-# its off-site backup (SKILL.md's commit-and-push protocol) — a commit that
+# The operator's own trading record. Trackable in the dev repo so it CAN be
+# backed up by hand — the skill itself runs no git command at all and never
+# commits it (SKILL.md: "It runs no `git` command, ever") — and a commit that
 # never leaves this machine is not a backup, since it lives in the same clone
 # as the data it protects and a lost machine loses both (F4, external review).
 # Never published. publish.py's guard_private_paths aborts if either survives.
 reports/track-record/ export-ignore
 trade-journal.jsonl    export-ignore
 
-# The track-record ORCHESTRATION layer stays private; the RUNTIME ships.
-#
-# The skill is what binds this tool to one operator. Its commit-and-push
-# protocol pushes with no refspec to whatever `origin` the clone has — and a
-# marketplace recipient's origin is the PUBLIC org repo, with the published
-# .gitignore's `!reports/track-record/` making the broker archive and the
-# intent journal committable out of the box. A recipient who points origin at
-# their own public fork to make the backup work would publish their trade
-# history. `publish.py`'s private-path guard runs on the MAINTAINER's snapshot
-# and is inert on their machine. Until a backup topology exists that is
-# correct for a stranger, the orchestration layer does not ship. Step 1's
-# hard-STOP on the (export-ignored) freeze file is the deterministic second
-# gate that keeps it that way.
-#
-# `scripts/track_record/` DOES ship: it is a verbatim archiver with
-# fail-closed coverage gates, an append-only journal with whole-file topology
-# validation, and a quarterly renderer whose every number degrades to
-# `unavailable (reason)` rather than guess. It runs no git, takes no
-# orchestration decisions, and depends only on stdlib plus
-# `scripts.sources.yfinance_guard`. Its own README states what it is not.
-.claude/skills/track-record/ export-ignore
+# track-record ships in full. The orchestration layer was withheld while its
+# backup step ran `git push` with no refspec — correct for a private dev
+# remote, and a way to publish your own trade history from a clone of a public
+# one. That step is gone: the skill now writes files and says which of them
+# exist only on this machine, leaving the backup destination to whoever knows
+# where their copies belong. What stays private is the DATA — the rules above
+# — and the operator's Phase-0 probe figures under docs/, not the tool.

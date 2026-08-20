@@ -21,3 +21,10 @@ help:
 	@echo "make setup         — first-run setup (API key, strategy, holdings)"
 	@echo "make update-check  — check for a newer skill release"
 	@echo "make update        — apply the latest release"
+
+# Personal track record: assemble one quarter's summary.md from the archive +
+# journal + pinned benchmark. See .claude/skills/track-record/SKILL.md.
+#   make track-record QUARTER=2026Q3
+.PHONY: track-record
+track-record:
+	$(PY) -m scripts.track_record report --quarter $(QUARTER)
