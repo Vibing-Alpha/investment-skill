@@ -341,6 +341,80 @@ def staleness_evidence(ticker, staleness):
             "meta": dict(staleness)}
 
 
+def identity_evidence(ticker, identity_row):
+    """Evidence when the instrument could not be classified.
+
+    Returns `[]` for a resolved ticker — absence of this evidence is the
+    signal that identity was fine. When it IS emitted the router must not
+    route the ticker down the stock path: nothing established that it is a
+    stock, and a fund scored as a business produces a business-quality
+    verdict for something with no business.
+    """
+    itype = (identity_row or {}).get("instrument_type")
+    if itype in ("etf", "equity"):
+        return []
+    status = (identity_row or {}).get("resolution_status") or "absent"
+    return [{"evidence_id": evidence_id("identity_unavailable", ticker, status),
+             "kind": "identity_unavailable",
+             "text": f"instrument identity unresolved ({status})",
+             "meta": {"resolution_status": status}}]
+
+
+def _load_etf_conditions(ticker, reports_root=None):
+    """`(invalidation_conditions, staleness_days)` from the newest ETF thesis.
+
+    A refusal variant carries its held position's conditions under
+    `held_exit_context`; those are the ones still in force, so they are read
+    too. A holding whose refresh refused still has an exit.
+    """
+    from scripts.delta.constants import SKILL_ETF
+
+    d = find_latest_prior(ticker, SKILL_ETF, reports_root=reports_root,
+                          include_today=True)
+    if d is None:
+        return [], None
+    try:
+        doc = json.loads((d / "etf_thesis.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], None
+    conditions = doc.get("invalidation_conditions")
+    if not conditions:
+        conditions = (doc.get("held_exit_context") or {}).get(
+            "invalidation_conditions") or []
+    age = None
+    as_of = doc.get("as_of")
+    if isinstance(as_of, str):
+        try:
+            age = (datetime.date.today()
+                   - datetime.date.fromisoformat(as_of)).days
+        except ValueError:
+            age = None
+    return conditions, age
+
+
+def etf_condition_evidence(ticker, conditions):
+    """One evidence row per invalidation condition, carrying the structured
+    trigger so the router can compare it with current evidence.
+
+    A matched condition is a signal that the argument needs re-examining, NOT
+    a verdict: only a comprehensively judged fundamental break mandates a full
+    exit, and this producer computes no such judgment.
+    """
+    ev = []
+    for c in conditions or []:
+        if not isinstance(c, dict):
+            continue
+        text = c.get("statement") or c.get("id") or ""
+        ev.append({"evidence_id": evidence_id("condition", ticker, str(text)),
+                   "kind": "condition", "text": str(text),
+                   "meta": {"class": "invalid_if", "instrument": "etf",
+                            "condition_id": c.get("id"),
+                            "watch_field_path": c.get("watch_field_path"),
+                            "operator": c.get("operator"),
+                            "threshold": c.get("threshold")}})
+    return ev
+
+
 def load_prior_evidence_ids(monitor_root, current_dirname):
     """Union of evidence_refs from the most recent prior-OR-same-day `action_plan.json`
     (dirs `<= current_dirname`); on a same-day rerun the first run's plan is the baseline."""
@@ -419,7 +493,13 @@ _ITEM_KEYS = frozenset({"ticker", "priority", "route", "reason", "evidence_refs"
 #                      fired condition / material news / due catalyst / staleness fact)
 #   /portfolio       = portfolio-wide decision skill → ticker AND evidence both optional
 #                      (a cash/allocation concern has no per-ticker evidence object)
-_FACT_ROUTES = frozenset({"/investment-thesis", "/score-business"})
+# Ticker-specific, evidence-triggered routes: the SKILL runs `/<route> <ticker>`,
+# so each item must name a real ticker AND cite that ticker's evidence.
+# `/etf-thesis` belongs here for the same reason `/investment-thesis` does —
+# without it, an ETF item could carry a null ticker and no evidence and still
+# pass the gate, leaving the SKILL with nothing to trigger.
+_FACT_ROUTES = frozenset({"/investment-thesis", "/score-business",
+                          "/etf-thesis"})
 
 
 def _scan_advice(text: str, where: str):
@@ -557,6 +637,17 @@ def render_digest(plan: dict, probe: dict) -> str:
                 lines.append(f"- catalyst: «{e['text']}» ({(e.get('meta') or {}).get('window')})")
             elif e["kind"] == "staleness":
                 lines.append(f"- {e['text']}")
+            elif e["kind"] == "identity_unavailable":
+                # A fact about the RUN, not the ticker: nothing classified
+                # this instrument, so no instrument-specific route applies.
+                lines.append(f"- ⚠ {e['text']} — no instrument-specific "
+                             f"analysis can be routed until this resolves")
+            else:
+                # NOT a silent drop. The chain above swallowed any kind it did
+                # not know, so a new evidence kind rendered as an item with no
+                # evidence under it — and the digest is the whole user-facing
+                # deliverable. An unrendered kind must be visible as a defect.
+                lines.append(f"- {e['kind']}: «{e['text']}»")
         lines.append("")
     return "\n".join(lines)
 
@@ -625,7 +716,7 @@ def _output_language(strategy_path="strategy.yaml"):
         return "zh-CN"
 
 
-def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN", vendor_aliases=None):
+def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN", vendor_aliases=None, identity_map=None):
     tickers = [u["ticker"] for u in universe]
     snap = _macro_snapshot(tickers, vendor_aliases=vendor_aliases) if tickers else {"ticker_prices": {}, "ticker_indicators": {}, "chart_statuses": {"ticker_prices": {}}}
     today = datetime.datetime.strptime(run_date, "%Y-%m-%d").date()
@@ -636,8 +727,27 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
         if facts["price_status"] != "PASSED":
             warnings.append(f"{t}: price status {facts['price_status']}")
         stale = ticker_staleness(t, reports_root=reports_root)
-        inv, ent = _load_thesis_conditions(t, reports_root=reports_root)
-        calendar = _load_catalyst_calendar(t, reports_root=reports_root)
+        identity_row = (identity_map or {}).get(t) or {}
+        instrument_type = identity_row.get("instrument_type")
+        id_ev = identity_evidence(t, identity_row)
+
+        if instrument_type == "etf":
+            # The ETF arm. No catalyst or event handling — those are company
+            # facts and a fund has none. What it DOES surface is the daily
+            # evidence the owner's fundamental-break rule is judged against;
+            # deferring it would leave a held fund with no daily surface at all.
+            etf_conditions, etf_age = _load_etf_conditions(
+                t, reports_root=reports_root)
+            inv, ent = [c.get("statement", "") for c in etf_conditions
+                        if isinstance(c, dict)], []
+            stale = dict(stale)
+            stale["days_since_etf_thesis"] = etf_age
+            calendar = []
+            cond_ev = etf_condition_evidence(t, etf_conditions)
+        else:
+            inv, ent = _load_thesis_conditions(t, reports_root=reports_root)
+            calendar = _load_catalyst_calendar(t, reports_root=reports_root)
+            cond_ev = condition_evidence(t, inv, ent)
         cat_ev, cat_w = catalyst_evidence(t, calendar, today=today)
         articles, news_fetch_warn = _fetch_articles(t)
         news_ev, news_w = news_evidence(t, articles)
@@ -645,9 +755,14 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
         warnings.extend(news_w)
         if news_fetch_warn:
             warnings.append(news_fetch_warn)
-        evidence = (condition_evidence(t, inv, ent) + news_ev + cat_ev + [staleness_evidence(t, stale)])
+        evidence = (id_ev + cond_ev + news_ev + cat_ev
+                    + [staleness_evidence(t, stale)])
         per_ticker.append({
             "ticker": t, "source": u["source"],
+            # An explicit per-ticker FACT, like `news_status`: the router must
+            # be able to tell "classified as an ETF" from "nothing classified
+            # this at all", and an absent key would read as the latter.
+            "instrument_type": instrument_type or "unknown",
             "holding": ({"shares": u["shares"], "cost_basis": u["cost_basis"]} if u["source"] == "holding" else None),
             "price": facts["price"], "market_value": facts["market_value"],
             "indicators": facts["indicators"], "price_status": facts["price_status"],
@@ -718,12 +833,34 @@ def _cmd_probe(args):
         print("FATAL: empty universe — no holdings or watchlist in portfolio-state.yaml; nothing to monitor",
               file=sys.stderr)
         return 1
+    # `--etf-identity` is REQUIRED, not optional. An omitted path and a
+    # deliberately empty map must not look alike: without the map every
+    # ticker reads as `unknown`, which is the honest answer for a run that
+    # never classified anything — but a caller that simply forgot the flag
+    # would get that answer silently and route funds down the stock path.
+    identity_map = {}
+    try:
+        raw_map = json.loads(Path(args.etf_identity).read_text(encoding="utf-8"))
+        identity_map = raw_map.get("rows") or {}
+    except FileNotFoundError:
+        print(f"FATAL: --etf-identity {args.etf_identity} does not exist; run "
+              f"the identity prepass first", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        # Unreadable is NOT fatal here: every ticker then carries
+        # `identity_unavailable` evidence and the router refuses to route
+        # them down an instrument-specific path. A monitor that dies on a
+        # bad identity map tells the user nothing about their portfolio.
+        print(f"WARNING: --etf-identity {args.etf_identity} unreadable "
+              f"({exc}); every ticker will read as identity-unavailable",
+              file=sys.stderr)
+
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)          # reports/monitor/YYYYMMDD/ may not exist yet
     out_dir = out.parent
     probe = build_probe(uni, cash, monitor_root=out_dir.parent, current_dirname=out_dir.name,
                         run_date=args.run_date, output_language=_output_language(),
-                        vendor_aliases=aliases)
+                        vendor_aliases=aliases, identity_map=identity_map)
     _atomic_write(out, json.dumps(probe, indent=2, ensure_ascii=False))   # probe = router's sole input; never torn
     return 0
 
@@ -768,6 +905,11 @@ def main(argv=None):
     pp.add_argument("--state", default="portfolio-state.yaml")
     pp.add_argument("--output", required=True)
     pp.add_argument("--run-date", required=True)
+    pp.add_argument("--etf-identity", required=True,
+                    help=("Path to .etf_identity.json from the identity "
+                          "prepass. Required: without it every ticker reads "
+                          "as unclassified, and a forgotten flag must not be "
+                          "indistinguishable from a deliberate empty map."))
     pp.set_defaults(func=_cmd_probe)
 
     pv = sub.add_parser("validate")

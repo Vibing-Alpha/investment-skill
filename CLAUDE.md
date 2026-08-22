@@ -31,6 +31,7 @@ gitignored — never shared.
 |---------|--------------|
 | `/score-business TICKER` | Business-quality analysis (fundamental / forward / industry) |
 | `/investment-thesis TICKER` | Valuation + technical timing + event catalysts + thesis (needs a prior `/score-business`) |
+| `/etf-thesis TICKER` | The same question for a non-leveraged equity **ETF** — merit, timing, entry and invalidation conditions. Needs no prior run; a ticker that turns out to be a stock is forwarded to `/investment-thesis` |
 | `/portfolio` | Whole-portfolio review + buy/sell/hold + IBKR orders (needs `portfolio-state.yaml`) |
 | `/screen-stocks` | Discover tickers by price action / sector / watchlist |
 | `/research-industry` | Surface 5–12 candidate tickers in a sector |
@@ -46,7 +47,24 @@ gitignored — never shared.
                         → valuation scripts → analysis agents → investment_thesis.json
 /portfolio (needs the above per ticker)
                         → macro + constraints → decisions + orders
+
+/etf-thesis TICKER      → identity → market snapshot → profile (eligibility)
+                        → evaluate-etf agent → etf_thesis.json + etf_summary.md
 ```
+
+**ETFs are a separate path, and a deliberately narrow one.** A fund has no
+business to score, so `/score-business` refuses one and forwards it. Only
+**non-leveraged equity** ETFs are in scope: leveraged and inverse funds are
+blocked, and bond, commodity and currency funds (SGOV, GLD, TLT …) are
+refused as out-of-scope composition — each with the reason stated rather
+than silently dropped.
+
+**Buying one takes your explicit approval.** Add an `etf_policy` block to
+`strategy.yaml` (see `strategy.example.yaml`) and list the fund under
+`approved_equity_etfs` with the date you reviewed it. Nothing a data
+provider says can substitute for that record, approvals expire after 90
+days, and without one the analysis still runs — the fund simply cannot be
+entered.
 
 - **Analysis logic** lives in `prompts/` (methodology), **constraints** in
   `rules/` + `.claude/rules/`, **computation** in `scripts/` (Python). Skills in

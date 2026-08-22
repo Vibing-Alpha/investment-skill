@@ -30,7 +30,11 @@ from typing import Optional
 from scripts.schemas.errors import SchemaError
 
 _ARTIFACT = "action_plan.json"
-_ROUTES = {"/investment-thesis", "/portfolio", "/score-business", "/screen-stocks"}
+# `/etf-thesis` joins the fact routes: an ETF whose thesis is stale is
+# refreshed by the ETF skill, and a fund misrouted to /score-business is
+# stopped by the forwarding detector rather than scored as a business.
+_ROUTES = {"/investment-thesis", "/portfolio", "/score-business",
+           "/screen-stocks", "/etf-thesis"}
 _PRIORITIES = {"critical", "watch", "info"}
 _STATUSES = {"new", "seen", None}
 
@@ -101,7 +105,11 @@ def load_action_plan(path) -> ActionPlan:
 # ---------------------------------------------------------------------------
 
 _PROBE_ARTIFACT = "monitor_probe.json"
-_EVIDENCE_KINDS = {"condition", "news", "catalyst", "staleness"}
+# `identity_unavailable` is a fact about the RUN, not the ticker: the router
+# must be able to say "nothing here classified this instrument" rather than
+# silently treating an unclassifiable ticker as an ordinary stock.
+_EVIDENCE_KINDS = {"condition", "news", "catalyst", "staleness",
+                   "identity_unavailable"}
 
 
 @dataclass(frozen=True)

@@ -1690,3 +1690,82 @@ def _run_fmp_fallback_impl(
         status_updates=status_updates,
         attempted=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# PR.FMP_ETF_INFO — ETF identity probe (ETF thesis, phase 1)
+# ---------------------------------------------------------------------------
+#
+# The `stable` surface is the pinned one on purpose. Measurement 6 of the
+# design's ledger: `/api/v3/etf/info?symbol=SOXX` returned `200 + []` for a
+# genuine ETF, which the identity verdict table would have read as
+# "PASSED and empty" -> not an ETF. The v3 path is not a fallback here; a
+# wrong-but-successful answer is worse than no answer.
+
+def fetch_etf_info(ticker: str, *, fmp_api_key: str = "") -> AdapterResult:
+    """Probe FMP's stable ETF-info endpoint for `ticker`.
+
+    Emits `AdapterResult.data.items` — the raw row list. The identity meaning
+    of that list belongs to WF.IDENTITY, not to this adapter:
+
+      - PASSED + nonempty  -> the provider says this is an ETF
+      - PASSED + empty     -> the provider says this is not an ETF
+      - anything not PASSED-> unknown; the caller must NOT read a failed
+                              envelope as an empty successful one.
+
+    That last line is why the empty case carries `passed`, not `failed`:
+    "no rows" is a real answer from a reachable provider, and collapsing it
+    into an error would make an outage indistinguishable from a stock.
+    """
+    src = "fmp.fetch_etf_info"
+    if not isinstance(ticker, str) or not ticker.strip():
+        return AdapterResult.failed(code=ErrorCode.INTERNAL_ERROR,
+                                    detail="ticker must be a non-empty string",
+                                    source=src, retryable=False)
+    if not fmp_api_key:
+        return AdapterResult.failed(code=ErrorCode.UNAUTHORIZED,
+                                    detail="fmp_api_key not provided", source=src)
+    try:
+        rows = _fmp_fetch_stable_list(
+            "etf/info", {"symbol": ticker}, fmp_api_key)
+    except _FmpNonListError as se:
+        return AdapterResult.failed(code=ErrorCode.SHAPE_MISMATCH,
+                                    detail=str(se), source=src, retryable=False)
+    except Exception as e:  # noqa: BLE001 — routed through canonical mapper
+        # Pattern S: the return MUST be a direct adapter_error_from_exception
+        # constructor call (no wrapper-helper indirection). Scrub + log first.
+        from scripts.sources.adapter_result import _scrub_detail
+        variants = _fmp_redact_variants(fmp_api_key)
+        print(f"    FMP {src} fetch failed: {_scrub_detail(str(e), variants)}",
+              file=sys.stderr)
+        return adapter_error_from_exception(e, source=src, redact=variants)
+
+    for row in rows:
+        if not isinstance(row, dict):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=f"FMP etf/info row is {type(row).__name__}, not dict",
+                source=src, retryable=False)
+        # Identity binding: a cross-wired row would let another security's
+        # ETF-ness answer for this ticker. An absent symbol makes no claim.
+        from scripts.sources.financial_datasets import _identity_mismatch
+        sym = row.get("symbol")
+        if _identity_mismatch(sym, ticker):
+            return AdapterResult.failed(
+                code=ErrorCode.SHAPE_MISMATCH,
+                detail=(f"response identity mismatch: requested {ticker}, "
+                        f"FMP etf/info row carries {sym}"),
+                source=src, retryable=False)
+
+    # PR.FMP_ETF_INFO.numeric_boundary: coerce provider numerics at the
+    # adapter boundary. Measurement 2: `expenseRatio` arrived as JSON int 1
+    # for SOXS and PSQ while every other payload was a float.
+    data = emit_with_numeric_coerce({"items": rows},
+                                    numeric_fields=_ETF_INFO_NUMERIC_FIELDS)
+    return AdapterResult.passed(data, meta={"source_hint": "fmp_etf_info"})
+
+
+_ETF_INFO_NUMERIC_FIELDS = frozenset({
+    "expenseRatio", "assetsUnderManagement", "avgVolume", "nav",
+    "holdingsCount", "navCurrency",
+})

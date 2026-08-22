@@ -79,6 +79,49 @@ _MIN_INDICATOR_BARS = 74
 # mtime-derived vintage.
 
 
+def indicator_close_series(ohlcv):
+    """`(merged, sanitized)` — the exact two close series the indicator block
+    is built from.
+
+    Extracted so the maturity COUNT and the maturity GATE cannot disagree. Two
+    spellings of "74 usable closes" would eventually let the snapshot report
+    `PASSED` beside a null indicator block, and a consumer that trusts the
+    status then dereferences nothing.
+    """
+    from scripts.indicators import merge_adjusted_closes, _sanitize_closes
+    if not isinstance(ohlcv, dict):
+        return [], []
+    merged = merge_adjusted_closes(list(ohlcv.get("close") or []),
+                                   list(ohlcv.get("adjclose") or []))
+    return merged, _sanitize_closes(merged)
+
+
+def ticker_indicator_status(*, price_status, ohlcv, fetched: bool) -> dict:
+    """Why `ticker_indicators[T]` is null, when it is.
+
+    Three causes previously collapsed into one null block: no fetched result,
+    a price status other than PASSED, and a fund with too little history. The
+    third is a fact about the FUND — 5.12% of live US ETFs have under 74
+    sessions — while the first two are facts about the RUN, and only those are
+    worth retrying. A consumer that cannot tell them apart either retries
+    forever on a young fund or treats an outage as a permanent property.
+
+    UNAVAILABLE: nothing fetched, price status not PASSED, or non-dict OHLCV.
+    TOO_YOUNG:   fetched and PASSED, but under `_MIN_INDICATOR_BARS` finite
+                 closes remain after anchoring.
+    PASSED:      the block was produced.
+    """
+    unavailable = {"status": "UNAVAILABLE", "usable_finite_closes": None}
+    if not fetched or not isinstance(ohlcv, dict):
+        return unavailable
+    if not isinstance(price_status, dict) or price_status.get("status") != "PASSED":
+        return unavailable
+    _, clean = indicator_close_series(ohlcv)
+    n = len(clean)
+    return {"status": "PASSED" if n >= _MIN_INDICATOR_BARS else "TOO_YOUNG",
+            "usable_finite_closes": n}
+
+
 def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
     """Run-day indicator block from raw OHLCV — reuses scripts.indicators (DRY).
 
@@ -91,15 +134,14 @@ def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
     from scripts.indicators import (
         calc_macd, calc_bollinger, calc_atr, calc_rsi,
         calc_rsi_series, detect_rsi_divergence, calc_volume,
-        _sanitize_closes, adjust_high_low,
+        adjust_high_low,
     )
-    from scripts.indicators import merge_adjusted_closes
     raw_close = list(ohlcv.get("close", []))
     adj = list(ohlcv.get("adjclose", []))
     # Shared merge (cold-round finding): finite-positive preferred, same
     # basis criterion as adjust_high_low — one implementation across the
     # indicators CLI, this run-day path, and _bench_3m.
-    closes = merge_adjusted_closes(raw_close, adj)
+    closes, closes_clean = indicator_close_series(ohlcv)
     # Probe 1A: same basis-consistency as scripts.indicators — highs/lows are
     # scaled onto the adjusted basis so run-day ATR doesn't explode on a
     # ticker with a split inside the chart window.
@@ -114,7 +156,6 @@ def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
     # Gate on FINITE closes: _sanitize_closes also strips Inf/NaN, and the
     # divergence leg runs on this sanitized series — so "74 usable bars" must
     # mean 74 finite, else divergence silently degrades despite passing the gate.
-    closes_clean = _sanitize_closes(closes)
     if len(closes_clean) < _MIN_INDICATOR_BARS:
         return None
 
@@ -858,6 +899,15 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             rates_status = {
                 "status": "PARTIAL",
                 "source": "disk",
+                # The vintage as a STRUCTURED field, not only interpolated
+                # into the prose below. A consumer deciding whether a cached
+                # policy rate is fresh enough to reason from cannot parse it
+                # out of an error string, and the ETF readiness predicate is
+                # specified to require exactly this field on the PARTIAL
+                # path — without it, every PARTIAL-rates run would refuse
+                # every fund as `rates_stale`. None when the cache carries no
+                # vintage: an undated cache cannot be shown to be fresh.
+                "as_of_date": disk_rates.get("as_of_date"),
                 "error_detail": (
                     f"live rates fetch failed; disk cache is "
                     f"{'of unknown age' if age_days is None else f'{age_days} days old'} "
@@ -949,6 +999,9 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     ticker_price_statuses = {}
     ticker_indicators = {}
     ticker_price_structure = {}
+    # Why each null indicator block is null. Computed on the SAME anchored
+    # series the block itself is gated on, so the two can never disagree.
+    ticker_indicator_statuses = {}
     _series_by_ticker = {}
     for t in tickers:
         triple = raw.get(("ticker", t))
@@ -957,6 +1010,8 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             ticker_price_statuses[t] = _missing_status
             ticker_indicators[t] = None
             ticker_price_structure[t] = None
+            ticker_indicator_statuses[t] = ticker_indicator_status(
+                price_status=None, ohlcv=None, fetched=False)
             continue
         price, ohlcv, status = triple
         ticker_prices[t] = price
@@ -967,6 +1022,8 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         if status.get("status") != "PASSED" or not isinstance(ohlcv, dict):
             ticker_indicators[t] = None
             ticker_price_structure[t] = None
+            ticker_indicator_statuses[t] = ticker_indicator_status(
+                price_status=status, ohlcv=ohlcv, fetched=True)
             continue
 
         anchored = _anchored_ohlcv(ohlcv, anchor)
@@ -1025,6 +1082,12 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
                   for k, v in anchored.items()}
         ticker_indicators[t] = _compute_ticker_indicators(
             sliced, price, bench_returns=bench_returns)
+        # `sliced`, not `anchored`: the status must describe the series the
+        # block was actually built from. INDICATOR_SLICE_SESSIONS (126) is
+        # above the 74-bar minimum, so the window never manufactures a
+        # TOO_YOUNG on a fund that has the history.
+        ticker_indicator_statuses[t] = ticker_indicator_status(
+            price_status=status, ohlcv=sliced, fetched=True)
 
     # Cohort recovery over ALL requested tickers (failed -> [], staying in
     # the denominator — a failed fetch must not silently shrink the universe).
@@ -1042,6 +1105,7 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         "rates": rates,
         "ticker_prices": ticker_prices,
         "ticker_indicators": ticker_indicators,
+        "ticker_indicator_status": ticker_indicator_statuses,
         "ticker_price_structure": ticker_price_structure,
         "universe_rebound_structure": _cohort,
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),

@@ -84,6 +84,45 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
+## Step 0: Is this a fund?
+
+The dashboard is built from a stock's `bq_analysis.json` view-model. A fund
+has none, so an ETF ticker would fail here with a message about a missing
+business-quality artifact rather than about the instrument.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -c "
+from pathlib import Path
+from scripts.delta.constants import SKILL_ETF
+from scripts.delta.resolver import find_latest_prior
+from scripts.schemas.instrument_registry import load_instrument_registry
+# Identity FIRST: a fund nobody has analysed has no thesis to find, and a
+# thesis-only check would call it a stock and fail on a missing
+# business-quality artifact instead of on the instrument.
+kind = 'unknown'
+try:
+    kind = load_instrument_registry(
+        Path('reports') / '<TICKER>' / 'instrument_type.json').instrument_type
+except Exception:
+    pass
+print('IS_ETF' if (kind == 'etf'
+      or find_latest_prior('<TICKER>', SKILL_ETF, include_today=True)) else 'NOT_ETF')
+"
+```
+
+If it prints `IS_ETF`: **STOP** for that ticker. Tell the user there is no ETF
+dashboard — the readable deliverable for a fund is its `etf_summary.md` from
+`/etf-thesis`, and `/write-report <TICKER>` will present it. Do not compose a
+dashboard from partial data; a panel with the fund's price and empty
+business-quality scores looks like an analysis that found nothing rather than
+one that does not apply.
+
+In portfolio mode, skip fund tickers with a named line in the output rather
+than dropping them silently — a holding missing from a dashboard reads as a
+holding that does not exist.
+
 ## Step 0: Pick the mode
 
 Decide the mode from the user's argument — no shell state involved:

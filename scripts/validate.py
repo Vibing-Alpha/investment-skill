@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -949,11 +950,164 @@ def _run_stress_tests(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# P.ETF_BUY_ORDER / P.ENTRY_PERMITTED — the manifest gate
+# ---------------------------------------------------------------------------
+#
+# Reproduced before this existed: state `{AAPL}` plus proposed `buy SOXX`
+# returned `passed=True, violations=[]`. Nothing in this function's inputs
+# could tell an out-of-universe ticker from a fund, a stock, or a typo.
+#
+# The manifest is that missing input, and its ABSENCE fails every buy —
+# stock buys included. That degradation is the accepted price of closing the
+# hole rather than a bug: scoping the rule to ETFs is what reopened it once
+# already, because deciding whether a ticker is an ETF is precisely what
+# requires the manifest.
+#
+# Sells are never gated. A stale artifact is a reason not to open a position,
+# never a reason to be unable to close one.
+
+# Sentinel: "the caller supplied no manifest", distinct from "the caller
+# supplied a manifest that failed to load". Both fail every buy; only the
+# second names a file.
+MANIFEST_NOT_SUPPLIED = object()
+
+
+def _entry_permitted(row, compiled_policy, *, action_date):
+    """P.ENTRY_PERMITTED — every condition, evaluated together.
+
+    One helper, called by the one consumer. The contract's `consumer_policy`
+    is explicit that no consumer restates or subsets these conditions: a
+    second copy would drift, and the direction that matters is the one that
+    says yes.
+    """
+    from scripts.etf.policy import etf_policy_approval
+    from scripts.etf.profile import ETF_PROFILE_MAX_AGE_DAYS
+    from scripts.schemas.strategy import parse_canonical_iso_date
+
+    reasons = []
+    raw = getattr(row, "raw", row)
+
+    # `is not True`, not falsiness: a string "false" is truthy, and this is
+    # the single bit that says the owner opened the ETF path at all.
+    if compiled_policy is None or compiled_policy.etf_entry_enabled is not True:
+        reasons.append("etf entry is not enabled in the compiled strategy")
+        return reasons          # nothing below can rescue this
+
+    approval = etf_policy_approval(compiled_policy.etf_policy,
+                                   raw["ticker"], action_date)
+    if approval.status != "current":
+        reasons.append(f"owner approval is {approval.status}")
+
+    if raw.get("entry_eligibility") != "pass":
+        reasons.append(f"entry_eligibility is "
+                       f"{raw.get('entry_eligibility')!r}, not 'pass'")
+
+    # Profile age is an ENTRY leg (thesis age is only a refresh signal): the
+    # composition screens are what admit the fund, and a 90-day-old
+    # composition is a fund nobody has looked at since.
+    retrieved = raw.get("profile_retrieved_at")
+    retrieved_date = (parse_canonical_iso_date(retrieved[:10])
+                      if isinstance(retrieved, str) else None)
+    if retrieved_date is None:
+        reasons.append("profile has no readable retrieval date")
+    elif retrieved_date > action_date:
+        # A profile dated after the run has not been taken. Without this the
+        # age check reads a NEGATIVE age as comfortably inside the limit, so a
+        # clock-skewed run or a hand-edited manifest produces a profile that
+        # never expires. Same rule as the approval date, for the same reason.
+        reasons.append(
+            f"profile is dated {retrieved_date.isoformat()}, after the run "
+            f"date {action_date.isoformat()}")
+    elif (action_date - retrieved_date).days > ETF_PROFILE_MAX_AGE_DAYS:
+        reasons.append(
+            f"profile is {(action_date - retrieved_date).days} days old, over "
+            f"the {ETF_PROFILE_MAX_AGE_DAYS}-day limit")
+
+    if raw.get("analysis_readiness") != "ready":
+        reasons.append(f"analysis_readiness is "
+                       f"{raw.get('analysis_readiness')!r}, not 'ready'")
+
+    merit = raw.get("merit_recommendation")
+    admitted = getattr(compiled_policy.etf_policy, "merit_admission", ())
+    if merit not in admitted:
+        reasons.append(f"merit {merit!r} is not in merit_admission "
+                       f"{list(admitted)}")
+    return reasons
+
+
+def _etf_buy_violations(order, manifest, manifest_sha256, seal,
+                        compiled_policy, *, action_date):
+    """Violations attaching to ONE buy. Empty means this buy may proceed.
+
+    Evaluated per recommendation and never aggregated into a set-level gate:
+    re-aggregating reinstates the defect where a rejected buy withholds a
+    valid sell.
+    """
+    ticker = str(order.get("ticker") or "").strip().upper()
+    def v(message):
+        return [{"constraint": "etf_entry", "ticker": ticker,
+                 "message": message}]
+
+    if manifest is MANIFEST_NOT_SUPPLIED:
+        return v("no ETF manifest was supplied; every buy is blocked until "
+                 "one is built (scripts.etf.manifest build)")
+    if manifest is None:
+        return v("the ETF manifest is missing, unparseable, or "
+                 "loader-invalid; every buy is blocked")
+
+    row = manifest.row(ticker)
+    if row is None:
+        return v(f"no manifest row for {ticker} — a buy for a ticker nobody "
+                 f"classified cannot be authorized")
+    if row.row_kind == "etf_unresolved":
+        return v(f"{ticker} identity is unresolved")
+    if row.row_kind == "stock":
+        return []               # ordinary equity: the stock path owns it
+    if row.row_kind == "etf_unavailable":
+        return v(f"{ticker} ETF artifacts are unavailable "
+                 f"({row.raw.get('reason')})")
+    if row.bundle_status != "loaded":
+        return v(f"{ticker} bundle status is {row.bundle_status!r}")
+
+    reasons = _entry_permitted(row, compiled_policy, action_date=action_date)
+    if reasons:
+        return v(f"{ticker} entry not permitted: " + "; ".join(reasons))
+
+    from scripts.schemas.decision_seal import verify_seal_against_row
+    ok, seal_reasons = verify_seal_against_row(
+        seal.for_ticker(ticker) if seal is not None else None, row,
+        manifest_sha256=manifest_sha256 or "")
+    if not ok:
+        return v(f"{ticker} decision seal: " + "; ".join(seal_reasons))
+
+    order_type = str(order.get("type") or "")
+    if order_type not in (_LIMIT_HONOURING_TYPES & set(_VALID_TYPES)):
+        return v(f"{ticker} ETF buy must use a limit-honouring order type, "
+                 f"got {order_type!r}")
+    ceiling = None
+    for field in _CEILING_PRICE_FIELDS:
+        candidate = order.get(field)
+        if _usable_price(candidate):
+            ceiling = candidate
+            break
+    if ceiling is None:
+        return v(f"{ticker} ETF buy states no finite positive price ceiling "
+                 f"in {list(_CEILING_PRICE_FIELDS)}")
+    return []
+
+
 def validate_portfolio(
     state: Dict[str, Any],
     prices: Dict[str, Any],
     proposed_orders: List[Dict[str, Any]],
     constraints: Dict[str, Any],
+    *,
+    manifest: Any = MANIFEST_NOT_SUPPLIED,
+    manifest_sha256: Optional[str] = None,
+    decision_seal: Any = None,
+    compiled_policy: Any = None,
+    action_date: Any = None,
 ) -> Dict[str, Any]:
     """Validate portfolio constraints against proposed orders.
 
@@ -1549,9 +1703,33 @@ def validate_portfolio(
 
     all_violations.extend(unprojectable_violations)
 
+    # P.ETF_BUY_ORDER — every recommendation judged on its own, survivors
+    # filtered afterwards. Deliberately NOT folded into one boolean: a
+    # rejected buy must not withhold a valid sell, and this design was
+    # revised twice to remove exactly that coupling.
+    import datetime as _dt
+    _action_date = action_date or _dt.date.today()
+    order_results = []
+    etf_violations = []
+    for _order in (proposed_orders or []):
+        if not isinstance(_order, dict):
+            continue
+        entry = {"ticker": _order.get("ticker"),
+                 "action": _order.get("action"),
+                 "passed": True, "violations": []}
+        if _is_buy(_order):
+            entry["violations"] = _etf_buy_violations(
+                _order, manifest, manifest_sha256, decision_seal,
+                compiled_policy, action_date=_action_date)
+            entry["passed"] = not entry["violations"]
+            etf_violations.extend(entry["violations"])
+        order_results.append(entry)
+
     return {
-        "passed": len(all_violations) == 0 and stress_passed,
-        "violations": all_violations,
+        "passed": (len(all_violations) == 0 and stress_passed
+                   and not etf_violations),
+        "violations": all_violations + etf_violations,
+        "order_results": order_results,
         "warnings": warnings,
         "stress_test": stress_test,
         # Probe-2 A3: exact echo of the order set this artifact validated.
@@ -1607,6 +1785,16 @@ def _main():
     parser.add_argument(
         "--output", default=None,
         help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--manifest", default=None,
+        help=("Path to .etf_manifest.json. REQUIRED for any buy to pass: "
+              "without it nothing can tell an out-of-universe ticker from a "
+              "fund, and every buy is blocked."),
+    )
+    parser.add_argument(
+        "--decision-seal", default=None,
+        help="Path to .decision_ctx.json (required for any ETF buy to pass)",
     )
     args = parser.parse_args()
 
@@ -1664,7 +1852,37 @@ def _main():
     # for the dict shape that validate_portfolio + _guard_constraints expect.
     constraints = compiled.hard_constraints.to_mapping()
 
-    result = validate_portfolio(state, prices, orders, constraints)
+    # The manifest and seal are read the same way every other money-path
+    # input is: a file that fails to load becomes an explicit `None`, which
+    # the gate reads as "blocked", rather than an exception that takes the
+    # run down or a silent default that lets buys through.
+    manifest = MANIFEST_NOT_SUPPLIED
+    manifest_sha = None
+    if args.manifest:
+        from scripts.schemas.etf_manifest import load_etf_manifest
+        try:
+            manifest = load_etf_manifest(args.manifest)
+            manifest_sha = hashlib.sha256(
+                Path(args.manifest).read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            print(f"{prefix}: --manifest {args.manifest} unusable ({exc}); "
+                  f"every buy will be blocked", file=sys.stderr)
+            manifest = None
+
+    seal = None
+    if args.decision_seal:
+        from scripts.schemas.decision_seal import load_decision_seal
+        try:
+            seal = load_decision_seal(args.decision_seal)
+        except (OSError, ValueError) as exc:
+            print(f"{prefix}: --decision-seal {args.decision_seal} unusable "
+                  f"({exc}); every ETF buy will be blocked", file=sys.stderr)
+            seal = None
+
+    result = validate_portfolio(
+        state, prices, orders, constraints,
+        manifest=manifest, manifest_sha256=manifest_sha,
+        decision_seal=seal, compiled_policy=compiled)
 
     # Concurrency probe 2026-08-03 F3: bind this validation to the EXACT
     # portfolio-state content it ran against. portfolio_log compares the

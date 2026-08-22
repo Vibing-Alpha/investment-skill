@@ -37,3 +37,24 @@ risk:
 # Order preferences
 orders:
   earnings_window_days: 7
+
+# ETF entry authorization. OPTIONAL — omit the whole block and ETF entry stays
+# off while every other skill works unchanged.
+#
+# `approved_equity_etfs` is the record that YOU reviewed a fund. Provider data
+# cannot substitute for it and nothing generates it automatically: a fund with
+# a perfect allocation vector, no concentration and deep liquidity is still
+# refused until it appears here. An EMPTY map is valid and authorizes nothing —
+# the machinery is on, no fund is approved.
+#
+#   - only an exact canonical ticker key counts (no wildcard, no sector rule)
+#   - `reviewed_on` older than 90 days reads as expired; re-review and re-date
+#   - non-leveraged EQUITY ETFs only. Defensive funds (SGOV/BIL/SHV/GLD/IAU)
+#     are refused as `composition_out_of_scope` even if listed here
+etf_policy:
+  version: 2
+  allow_non_leveraged_equity_etfs: true
+  merit_admission: [strong_add, add]   # merit verdicts that may admit a buy
+  approved_equity_etfs: {}
+  #   SOXX:
+  #     reviewed_on: "2026-08-22"

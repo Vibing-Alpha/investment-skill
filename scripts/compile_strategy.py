@@ -35,6 +35,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import os
 import sys
 import tempfile
@@ -42,8 +43,8 @@ from pathlib import Path
 
 import yaml
 
-from scripts.cli_utils import normalize_percent_fraction
-from scripts.schemas.strategy import canonical_policy_hash
+from scripts.cli_utils import normalize_percent_fraction, normalize_ticker
+from scripts.schemas.strategy import canonical_policy_hash, derive_etf_entry_enabled
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -103,6 +104,56 @@ _DEFAULT_PRINCIPLES = (
     "Concentrate in sectors where you have a knowledge edge — do not "
     "diversify for diversification's sake.",
 )
+
+
+# C.POLICY_VERSION. The contract version of the `etf_policy` block, not a
+# release number: a policy written against an older shape must be re-authored
+# by the owner rather than reinterpreted by newer code.
+ETF_POLICY_VERSION = 2
+
+_KNOWN_ETF_POLICY_KEYS = frozenset({
+    "version", "allow_non_leveraged_equity_etfs", "approved_equity_etfs",
+    "merit_admission",
+})
+
+# V.MERIT, restricted to the values that admit a buy. `watch`/`pass`/`avoid`
+# are merit verdicts meaning "do not enter"; admitting on one would let the
+# policy authorize entry on its own refusal.
+_MERIT_ADMISSION_ALLOWED = ("strong_add", "add")
+
+
+class _DuplicateKeyLoader(yaml.SafeLoader):
+    """`yaml.SafeLoader` that refuses duplicate mapping keys.
+
+    PR.COMPILE_STRATEGY: "duplicate-key-rejecting YAML load before mapping
+    construction". The stock loader keeps the LAST occurrence and says
+    nothing — on `approved_equity_etfs` that silently discards a review the
+    owner wrote, and the compiled artifact then looks exactly like a policy
+    where the discarded line was never typed.
+    """
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError:  # unhashable key — construct_mapping will report it
+            continue
+        if duplicate:
+            raise _Invalid(
+                f"duplicate key {key!r} in strategy.yaml at line "
+                f"{key_node.start_mark.line + 1}. YAML keeps the last one "
+                f"silently; the earlier value would vanish from the compiled "
+                f"policy with no diagnostic.")
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_DuplicateKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    lambda loader, node: _no_duplicate_keys(loader, node))
 
 
 class _Invalid(Exception):
@@ -219,6 +270,127 @@ def _check_notes(raw) -> dict:
     return raw
 
 
+def _check_etf_policy(raw):
+    """Project + validate `etf_policy:`. Returns the compiled block, or None.
+
+    Absent means the owner has not opened the ETF path at all, which is a
+    valid, complete policy — stock compilation is untouched and ETF entry
+    stays off. Present-but-malformed is not: this block is the only record of
+    which funds the owner reviewed, so a value that cannot be read must stop
+    the run rather than degrade into "nothing approved", which looks
+    identical to a deliberate empty list.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _Invalid(
+            f"`etf_policy:` must be a mapping, got {type(raw).__name__}")
+
+    unknown = sorted(set(raw.keys()) - _KNOWN_ETF_POLICY_KEYS, key=repr)
+    if unknown:
+        raise _Invalid(
+            f"`etf_policy:` has unknown key(s): {unknown}. Known keys: "
+            f"{sorted(_KNOWN_ETF_POLICY_KEYS)}. A typo here compiles to an "
+            f"authorization the owner did not write.")
+
+    version = raw.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise _Invalid(
+            f"`etf_policy.version:` must be the integer {ETF_POLICY_VERSION}, "
+            f"got {version!r}")
+    if version != ETF_POLICY_VERSION:
+        raise _Invalid(
+            f"`etf_policy.version:` is {version}, this build compiles "
+            f"{ETF_POLICY_VERSION}. Re-author the block against the current "
+            f"contract rather than letting newer code reinterpret it.")
+
+    allow = raw.get("allow_non_leveraged_equity_etfs")
+    if not isinstance(allow, bool):
+        raise _Invalid(
+            f"`etf_policy.allow_non_leveraged_equity_etfs:` must be an "
+            f"explicit true or false, got {allow!r}. An absent flag is not a "
+            f"false — inferring the safe value would hide the omission.")
+
+    merit = raw.get("merit_admission")
+    if not isinstance(merit, list) or not merit:
+        raise _Invalid(
+            f"`etf_policy.merit_admission:` must be a non-empty list drawn "
+            f"from {list(_MERIT_ADMISSION_ALLOWED)}, got {merit!r}")
+    bad = [m for m in merit if m not in _MERIT_ADMISSION_ALLOWED]
+    if bad:
+        raise _Invalid(
+            f"`etf_policy.merit_admission:` contains {bad}, outside "
+            f"{list(_MERIT_ADMISSION_ALLOWED)}. The other merit verdicts mean "
+            f"'do not enter'.")
+    if len(set(merit)) != len(merit):
+        raise _Invalid(
+            f"`etf_policy.merit_admission:` contains duplicates: {merit}")
+
+    approved_raw = raw.get("approved_equity_etfs")
+    if approved_raw is None:
+        approved_raw = {}
+    if not isinstance(approved_raw, dict):
+        raise _Invalid(
+            f"`etf_policy.approved_equity_etfs:` must be a mapping of ticker "
+            f"-> {{reviewed_on: <ISO date>}}, got "
+            f"{type(approved_raw).__name__}")
+
+    approved: dict[str, dict] = {}
+    today = _dt.date.today()
+    for ticker_raw, approval in approved_raw.items():
+        try:
+            ticker = normalize_ticker(ticker_raw)
+        except ValueError as exc:
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs:` key {ticker_raw!r} is not "
+                f"a usable ticker: {exc}") from exc
+        if ticker in approved:
+            # Two spellings project onto one key; keeping either silently
+            # discards a review date the owner believes is in force.
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs:` has two keys that both "
+                f"canonicalize to {ticker}. Keep one.")
+        if not isinstance(approval, dict):
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs.{ticker}:` must be a "
+                f"mapping containing exactly `reviewed_on`, got "
+                f"{type(approval).__name__}")
+        if set(approval.keys()) != {"reviewed_on"}:
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs.{ticker}:` must contain "
+                f"exactly `reviewed_on`, got {sorted(map(str, approval))}")
+        reviewed_on = approval["reviewed_on"]
+        # A YAML date literal arrives as a date object; both spellings are the
+        # same authorization, so accept it and emit the canonical string.
+        if isinstance(reviewed_on, _dt.date) and not isinstance(reviewed_on, _dt.datetime):
+            parsed = reviewed_on
+        elif isinstance(reviewed_on, str):
+            try:
+                parsed = _dt.date.fromisoformat(reviewed_on)
+            except ValueError as exc:
+                raise _Invalid(
+                    f"`etf_policy.approved_equity_etfs.{ticker}.reviewed_on:` "
+                    f"is not a valid ISO date (YYYY-MM-DD): {reviewed_on!r}"
+                ) from exc
+        else:
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs.{ticker}.reviewed_on:` must "
+                f"be an ISO date (YYYY-MM-DD), got {reviewed_on!r}")
+        if parsed > today:
+            raise _Invalid(
+                f"`etf_policy.approved_equity_etfs.{ticker}.reviewed_on:` is "
+                f"{parsed.isoformat()}, in the future. A review that has not "
+                f"happened cannot authorize anything.")
+        approved[ticker] = {"reviewed_on": parsed.isoformat()}
+
+    return {
+        "version": version,
+        "allow_non_leveraged_equity_etfs": allow,
+        "approved_equity_etfs": approved,
+        "merit_admission": list(merit),
+    }
+
+
 def _write_atomically(path: Path, doc: dict) -> None:
     """os.replace after a same-directory temp write.
 
@@ -250,12 +422,36 @@ def compile_strategy(source: dict) -> dict:
     hard_constraints = _project_risk(source.get("risk"))
     principles = _check_principles(source.get("principles"))
     notes = _check_notes(source.get("principle_notes"))
+    etf_policy = _check_etf_policy(source.get("etf_policy"))
+    # F.COMPILED.PRINCIPLES_SOURCE: raw None or [] => default, else explicit.
+    # Read from the RAW source, not from `principles` — that variable already
+    # holds the substituted defaults, so it is `explicit` on every path.
+    raw_principles = source.get("principles")
+    principles_source = ("default"
+                         if raw_principles is None or raw_principles == []
+                         else "explicit")
     return {
         "source_hash": canonical_policy_hash(source),
         "hard_constraints": hard_constraints,
         "soft_principles": list(principles),
         "principle_notes": dict(notes),
+        "principles_source": principles_source,
+        "etf_policy": etf_policy,
+        # One derivation, shared with the loader that re-checks it.
+        "etf_entry_enabled": derive_etf_entry_enabled(
+            principles_source,
+            None if etf_policy is None else _EtfPolicyView(etf_policy)),
     }
+
+
+class _EtfPolicyView:
+    """Adapts the compiled dict to the one attribute `derive_etf_entry_enabled`
+    reads, so the compiler and the loader share the derivation rather than
+    each spelling it out."""
+
+    def __init__(self, compiled: dict):
+        self.allow_non_leveraged_equity_etfs = compiled[
+            "allow_non_leveraged_equity_etfs"]
 
 
 def main(argv=None) -> int:
@@ -279,7 +475,10 @@ def main(argv=None) -> int:
 
     try:
         with open(strategy_path, encoding="utf-8") as handle:
-            source = yaml.safe_load(handle)
+            source = yaml.load(handle, Loader=_DuplicateKeyLoader)  # noqa: S506 — SafeLoader subclass
+    except _Invalid as exc:
+        print(f"compile_strategy: {exc}", file=sys.stderr)
+        return EXIT_INVALID
     except (OSError, yaml.YAMLError) as exc:
         print(f"compile_strategy: cannot read {strategy_path}: {exc}",
               file=sys.stderr)

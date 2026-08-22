@@ -3,6 +3,13 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.14.0 — 2026-08-22
+
+- ETF support: non-leveraged equity ETFs become buyable instruments.
+- New /etf-thesis skill — identity detection, eligibility screens (leverage, composition, concentration, liquidity), run-day readiness, and a bound thesis whose every number is checked against the artifact it came from.
+- Buying one requires your own approval: add an etf_policy block to strategy.yaml (see strategy.example.yaml). Approvals expire after 90 days and no provider datum substitutes for one.
+- /portfolio, /monitor, /write-report, /generative-ui and the two stock skills all recognise a fund and route it correctly; a fund reaching /score-business is forwarded rather than scored.
+
 ## v1.13.0 — 2026-08-20
 
 - pull takes --response FILE instead of stdin. The steady-state per-session payload drops from ~331KB to ~61KB, so the tool no longer depends on your harness persisting an oversized tool result to a file — the limitation v1.12.0 shipped with is gone. SCOPE widens accordingly: Codex, Cursor and OpenCode are expected to work and are UNTESTED; say which harness you are on when you report a capture.

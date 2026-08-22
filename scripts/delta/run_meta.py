@@ -64,6 +64,27 @@ class IndustrySection:
 
 
 @dataclass
+class EtfSection:
+    """etf-thesis skill section.
+
+    `artifact_sha256` is over the promoted `etf_thesis.json` BYTES. The
+    portfolio manifest compares it to the file it selected before loading the
+    bundle, so a run_meta pointing at a thesis that was replaced afterwards is
+    caught rather than trusted.
+
+    No `tier` / `prior_source`: the ETF flow has no delta reuse — every run
+    re-derives the profile and the snapshot, because the eligibility screens
+    they feed are the entry gate and a reused screen is a screen nobody ran.
+    """
+    run_id: str
+    artifact_sha256: str
+    agents_run: List[str]
+    completed_at: str
+    completed: bool
+    cost: dict
+
+
+@dataclass
 class RunMeta:
     ticker: str
     et_trading_day: str
@@ -71,6 +92,7 @@ class RunMeta:
     bq: Optional[BQSection] = None
     thesis: Optional[ThesisSection] = None
     industry: Optional[IndustrySection] = None
+    etf: Optional[EtfSection] = None
     warnings: List[str] = field(default_factory=list)
     # Closing round-3 F1: sections from an unloadable/version-mismatched
     # prior file are PARKED here verbatim (with their original
@@ -97,6 +119,9 @@ class RunMeta:
         bq = BQSection(**data["bq"]) if data.get("bq") else None
         thesis = ThesisSection(**data["thesis"]) if data.get("thesis") else None
         industry = IndustrySection(**data["industry"]) if data.get("industry") else None
+        # A legacy run_meta written before the ETF layer has no `etf` key and
+        # must still load — absence is the norm for every stock run.
+        etf = EtfSection(**data["etf"]) if data.get("etf") else None
         return cls(
             ticker=data["ticker"],
             et_trading_day=data["et_trading_day"],
@@ -104,6 +129,7 @@ class RunMeta:
             bq=bq,
             thesis=thesis,
             industry=industry,
+            etf=etf,
             warnings=data.get("warnings", []),
             preserved_legacy=(data.get("preserved_legacy")
                               if isinstance(data.get("preserved_legacy"), dict)
@@ -188,7 +214,9 @@ def _cli():
     w = sub.add_parser("write")
     w.add_argument("--run-dir", required=True, help="reports/{T}/{YYYYMMDD}/")
     w.add_argument("--ticker", required=True)
-    w.add_argument("--skill", required=True, choices=["score-business", "investment-thesis", "research-industry"])
+    w.add_argument("--skill", required=True,
+                   choices=["score-business", "investment-thesis",
+                            "research-industry", "etf-thesis"])
     w.add_argument(
         "--tier",
         default=None,
@@ -221,6 +249,14 @@ def _cli():
     w.add_argument("--cost-json", default=None, help="Path to {tokens, duration_s} dict")
     w.add_argument("--probe-json", default=None, help="Path to probe data dict (BQ only)")
     w.add_argument("--events-reuse-json", default=None, help="Events reuse decision (thesis only)")
+    w.add_argument(
+        "--artifact-sha256",
+        default=None,
+        help=("sha256 over the promoted etf_thesis.json bytes (etf-thesis "
+              "only). The portfolio manifest compares it to the file it "
+              "selected, so a run_meta pointing at a thesis replaced after "
+              "the fact is caught rather than trusted."),
+    )
     w.add_argument("--agents-run", default="", help="Comma-separated agent names")
     w.add_argument("--data-fetched", default="", help="Comma-separated category prefixes")
     w.add_argument("--data-copied-from-prior", default="", help="Comma-separated category prefixes copied")
@@ -264,6 +300,17 @@ def _cli():
                 file=sys.stderr,
             )
             sys.exit(2)
+        if args.skill == "etf-thesis":
+            if args.tier is not None:
+                print("run_meta write: --tier is not used for --skill "
+                      "etf-thesis (the ETF flow has no delta reuse); ignoring.",
+                      file=sys.stderr)
+            if not args.artifact_sha256:
+                print("run_meta write: --artifact-sha256 is required for "
+                      "--skill etf-thesis — without it the manifest cannot "
+                      "tell whether the thesis it selected is the one this "
+                      "run wrote", file=sys.stderr)
+                sys.exit(2)
         if args.skill == "investment-thesis" and args.tier is not None:
             print(
                 "run_meta write: --tier is not used for --skill investment-thesis "
@@ -338,6 +385,15 @@ def _cli():
             prior_source=args.prior_source,
             framing_refresh=framing_refresh,
             candidates_count=args.candidates_count,
+            agents_run=agents_run,
+            completed_at=completed_at,
+            completed=args.completed,
+            cost=cost,
+        )
+    elif args.skill == "etf-thesis":
+        rm.etf = EtfSection(
+            run_id=run_id,
+            artifact_sha256=args.artifact_sha256,
             agents_run=agents_run,
             completed_at=completed_at,
             completed=args.completed,

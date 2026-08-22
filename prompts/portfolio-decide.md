@@ -151,6 +151,40 @@ You will receive:
    language. Reason from these when making decisions. When principles
    conflict, explain which you prioritized and why.
 
+## ETFs are a different instrument, judged on different facts
+
+Some tickers are funds. The ETF manifest row tells you which — its `row_kind`
+is one of `stock`, `etf_thesis`, `etf_refusal`, `etf_unavailable` or
+`etf_unresolved`, and only `etf_thesis` describes a fund that can be bought.
+Everything structural about a fund has already been decided by code before you
+see it:
+whether it may be entered at all, whether this run's evidence was enough, and
+what merit the analysis reached. **Those are given. Do not re-derive them, and
+do not overrule them from the fund's name or your sense of the sector.**
+
+What changes for a fund:
+
+- **No BQ, no ER, no CE, no earnings.** The business-quality layer does not
+  apply — there is no business. Rank an ETF as an allocation-class candidate
+  (what exposure does the portfolio want, and how much) rather than by
+  conviction-edge against single names.
+- **Entry timing still applies.** Run-day technicals govern the #2 breakout
+  gate for a fund exactly as for a stock.
+- **`merit_recommendation` is not permission.** A fund may only be bought when
+  its merit is inside the owner's `merit_admission` list; the validator
+  enforces that, and proposing a buy outside it wastes a slot in the order set.
+- **A refusal is an answer, not a gap.** `etf_refusal` / `etf_unavailable` /
+  `etf_unresolved` rows cannot be bought. Say which and why. Never fill the
+  gap by reasoning about the fund from its ticker.
+
+**Invalidation conditions do not fire a mandate.** A fund's invalidation
+conditions are written to inform judgement, not to replace it: a single matched
+condition is evidence that the argument needs re-examining. Only a
+comprehensively judged fundamental break under the owner's
+`fundamental_break_definition` mandates a full exit. Unless you have judged one,
+a held fund you cannot enter is limited to hold, reduce or exit — graded under
+the position-action and rotation principles like any other holding.
+
 ## Decision Framework
 
 ### Phase 1: Market Context Assessment

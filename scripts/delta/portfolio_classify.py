@@ -33,6 +33,7 @@ from typing import Optional
 from scripts.delta.calendar import today_et
 from scripts.delta.constants import (
     SKILL_BQ, SKILL_THESIS,
+    SKILL_ETF,
     STATE_FRESH, STATE_STALE_BQ, STATE_STALE_THESIS,
     STATE_BQ_ONLY, STATE_NONE,
 )
@@ -302,6 +303,40 @@ def degradation_summary(bq_dir) -> dict:
     return {"validation_status": vs, "degraded_categories": deg}
 
 
+def _classify_etf(ticker: str, root: Path) -> Optional[str]:
+    """`fresh` / `stale_thesis` for a fund, or None when this is not one.
+
+    The ARTIFACT is the discriminator, not a separate identity lookup: a
+    ticker with an `etf_thesis.json` is a fund whatever else sits beside it,
+    and the ETF artifact takes precedence over coexisting stock artifacts.
+    That precedence matters for a real case — a ticker scored as a stock
+    BEFORE the forwarding detector existed still has a `bq_analysis.json`,
+    and reading it would report a business-quality verdict for a fund.
+
+    Only two states are reachable. There is no `stale_bq` for a fund (no BQ
+    layer exists), no `bq_only`, and `none` is answered by the caller when
+    there is no ETF artifact at all.
+
+    Never raises: a mis-filed or corrupt ETF artifact must not take a whole
+    portfolio batch down with it, so anything unreadable reads as
+    `stale_thesis` — the state that asks for a refresh.
+    """
+    etf_dir = find_latest_prior(ticker, SKILL_ETF, reports_root=root,
+                                include_today=True)
+    if etf_dir is None:
+        return None
+    rm = RunMeta.load_or_none(Path(etf_dir) / "run_meta.json")
+    if rm is None or rm.etf is None:
+        return STATE_STALE_THESIS
+    try:
+        age = (today_et() - datetime.date.fromisoformat(rm.et_trading_day)).days
+    except (ValueError, TypeError):
+        return STATE_STALE_THESIS
+    if age < 0 or age > THESIS_STALE_DAYS:
+        return STATE_STALE_THESIS
+    return STATE_FRESH
+
+
 def classify(ticker: str, reports_root: Optional[Path] = None) -> str:
     """Return one of: fresh | stale_bq | stale_thesis | bq_only | none."""
     # Probe 3A: canonicalize once — the resolver normalizes its own lookups,
@@ -309,6 +344,15 @@ def classify(ticker: str, reports_root: Optional[Path] = None) -> str:
     from scripts.cli_utils import normalize_ticker
     ticker = normalize_ticker(ticker)
     root = reports_root or DEFAULT_REPORTS_ROOT
+
+    # Funds first. Without this an ETF with a complete, day-old thesis
+    # classifies as `none` — indistinguishable from one that was never
+    # analysed — and `/portfolio` excludes `none` from its refresh plan, so
+    # the thesis could age indefinitely without ever being offered a refresh.
+    etf_state = _classify_etf(ticker, root)
+    if etf_state is not None:
+        return etf_state
+
     bq_dir = find_latest_prior(ticker, SKILL_BQ, reports_root=root, include_today=True)
     thesis_dir = find_latest_prior(ticker, SKILL_THESIS, reports_root=root, include_today=True)
 

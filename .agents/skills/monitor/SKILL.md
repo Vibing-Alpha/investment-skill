@@ -116,12 +116,47 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
 REPORT_DIR="reports/monitor/$(echo "$RUN_DATE" | tr -d '-')"
+# Identity prepass first: the probe needs to know which tickers are funds.
+# `--etf-identity` is REQUIRED — without it every ticker would read as
+# unclassified, and a forgotten flag must not be indistinguishable from a
+# deliberate empty map.
+mkdir -p "$REPORT_DIR"
+VENDOR_ALIASES=$("$PYBIN" -c "
+import json, pathlib
+from scripts.monitor import load_vendor_aliases
+print(json.dumps(load_vendor_aliases(pathlib.Path('portfolio-state.yaml'))))
+") || { echo "FATAL: symbol_aliases in portfolio-state.yaml is malformed" >&2; exit 1; }
+ALL=$("$PYBIN" -c "
+import pathlib, yaml
+from scripts.cli_utils import normalize_ticker
+state = yaml.safe_load(pathlib.Path('portfolio-state.yaml').read_text(encoding='utf-8')) or {}
+seen = {}
+for src in ((state.get('holdings') or {}), (state.get('watchlist') or [])):
+    for raw in src:
+        try:
+            seen.setdefault(normalize_ticker(raw), None)
+        except ValueError:
+            pass
+print(','.join(seen))
+")
+"$PYBIN" -m scripts.etf.detect --tickers "$ALL" --aliases "$VENDOR_ALIASES" \
+  --output "$REPORT_DIR/.etf_identity.json" --root "$PWD" \
+  || { echo "FATAL: identity prepass did not write its map" >&2; exit 1; }
+
 "$PYBIN" -m scripts.monitor probe --state portfolio-state.yaml \
-  --output "$REPORT_DIR/monitor_probe.json" --run-date "$RUN_DATE"
+  --output "$REPORT_DIR/monitor_probe.json" --run-date "$RUN_DATE" \
+  --etf-identity "$REPORT_DIR/.etf_identity.json"
 ```
-If this **exits non-zero** (empty universe — no holdings or watchlist, or missing
-`portfolio-state.yaml`), there is nothing to monitor: tell the user and STOP. Do not
-proceed to Step 2.
+If any command here **exits non-zero** — an empty universe (no holdings or
+watchlist, or a missing `portfolio-state.yaml`), a malformed alias map, or an
+identity prepass that wrote nothing — there is nothing usable to monitor: tell
+the user and **STOP**. Do not proceed to Step 2.
+
+A ticker the prepass cannot classify still gets a probe row, priced and
+visible, carrying `identity_unavailable` evidence. That is a fact about the
+RUN, not a reason to drop the position from the digest — and the router is
+told not to send it down a stock path, because nothing established it is a
+stock.
 
 ## Step 2: Dispatch the router (judgment → raw plan)
 
@@ -201,7 +236,13 @@ what to run.
 
 For each item the user selected, invoke its `route` skill **sequentially** (never in
 parallel), passing the ticker where applicable:
-- `/investment-thesis <ticker>` · `/portfolio` · `/score-business <ticker>` · `/screen-stocks`
+- `/investment-thesis <ticker>` · `/portfolio` · `/score-business <ticker>` ·
+  `/screen-stocks` · `/etf-thesis <ticker>`
+
+`/etf-thesis` is the ETF counterpart of `/investment-thesis` and takes a
+ticker. An ETF routed to `/score-business` by mistake is stopped by that
+skill's own forwarding detector, so nothing is scored wrongly — the item is
+simply wasted.
 
 Invoke one, let it complete (it owns its own cascades), then the next. Do NOT trigger
 anything the user did not select. `/monitor` itself decides nothing about the trades —

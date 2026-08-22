@@ -41,6 +41,10 @@ scripts/audit_fail_open.py    export-ignore
 scripts/smoke_test.py         export-ignore
 scripts/replay_and_diff.py    export-ignore
 scripts/check_artifact_compat.py export-ignore
+# Dev-only: validates the ETF DESIGN DOCUMENT, which lives under the
+# already-export-ignored `docs/`. Published, it would ship a command that
+# fails on a missing file for every recipient.
+scripts/check_etf_spec.py     export-ignore
 scripts/dev/    export-ignore
 
 # Dev-authoring rule — auto-loaded every session by Claude Code but useless to an

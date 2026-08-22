@@ -103,6 +103,28 @@ If it exits non-zero, STOP and show its stderr to the user (config not confirmed
 required API key missing) — do NOT run any analysis or produce numbers. Then continue
 below.
 
+## Instrument check (runs before any fetch or allocation)
+
+An ETF has no business to score and no filings to read. Scoring one produces a
+business-quality verdict for something with no business — plausible-looking and
+meaningless. So identity is settled BEFORE anything is fetched or allocated.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.etf.detect --ticker "<TICKER>" --root "$PWD"
+```
+
+Read `instrument_type` from the printed JSON:
+
+- `equity` → continue with this skill.
+- `etf` → tell the user this is a fund and run **/etf-thesis <TICKER>** instead.
+  **STOP** here: do not fetch, do not allocate a run directory.
+- `unknown` → the two identity sources disagreed or one was unreachable. Show
+  `source_verdicts` and **STOP** — do not fetch, do not allocate. An unresolved
+  identity authorizes nothing, and guessing from the ticker's name is exactly
+  the shortcut this check exists to remove.
+
 ## Prerequisites
 
 A complete BQ analysis must exist. Use the delta-aware resolver — NOT

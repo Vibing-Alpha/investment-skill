@@ -66,6 +66,37 @@ Routing (`route` is a BARE enum):
 | A holding needs a position decision; or a watchlist `entry_attractive_if` fired with an actionable setup | `/portfolio` (critical/watch) |
 | `staleness.state == "stale_bq"` (the BQ needs a full refresh — either aged out, or its last run lost important data) or fundamental deterioration | `/score-business` (watch) |
 | Watchlist has NO triggered/near candidate | one `ticker:null` item → `/screen-stocks` (info) |
+| An ETF (`instrument_type: "etf"`) whose thesis has aged out, or whose invalidation conditions warrant re-examining | `/etf-thesis` (watch/critical) |
+| A ticker carrying `identity_unavailable` evidence | `/portfolio` (info) — state the fact, route NOTHING to a stock path |
+
+- **`instrument_type` decides which routes are even available.** An ETF is not
+  a company: `/score-business` and `/investment-thesis` do not apply to it, and
+  a fund misrouted there is stopped by the forwarding detector anyway — the
+  item is simply wasted. Route ETFs to `/etf-thesis` for a refresh, or route to
+  `/portfolio` when the position itself needs a decision.
+  **Mind your vocabulary.** The plan validator REJECTS the whole plan when a
+  `reason` or the `summary` contains position-action words — `buy`, `sell`,
+  `hold`, `reduce`, `exit`, `trim`, `add to position`, 买入/卖出/加仓/减仓/清仓/
+  止损/仓位 — outside the sanctioned handoff phrase `route to /portfolio`. So
+  describe the SITUATION and hand it off: "invalidation conditions need review
+  against current evidence; route to /portfolio" passes, while naming the
+  action you think follows does not. This is not a formatting rule: naming the
+  action here IS deciding the trade, which is what /monitor does not do.
+- **A held ETF whose invalidation conditions need comprehensive review routes
+  `critical` to `/portfolio`.** Surface the conditions and the current evidence
+  side by side and say which look close. Do NOT declare a fundamental break:
+  a single matched condition is evidence that the argument needs
+  re-examining, not a verdict. What follows from a comprehensively judged
+  fundamental break is the owner's call, made at `/portfolio` with the full
+  picture — never here, and never named here.
+- **`stale_thesis` may stand alone for an ETF refresh.** For stock tickers
+  staleness is supporting evidence only; an ETF has no BQ layer behind it, so
+  an aged thesis is the whole of the signal and `/etf-thesis` is the route.
+- **`identity_unavailable` means nothing classified this instrument.** It is a
+  fact about the RUN, not about the ticker. Say so plainly and do not route it
+  to `/score-business` or `/investment-thesis` — nothing established it is a
+  stock. The position stays visible and priced; it is the classification that
+  is missing, not the holding.
 
 - **`stale_bq` does not tell you WHICH of its two causes fired.** The probe
   carries day counts and the state, not the degradation detail, so a BQ that ran
@@ -93,6 +124,8 @@ Routing (`route` is a BARE enum):
   empty `evidence_refs`. `/investment-thesis` and `/score-business` are ticker-specific and
   evidence-triggered: each MUST have a real `ticker` (one in the probe universe) AND ≥1
   `evidence_refs`, and every `evidence_refs` entry MUST be one of THAT ticker's evidence_ids.
+  `/etf-thesis` is ticker-specific and evidence-triggered, exactly like
+  `/investment-thesis`: a real `ticker` plus ≥1 of THAT ticker's `evidence_refs`.
   `/portfolio` is portfolio-wide (the SKILL runs it without a ticker): both `ticker` and
   `evidence_refs` are OPTIONAL — give a `ticker` + that holding's `evidence_refs` when one
   holding prompted the review (context only), or `ticker: null` with empty `evidence_refs` for a
@@ -132,6 +165,6 @@ outside `reason`/`summary`.
 }
 ```
 
-`route` ∈ {`/investment-thesis`, `/portfolio`, `/score-business`, `/screen-stocks`}; `priority`
+`route` ∈ {`/investment-thesis`, `/portfolio`, `/score-business`, `/screen-stocks`, `/etf-thesis`}; `priority`
 ∈ {`critical`, `watch`, `info`}; `evidence_refs` are `evidence_id` strings that MUST exist in
 the probe. If nothing is worth attention, emit `{"summary": "...", "items": []}`.

@@ -94,14 +94,14 @@ _CORE_RE = re.compile(
 # The 8 plugin-shipped business skills (same list as tests/test_skill_prelude.py).
 MONEY_PATH_SKILLS = (
     "score-business", "investment-thesis", "screen-stocks", "research-industry",
-    "portfolio", "monitor", "write-report", "generative-ui",
+    "portfolio", "monitor", "write-report", "generative-ui", "etf-thesis",
 )
 SETUP_SKILL = "stock-v7-setup"  # resolver-core identity only (own tail/flow)
 # config_gate Preflight tiers (same lists/regex as tests/test_money_path_skills_gated.py
 # — distribute.py cannot import pytest files, so the tiny regex is mirrored here;
 # the pytest lint stays the independent guard against THIS copy drifting).
 PREFLIGHT_BASE_SKILLS = ("score-business", "investment-thesis",
-                         "screen-stocks", "research-industry")
+                         "screen-stocks", "research-industry", "etf-thesis")
 PREFLIGHT_PORTFOLIO_SKILLS = ("portfolio", "monitor", "generative-ui")
 _GATE_CMD = r'(?:"\$PYBIN"|python3) -m scripts\.config_gate check'
 _PREFLIGHT_SEC_RE = re.compile(

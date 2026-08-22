@@ -107,6 +107,52 @@ run `/score-business {TICKER}` first. Do not invent a report. Note the printed
 `REPORT_DIR` (relative to the repo root): the absolute form is
 `<captured-abs-ROOT>/<REPORT_DIR>` — use it for every Read and dispatch path below.
 
+## Step 0: Is this a fund?
+
+An ETF has no `bq_analysis.json` and never will — there is no business to
+score. Without this check the next step reports `FATAL: bq_analysis.json
+missing/invalid`, which sends the user to re-run `/score-business` on
+something that skill now refuses.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -c "
+from pathlib import Path
+from scripts.delta.constants import SKILL_ETF
+from scripts.delta.resolver import find_latest_prior
+from scripts.schemas.instrument_registry import load_instrument_registry
+# Identity FIRST. A fund nobody has analysed yet has no thesis to find, so a
+# thesis-only check calls it a stock and sends the user to a
+# 'bq_analysis.json missing' error about the wrong problem.
+kind = 'unknown'
+try:
+    kind = load_instrument_registry(
+        Path('reports') / '<TICKER>' / 'instrument_type.json').instrument_type
+except Exception:
+    pass
+d = find_latest_prior('<TICKER>', SKILL_ETF, include_today=True)
+summary = (Path(d) / 'etf_summary.md').as_posix() if d else ''
+print(f'{kind}|{summary}')
+"
+```
+
+Read the two fields:
+
+- **`etf|<path>`** — a fund WITH a report. Do not compose a stock report: read
+  that `etf_summary.md` and present it in the user's `output_language`. It is
+  already the readable write-up for a fund, produced by `/etf-thesis` with
+  every number bound to a hashed artifact. Say plainly that the
+  business-quality sections do not apply to a fund, and **STOP**.
+- **`etf|`** (no path) — a fund nobody has analysed. There is nothing to
+  report. Tell the user to run **`/etf-thesis <TICKER>`** and **STOP**; do NOT
+  continue to Step 1, which would fail with a message about a missing
+  `bq_analysis.json` — the wrong problem.
+- **`equity|…`** or **`unknown|…`** — continue to Step 1. `unknown` means no
+  identity has been established for this ticker (the prepass has never seen
+  it); the stock path is the right default there, and Step 1 fails loudly if
+  no analysis exists.
+
 ## Step 1: Verify required artifact + detect mode (fail-closed)
 
 `bq_analysis.json` is **required** — it is the floor of any report. Verify it

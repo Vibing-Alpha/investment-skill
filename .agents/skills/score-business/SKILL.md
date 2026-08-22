@@ -8,7 +8,8 @@ description: |
   "tell me about TICKER", "research TICKER", or any request to evaluate whether
   a company is worth watching. Also trigger when the user pastes a ticker and
   asks "thoughts?" or similar short prompts.
-  NOT for ETFs (no ETF support in v7), NOT for buy/sell timing decisions,
+  NOT for ETFs — a fund is detected and forwarded to /etf-thesis.
+  NOT for buy/sell timing decisions,
   NOT for portfolio-level work (use portfolio).
 user_invocable: true
 ---
@@ -125,6 +126,28 @@ Data sources (called internally by fetch):
 - FMP (filing metadata) — requires `FMP_API_KEY` in `.env`
 - SEC EDGAR (direct filing download)
 - Finnhub (news fallback) — optional `FINNHUB_API_KEY` in `.env`
+
+## Instrument check (runs before any fetch or allocation)
+
+An ETF has no business to score and no filings to read. Scoring one produces a
+business-quality verdict for something with no business — plausible-looking and
+meaningless. So identity is settled BEFORE anything is fetched or allocated.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.etf.detect --ticker "<TICKER>" --root "$PWD"
+```
+
+Read `instrument_type` from the printed JSON:
+
+- `equity` → continue with this skill.
+- `etf` → tell the user this is a fund and run **/etf-thesis <TICKER>** instead.
+  **STOP** here: do not fetch, do not allocate a run directory.
+- `unknown` → the two identity sources disagreed or one was unreachable. Show
+  `source_verdicts` and **STOP** — do not fetch, do not allocate. An unresolved
+  identity authorizes nothing, and guessing from the ticker's name is exactly
+  the shortcut this check exists to remove.
 
 ## Execution (delta-era)
 

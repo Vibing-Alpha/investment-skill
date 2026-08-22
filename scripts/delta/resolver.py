@@ -15,7 +15,12 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from scripts.delta.constants import SKILL_BQ, SKILL_INDUSTRY, SKILL_THESIS
+from scripts.delta.constants import (
+    SKILL_BQ,
+    SKILL_ETF,
+    SKILL_INDUSTRY,
+    SKILL_THESIS,
+)
 from scripts.delta.run_meta import RunMeta
 
 DEFAULT_REPORTS_ROOT = Path("reports")
@@ -30,7 +35,8 @@ def find_latest_prior(
 ) -> Optional[Path]:
     """Return the most recent valid prior run dir for this (ticker, skill), or None.
 
-    skill: "score-business" for BQ, "investment-thesis" for thesis.
+    skill: "score-business" for BQ, "investment-thesis" for thesis,
+    "research-industry" for industry, "etf-thesis" for an ETF thesis.
 
     **Default behavior — safe by construction**: today's ET date dir is
     excluded. This prevents the same-day-rerun self-comparison bug where
@@ -79,6 +85,9 @@ def find_latest_prior(
     elif skill == SKILL_INDUSTRY:
         section_attr = "industry"
         artifact = "industry_analysis.json"
+    elif skill == SKILL_ETF:
+        section_attr = "etf"
+        artifact = "etf_thesis.json"
     else:
         raise ValueError(f"unknown skill: {skill!r}")
 
@@ -124,7 +133,11 @@ def find_latest_prior(
         try:
             with open(artifact_path, "r", encoding="utf-8") as f:
                 json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # UnicodeDecodeError is NOT a JSONDecodeError subclass: a file
+            # whose BYTES are not UTF-8 raised out of this loop and aborted
+            # the caller's whole batch. `classify` over N tickers then
+            # produced no mapping at all because ONE artifact was corrupt.
             continue
         return d
 

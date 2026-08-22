@@ -314,7 +314,15 @@ Returns one of (spec §8.1, 5-state contract):
 ## Step 3.5: Batch refresh plan
 
 If any ticker is stale (not `fresh`/`none`/`bq_only`), present the user
-with a batch refresh plan BEFORE running any cascades:
+with a batch refresh plan BEFORE running any cascades.
+
+**A fund classifies from its own artifact.** `classify` reads
+`etf_thesis.json` first, so an ETF returns only `fresh` or `stale_thesis` —
+never `stale_bq` or `bq_only`, because a fund has no BQ layer. A fund that
+has never been analysed returns `none`, which the rule above excludes from
+the plan; that is deliberate (there is nothing to refresh), and Step 4.5's
+manifest will carry it as `etf_unavailable` so the decision states the fact.
+Tell the user plainly that `/etf-thesis <ticker>` is what creates it.
 
 ```
 Portfolio refresh plan:
@@ -338,6 +346,13 @@ Proceed?  [a] all  [s] skip stale  [c] customize
 - `[a]` all: sequentially cascade `/score-business` then `/investment-thesis`
   per ticker, **in alphabetical ticker order**. Sequential, not parallel —
   predictable log output and easier debugging.
+  **A fund takes a different cascade.** A ticker whose classification came
+  from an `etf_thesis.json` (Step 4.5's manifest row is `etf_thesis` or
+  `etf_refusal`) refreshes with **`/etf-thesis <ticker>` alone** — running
+  `/score-business` on it would be stopped by that skill's forwarding
+  detector anyway, and `/investment-thesis` has no BQ to build on. Show it
+  in the plan as a separate line so the user can see which cascade each
+  ticker gets.
 - `[s]` skip stale: proceed with whatever artifacts currently exist on
   disk — stale tickers are NOT dropped, just not refreshed. Use
   `scripts.delta.resolver find-latest-prior --include-today` to locate
@@ -525,6 +540,61 @@ Read the output JSON. This provides:
   bull/sideways/bear entry-mode switch), which the decide agent classifies
   per those principles' own criteria.
 
+## Step 4.5: Identity prepass and ETF manifest
+
+Unconditional, and it runs BEFORE decisions are authored. The validator now
+requires a manifest row for every buy: without one, nothing downstream can
+tell an out-of-universe ticker from a fund, and every buy is blocked. That is
+the fix for a reproduced defect — state `{AAPL}` plus a proposed `buy SOXX`
+used to validate as `passed=True, violations=[]`.
+
+The prepass covers holdings AND watchlist, because a buy is usually for
+something not yet held.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+mkdir -p "reports/portfolio/$ETDAY"
+VENDOR_ALIASES=$("$PYBIN" -c "
+import json, pathlib
+from scripts.monitor import load_vendor_aliases
+print(json.dumps(load_vendor_aliases(pathlib.Path('portfolio-state.yaml'))))
+") || { echo "FATAL: symbol_aliases in portfolio-state.yaml is malformed" >&2; exit 1; }
+ALL=$("$PYBIN" -c "
+import pathlib, yaml
+from scripts.cli_utils import normalize_ticker
+state = yaml.safe_load(pathlib.Path('portfolio-state.yaml').read_text(encoding='utf-8')) or {}
+seen = {}
+for src in ((state.get('holdings') or {}), (state.get('watchlist') or [])):
+    for raw in src:
+        try:
+            seen.setdefault(normalize_ticker(raw), None)
+        except ValueError:
+            pass
+print(','.join(seen))
+")
+"$PYBIN" -m scripts.etf.detect --tickers "$ALL" --aliases "$VENDOR_ALIASES" \
+  --output "reports/portfolio/$ETDAY/.etf_identity.json" --root "$PWD" \
+  || { echo "FATAL: identity prepass did not write its map" >&2; exit 1; }
+"$PYBIN" -m scripts.etf.manifest build \
+  --state portfolio-state.yaml \
+  --identity "reports/portfolio/$ETDAY/.etf_identity.json" \
+  --output "reports/portfolio/$ETDAY/.etf_manifest.json" \
+  --reports-root "$PWD/reports" \
+  || { echo "FATAL: manifest not written — every buy would be blocked" >&2; exit 1; }
+```
+
+If either command exits non-zero, show its stderr to the user and **STOP** —
+run nothing else. A run with no manifest cannot authorize any buy, so
+continuing would only produce a decision set the validator will reject
+wholesale, with a message about the manifest rather than about the trades.
+
+A ticker whose identity DOES resolve but resolves to `unknown` gets an
+`etf_unresolved` row, which blocks every buy in the set — including stock
+buys. That is not an error to work around: say so plainly, and the remedy is
+to fix the identity source, not to bypass the gate.
+
 ## Step 5: Make Decisions
 
 **First, seal the authoring context** (closing round-27): record WHAT
@@ -640,7 +710,58 @@ Assemble the full context and reason through the decision framework:
    match is `approximate` (not day-precise) → Phase 2.5: do NOT defer, judge on
    run-day technicals. Never fuzzy-infer a date from non-earnings event text.
 
+9. **ETF manifest projection** — the `rows` map from
+   `reports/portfolio/$ETDAY/.etf_manifest.json` (Step 4.5). It says, per
+   ticker, WHAT the instrument is and what is known about it. Read it before
+   authoring anything about a ticker whose row is not `stock`:
+   - `row_kind: "stock"` → ordinary equity, everything above applies.
+   - `row_kind: "etf_thesis"` → a fund with a usable thesis. `decision_context`
+     carries its merit, kind, technical timing, environment, entry and
+     invalidation conditions, top holdings and coverage. **Use it as given** —
+     eligibility, readiness and merit were computed by code and are not yours
+     to re-derive or overrule. An ETF has no BQ, no ER, no CE and no earnings;
+     rank it as an allocation-class candidate rather than by CE.
+   - `row_kind: "etf_refusal"` → the fund cannot be entered. Say why (the row
+     carries `entry_reasons` / `analysis_reasons`). If `decision_context` is
+     present the ticker is HELD and those are its exit conditions still in
+     force — surface them beside current evidence.
+   - `row_kind: "etf_unavailable"` / `"etf_unresolved"` → no buy is possible.
+     State the fact and its `reason`; do not reason about the fund's merits
+     from its name.
+
+   **A matched invalidation condition is not a mandate.** Apply
+   `principle_notes.fundamental_break_definition`: only a comprehensively
+   judged fundamental break mandates a full exit, and a single matched
+   condition is evidence the argument needs re-examining. Absent such a
+   judgement, a held ETF that may not be entered is limited to hold, reduce or
+   exit, and a watchlist-only one to skip.
+
 Produce per-ticker decisions with specific order recommendations.
+
+## Step 5.5: Write the ETF decision seal
+
+After the decision is authored, before any order is validated. This is a
+DIFFERENT artifact from the Step 5 authoring seal (`.decision_ctx.json`),
+which binds state/thesis/strategy vintages for the LOG — do not merge them or
+reuse that filename; `portfolio_log` refuses the run when it finds something
+it cannot read there. This seal binds the manifest and the artifact bytes
+behind each ETF row, and it is re-verified
+at Step 6 and again at Step 8 — so an artifact replaced between authoring and
+logging is caught rather than silently logged against.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+"$PYBIN" -m scripts.etf.seal write \
+  --manifest "reports/portfolio/$ETDAY/.etf_manifest.json" \
+  --output "reports/portfolio/$ETDAY/.etf_decision_ctx.json" \
+  || { echo "FATAL: decision seal not written — every ETF buy would be blocked" >&2; exit 1; }
+```
+
+If it exits non-zero, show its stderr to the user and **STOP** — run nothing
+else. Without the seal no ETF buy can be validated, and presenting orders the
+validator will reject wastes the user's attention on the wrong problem.
 
 ## Step 6: Validate Orders
 
@@ -707,6 +828,8 @@ rm -f "$VALIDATOR_OUTPUT" || { echo "FATAL: cannot clear stale validator output:
   --prices "reports/portfolio/$ETDAY/macro.json" \
   --orders "reports/portfolio/$ETDAY/.proposed_orders.json" \
   --constraints strategy.compiled.yaml \
+  --manifest "reports/portfolio/$ETDAY/.etf_manifest.json" \
+  --decision-seal "reports/portfolio/$ETDAY/.etf_decision_ctx.json" \
   --output "$VALIDATOR_OUTPUT"
 ```
 

@@ -28,7 +28,8 @@ EVENTS_DECISIONS = (DECISION_REUSE, DECISION_RERUN)
 SKILL_BQ = "score-business"
 SKILL_THESIS = "investment-thesis"
 SKILL_INDUSTRY = "research-industry"
-SKILLS = (SKILL_BQ, SKILL_THESIS, SKILL_INDUSTRY)
+SKILL_ETF = "etf-thesis"
+SKILLS = (SKILL_BQ, SKILL_THESIS, SKILL_INDUSTRY, SKILL_ETF)
 
 # Industry skill uses 21d safety valve (vs BQ's 14d) — industry-level
 # structure changes more slowly than per-stock fundamentals.

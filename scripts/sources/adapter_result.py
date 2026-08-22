@@ -1017,7 +1017,8 @@ ADAPTER_ENTRYPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("sec_edgar", "fetch_filing_from_sec_edgar"),
     ("sec_edgar", "lookup_filing_via_sec_submissions"),
     ("sec_edgar", "fetch_filing_items_from_api"),
-    # fmp.py (6) — filing metadata/date + 2026-05-29 financial-data fallback
+    # fmp.py (8) — filing metadata/date + 2026-05-29 financial-data fallback
+    #              + 2026-08-22 ETF identity probe (PR.FMP_ETF_INFO)
     ("fmp", "_fetch_filing_metadata_from_fmp_impl"),
     ("fmp", "_fetch_filing_date_impl"),
     ("fmp", "fetch_financials_from_fmp"),
@@ -1025,6 +1026,7 @@ ADAPTER_ENTRYPOINTS: frozenset[tuple[str, str]] = frozenset({
     ("fmp", "fetch_analyst_estimates_from_fmp"),
     ("fmp", "fetch_earnings_from_fmp"),
     ("fmp", "fetch_segmented_revenues_from_fmp"),
+    ("fmp", "fetch_etf_info"),
     # adr/detect.py (1) — ISS-098 (Loop8): adr/detect.detect_adr_market_data
     # is a yfinance-calling envelope-returning adapter, structurally
     # equivalent to yahoo_finance.fetch_yahoo_quote_result. Governing it

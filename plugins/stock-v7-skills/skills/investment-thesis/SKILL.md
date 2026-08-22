@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.13.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.14.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -102,6 +102,28 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 If it exits non-zero, STOP and show its stderr to the user (config not confirmed /
 required API key missing) — do NOT run any analysis or produce numbers. Then continue
 below.
+
+## Instrument check (runs before any fetch or allocation)
+
+An ETF has no business to score and no filings to read. Scoring one produces a
+business-quality verdict for something with no business — plausible-looking and
+meaningless. So identity is settled BEFORE anything is fetched or allocated.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.etf.detect --ticker "<TICKER>" --root "$PWD"
+```
+
+Read `instrument_type` from the printed JSON:
+
+- `equity` → continue with this skill.
+- `etf` → tell the user this is a fund and run **/etf-thesis <TICKER>** instead.
+  **STOP** here: do not fetch, do not allocate a run directory.
+- `unknown` → the two identity sources disagreed or one was unreachable. Show
+  `source_verdicts` and **STOP** — do not fetch, do not allocate. An unresolved
+  identity authorizes nothing, and guessing from the ticker's name is exactly
+  the shortcut this check exists to remove.
 
 ## Prerequisites
 
