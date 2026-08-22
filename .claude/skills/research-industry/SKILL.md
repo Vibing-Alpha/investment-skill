@@ -554,7 +554,8 @@ echo '{"tokens": 0, "duration_s": 0}' > "$COST_JSON"  # placeholder; fill from n
     --candidates-count "$CANDIDATES_COUNT" \
     --agents-run "$AGENTS_RUN" \
     --cost-json "$COST_JSON" \
-    --prior-source "$PRIOR_DIR"
+    --prior-source "$PRIOR_DIR" \
+    || { echo "FATAL: run_meta write failed — this run has NO state record, so the next run's classify/resolver cannot see it as a valid prior. Fix what the error names and re-run this block; do NOT continue to the changelog, which would attest a run that was never recorded." >&2; exit 1; }
 
 # Cleanup handled by trap above; the explicit rm is now belt-and-suspenders
 rm -f "$TIER_REFRESH_JSON" "$COST_JSON"
@@ -573,7 +574,8 @@ RI_DELTA_SECTION_EOF
     --ticker "industry/$SLUG" \
     --prior "$PRIOR_DIR/summary.changelog.md" \
     --current "$REPORT_DIR/summary.changelog.md" \
-    --delta-section "$DELTA_FILE"
+    --delta-section "$DELTA_FILE" \
+    || { echo "FATAL: append_changelog failed — summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }
 
 rm -f "$DELTA_FILE" "$REPORT_DIR/.tier_context.json"   # -f: .tier_context.json was never written on no_op
 ```

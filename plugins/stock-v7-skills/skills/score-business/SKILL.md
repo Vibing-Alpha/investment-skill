@@ -76,7 +76,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.14.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.14.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -690,7 +690,9 @@ fi
 # is write-only audit — no consumer reads it — but keep it accurate.)
 ```
 
-Write the delta section to a file, then append. The header line is built
+Write the delta section to a file, then append. If the append gate below
+fires, **STOP** — the run is not complete until the changelog holds this
+run's section. The header line is built
 via `printf` (so `$TIER` and today's date interpolate); the free-prose
 body uses a QUOTED heredoc — the delta note is agent-substituted prose
 that may contain `$` («$NVDA», «$X.XB» — any digit after $ would be arg-substituted, so even this example avoids it) or backticks, which an unquoted
@@ -715,8 +717,11 @@ DELTA_SECTION_EOF
   --prior "$PRIOR_DIR/summary.changelog.md" \
   --current "$REPORT_DIR/summary.changelog.md" \
   --ticker "$TICKER" \
-  --delta-section "$DELTA_FILE"
+  --delta-section "$DELTA_FILE" \
+  || { echo "FATAL: append_changelog failed — summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }
 
+# Gated for the same reason as the rm above: past this point the append
+# succeeded, so the staging file is redundant rather than the only copy.
 rm "$DELTA_FILE"
 ```
 

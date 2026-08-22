@@ -32,12 +32,13 @@ gitignored — never shared.
 | `/score-business TICKER` | Business-quality analysis (fundamental / forward / industry) |
 | `/investment-thesis TICKER` | Valuation + technical timing + event catalysts + thesis (needs a prior `/score-business`) |
 | `/etf-thesis TICKER` | The same question for a non-leveraged equity **ETF** — merit, timing, entry and invalidation conditions. Needs no prior run; a ticker that turns out to be a stock is forwarded to `/investment-thesis` |
-| `/portfolio` | Whole-portfolio review + buy/sell/hold + IBKR orders (needs `portfolio-state.yaml`) |
+| `/portfolio` | Whole-portfolio review + buy/sell/hold + order recommendations you execute yourself (needs `portfolio-state.yaml`) |
 | `/screen-stocks` | Discover tickers by price action / sector / watchlist |
 | `/research-industry` | Surface 5–12 candidate tickers in a sector |
 | `/monitor` | Daily triage: what on your holdings/watchlist needs attention (routes to the right skill; never trades) |
 | `/write-report TICKER` | Turn an analysis into a readable Markdown report |
 | `/generative-ui` | Turn an analysis into a standalone HTML dashboard |
+| `/track-record` | Archive broker facts before they expire, tag orders with the thesis behind them, quarterly summary. **Interactive Brokers only, via the IBKR MCP server** (read-only — it never places or amends an order) |
 
 ## How it works
 

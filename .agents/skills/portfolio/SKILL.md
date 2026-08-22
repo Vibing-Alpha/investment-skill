@@ -346,13 +346,21 @@ Proceed?  [a] all  [s] skip stale  [c] customize
 - `[a]` all: sequentially cascade `/score-business` then `/investment-thesis`
   per ticker, **in alphabetical ticker order**. Sequential, not parallel —
   predictable log output and easier debugging.
-  **A fund takes a different cascade.** A ticker whose classification came
-  from an `etf_thesis.json` (Step 4.5's manifest row is `etf_thesis` or
-  `etf_refusal`) refreshes with **`/etf-thesis <ticker>` alone** — running
-  `/score-business` on it would be stopped by that skill's forwarding
-  detector anyway, and `/investment-thesis` has no BQ to build on. Show it
-  in the plan as a separate line so the user can see which cascade each
-  ticker gets.
+  **A fund takes a different cascade** — `/etf-thesis <ticker>` alone.
+  `/score-business` has no business to score and `/investment-thesis` has no
+  BQ to build on. Read the identity per ticker from
+  `reports/<TICKER>/instrument_type.json` (`instrument_type == "etf"`) — the
+  registry any earlier detect wrote, a plain file read, no network. Do NOT
+  key this on `classify`'s state: a fund returns `fresh` or `stale_thesis`,
+  and so does a stock, so the state EXCLUDES a fund from `stale_bq`/`bq_only`
+  but never identifies one. Nor on Step 4.5's manifest — that step has not
+  run yet.
+
+  A ticker with no registry entry has never been through a prepass; treat it
+  as a stock here. Both stock skills settle identity before fetching anything
+  and forward a fund, so the run self-corrects — it costs a wrong line in the
+  plan you are showing, which is why the registry read is worth doing. Show
+  each cascade as its own line so the user can see which one a ticker gets.
 - `[s]` skip stale: proceed with whatever artifacts currently exist on
   disk — stale tickers are NOT dropped, just not refreshed. Use
   `scripts.delta.resolver find-latest-prior --include-today` to locate

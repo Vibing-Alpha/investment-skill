@@ -1142,7 +1142,9 @@ fi
   --cost-json "$COSTS_FILE"
 ```
 
-Write the delta section, then append changelog:
+Write the delta section, then append changelog. If the append gate below
+fires, **STOP** — do not continue to Step 8: reporting a completed run whose
+changelog was never written is the failure the gate exists to prevent.
 
 ```bash
 cd "<captured-abs-ROOT>"
@@ -1166,8 +1168,13 @@ THESIS_DELTA_SECTION_EOF
   --prior "$PRIOR_THESIS_DIR/thesis_summary.changelog.md" \
   --current "$REPORT_DIR/thesis_summary.changelog.md" \
   --ticker "$TICKER" \
-  --delta-section "$DELTA_FILE"
+  --delta-section "$DELTA_FILE" \
+  || { echo "FATAL: append_changelog failed — thesis_summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }
 
+# Only past the gate: the changelog now holds this run's section, so the
+# staging file is redundant. An unconditional rm here would delete the only
+# copy of a delta note the agent would otherwise have to reconstruct from
+# memory, and leave the block exiting 0 over a failed append.
 rm "$DELTA_FILE"
 ```
 

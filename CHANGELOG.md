@@ -3,6 +3,12 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.14.2 — 2026-08-22
+
+- A failed changelog append no longer reports success: three skills ran an unconditional cleanup after an unchecked producer, so the block exited 0 with the changelog unwritten and the staged note deleted. Each now stops and says what was not written.
+- /portfolio's refresh plan identified a fund from data a later step produced, so it could route one down the stock cascade. It now reads the per-ticker instrument registry, which is available where the question is asked.
+- README and CLAUDE.md list /track-record, and state where a broker is actually required: Interactive Brokers only, via the IBKR MCP server, read-only. /portfolio proposes orders you execute yourself — the vocabulary is not tied to any broker.
+
 ## v1.14.1 — 2026-08-22
 
 - README and first-run setup now name /etf-thesis and the etf_policy approval — the command list a new user reads was still stock-only.

@@ -65,12 +65,26 @@ stays greyed out until the marketplace has refreshed.
 | `/score-business TICKER` | Business-quality analysis |
 | `/investment-thesis TICKER` | Valuation + technical timing + catalysts + thesis |
 | `/etf-thesis TICKER` | The same question for a non-leveraged equity **ETF** — needs no prior run |
-| `/portfolio` | Whole-portfolio review + buy/sell/hold + IBKR orders |
+| `/portfolio` | Whole-portfolio review + buy/sell/hold + order recommendations |
 | `/screen-stocks` | Find tickers by price action / sector / watchlist |
 | `/research-industry` | Candidate tickers in a sector |
 | `/monitor` | Daily triage of holdings + watchlist (routes; never trades) |
 | `/write-report TICKER` | Readable Markdown report from an analysis |
 | `/generative-ui` | Standalone HTML dashboard from an analysis |
+| `/track-record` | Archive broker facts before they expire, tag orders with the thesis behind them, quarterly summary |
+
+**Orders are recommendations — nothing here places a trade.** `/portfolio`
+proposes them and you execute at your own broker; the order vocabulary
+(`market` / `limit` / `stop` / `stop_limit` / `moc` / `loc` / `gtc`) is
+ordinary broker vocabulary, not tied to any one of them.
+
+**`/track-record` is the exception: Interactive Brokers only, through the
+IBKR MCP server.** It reads five tools read-only — trades, orders,
+performance, positions, balances — and never places or amends anything. It
+compiles against IBKR's response contract, not a generic one, so another
+broker's MCP would need its own probe before any of it runs; without the
+server connected the skill does not run at all. The rest of the system needs
+no broker connection.
 
 **ETFs take a separate, narrow path.** A fund has no business to score, so
 `/score-business` forwards it. Only non-leveraged **equity** ETFs are in scope —
@@ -152,12 +166,22 @@ marketplace → 点插件的 **Update** 按钮。marketplace 没刷新前,按钮
 | `/score-business TICKER` | 业务质量分析 |
 | `/investment-thesis TICKER` | 估值 + 技术择时 + 催化事件 + 投资论点 |
 | `/etf-thesis TICKER` | 对**非杠杆股票型 ETF** 问同样的问题 —— 无需先跑其他分析 |
-| `/portfolio` | 全组合复盘 + 买/卖/持 + IBKR 订单 |
+| `/portfolio` | 全组合复盘 + 买/卖/持 + 订单建议 |
 | `/screen-stocks` | 按涨跌幅 / 板块 / 自选筛选股票 |
 | `/research-industry` | 某行业的候选标的 |
 | `/monitor` | 持仓+自选每日分诊(路由到对应 skill;从不下单)|
 | `/write-report TICKER` | 把分析写成可读的 Markdown 报告 |
 | `/generative-ui` | 把分析做成独立 HTML 看板 |
+| `/track-record` | 在券商记录过期前归档、给订单打上当时的投资理由、季度复盘 |
+
+**订单只是建议 —— 本系统不下单。** `/portfolio` 给出建议,由你在自己的券商执行;
+订单词汇(`market` / `limit` / `stop` / `stop_limit` / `moc` / `loc` / `gtc`)
+是通用券商词汇,不绑定任何一家。
+
+**`/track-record` 是唯一例外:仅支持盈透(Interactive Brokers),通过 IBKR MCP
+服务器。** 它只读五个工具 —— 成交、订单、业绩、持仓、余额 —— 从不下单或改单。
+它是按 IBKR 的响应契约编译的,不是通用契约,所以换一家券商的 MCP 需要先做自己的
+探测;MCP 服务器未连接时该 skill 直接不运行。系统其余部分不需要任何券商连接。
 
 **ETF 走独立且刻意收窄的路径。** 基金没有"业务"可评分,`/score-business` 会转发它。
 只支持**非杠杆股票型** ETF:杠杆与反向基金被拦截;债券/商品/货币基金(SGOV、GLD、TLT …)
