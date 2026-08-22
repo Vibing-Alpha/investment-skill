@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.14.4 — 2026-08-23
+
+- The alpha scan's events_freshness spec pointed at the wrong field and sliced a UTC timestamp where the code converts it to ET — a date label that could read a day early. The prompt now names the one helper that derives it instead of restating the rule a second time.
+
 ## v1.14.3 — 2026-08-22
 
 - The /portfolio refresh plan no longer shows numbers it has no source for: the per-ticker cost placeholders and the grand total are gone, and the two BQ buckets — which the classifier cannot tell apart — are one. A fund now has its own line.

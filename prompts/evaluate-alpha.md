@@ -68,7 +68,7 @@ Look for these divergence patterns:
   "scan_note": "1 signal detected. Most divergences are within normal range.",
   "events_freshness": {
     "status": "fresh",
-    "events_as_of": "<YYYY-MM-DD — date component of events.meta.generated_at>",
+    "events_as_of": "<YYYY-MM-DD — ET date events were generated fresh>",
     "reused_from": null,
     "days_stale": 0
   }
@@ -83,14 +83,21 @@ reused from a prior thesis run (up to 7 days old — ceiling_7d gate).
 The `events_freshness` block records which, so a reader can judge how
 current the insider / analyst / macro signals driving a candidate are.
 
-Derivation from `events.json.meta`:
-- `meta.reuse_meta` absent → `status="fresh"`, `events_as_of` = date
-  component of `meta.generated_at`, `reused_from=null`, `days_stale=0`.
-- `meta.reuse_meta.reused_from` present → `status="reused"`,
-  `events_as_of` = date component of `meta.generated_at` (preserved
-  original fresh-gen date across chain), `reused_from` = same value
-  (redundant but explicit), `days_stale` = days between today ET and
-  `events_as_of`.
+Derivation: `scripts.delta.alpha_freshness.derive_events_freshness(
+events_meta, today_et)`. That helper is the only implementation — do not
+restate its rules here or reimplement them inline
+(`.claude/rules/producer-consumer.md` #3). What the fields mean:
+
+- `status` — `"fresh"` when `meta.reuse_meta` is absent, `"reused"` when it
+  carries a `reused_from`.
+- `events_as_of` — the **ET** date the events were generated fresh,
+  preserved across a reuse chain. ET, not the UTC date sitting in
+  `meta.generated_at`: a run stamped in the small hours UTC falls on the
+  PREVIOUS ET day, so slicing the timestamp's first ten characters reports
+  the wrong one. The helper converts; the offset is -4h or -5h depending on
+  daylight saving, which is another reason not to do the arithmetic here.
+- `days_stale` — days between today ET and `events_as_of`; `0` on the fresh
+  path, up to the 7-day `ceiling_7d` cap on a reuse chain.
 
 This field is write-only and never read by the delta layer — it is
 pure transparency for the human reader and downstream consumers.
