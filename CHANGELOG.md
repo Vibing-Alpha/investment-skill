@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.14.1 — 2026-08-22
+
+- README and first-run setup now name /etf-thesis and the etf_policy approval — the command list a new user reads was still stock-only.
+
 ## v1.14.0 — 2026-08-22
 
 - ETF support: non-leveraged equity ETFs become buyable instruments.

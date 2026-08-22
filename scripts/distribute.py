@@ -897,7 +897,10 @@ def bootstrap(root: Path, *, yes: bool, prefer_copy: bool) -> int:
     if any(h in AGENTS_FAMILY for h in hosts):
         print("  • Codex / OpenCode / Cursor: start in this repo; AGENTS.md + "
               ".agents/skills/ are ready")
-    print("  • Try: /score-business AAPL")
+    print("  • Try: /score-business AAPL — or /etf-thesis SOXX for a fund")
+    print("    Analysing a fund needs nothing extra; BUYING one needs an "
+          "`etf_policy`")
+    print("    approval in strategy.yaml — see strategy.example.yaml.")
     return 0
 
 
