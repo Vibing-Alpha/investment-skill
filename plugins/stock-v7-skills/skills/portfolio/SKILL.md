@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.14.2" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.14.3" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -327,21 +327,29 @@ Tell the user plainly that `/etf-thesis <ticker>` is what creates it.
 ```
 Portfolio refresh plan:
 
-Full BQ needed (N):
-  - TICKER  reason                  ~Ns, ~Nk tokens
-
-Partial BQ needed (N):
-  - TICKER  reason                  ~Ns, ~Nk tokens
+BQ refresh (N):
+  - TICKER  reason
 
 Thesis refresh (N):
   - TICKER1, TICKER2, ...           ~30s, ~10k each
 
+ETF thesis refresh (N):
+  - TICKER1, TICKER2, ...
+
 No refresh needed (N):
   - TICKER1, TICKER2, ...
 
-Total: ~N min, ~Nk tokens.
 Proceed?  [a] all  [s] skip stale  [c] customize
 ```
+
+**One BQ bucket, and no invented totals.** `classify` returns a single
+`stale_bq` for both causes, so splitting full-tier from partial-tier here
+means guessing — and the tier is decided inside `/score-business` by the delta
+layer regardless. Costs follow `.claude/rules/anti-hallucination.md`: the
+`~30s, ~10k` thesis figure is measured and stays; no BQ estimate and no grand
+total, because there is nothing to derive them from. Asked what the refresh
+will cost, say it depends on how many tickers need a full BQ, which is not
+known until each runs.
 
 - `[a]` all: sequentially cascade `/score-business` then `/investment-thesis`
   per ticker, **in alphabetical ticker order**. Sequential, not parallel —

@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.14.3 — 2026-08-22
+
+- The /portfolio refresh plan no longer shows numbers it has no source for: the per-ticker cost placeholders and the grand total are gone, and the two BQ buckets — which the classifier cannot tell apart — are one. A fund now has its own line.
+
 ## v1.14.2 — 2026-08-22
 
 - A failed changelog append no longer reports success: three skills ran an unconditional cleanup after an unchecked producer, so the block exited 0 with the changelog unwritten and the staged note deleted. Each now stops and says what was not written.
