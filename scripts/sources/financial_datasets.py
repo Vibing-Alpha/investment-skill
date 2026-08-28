@@ -20,7 +20,7 @@ from .common import (
     is_bool_like, is_us_country, make_request, safe_urlopen,
     sanitize_dict_numerics,
     safe_num, coerce_known_numeric_fields, emit_with_numeric_coerce,
-    normalize_currency, HttpStatusError,
+    normalize_currency, HttpStatusError, derive_surprise_percents,
 )
 from scripts.sources.adapter_result import (
     AdapterResult,
@@ -151,6 +151,7 @@ _SEGMENTED_REVENUE_DIMENSIONS = frozenset({"product", "geography", "segment"})
 # slipped through PASSED.
 _EARNINGS_NUMERIC_FIELDS = frozenset({
     "actual_eps", "estimated_eps", "surprise_eps", "surprise_pct",
+    "surprise_eps_pct", "surprise_revenue_pct",
     "actual_revenue", "estimated_revenue", "surprise_revenue",
     "eps_actual", "eps_estimated", "eps_surprise",
     "revenue_actual", "revenue_estimated", "revenue_surprise",
@@ -1800,6 +1801,11 @@ def fetch_earnings_snapshot(ticker: str) -> AdapterResult:
             **earnings,
             "currency": normalize_currency(earnings.get("currency")) or "UNKNOWN",
         }
+        # See derive_surprise_percents: the provider's single `surprise_pct`
+        # is the EPS surprise but is emitted amid the revenue keys. Add the
+        # explicitly-named pair here, at the same emit boundary the FMP
+        # fallback uses, so both paths carry the same contract.
+        earnings = derive_surprise_percents(earnings)
         # ISS-085/095/166: bool drift + numeric string drift coerced
         # via _emit_with_numeric_coerce (single-dict case).
         return AdapterResult.passed(

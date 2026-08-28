@@ -14,7 +14,18 @@ and whether the weight of evidence leans positive or negative.
 
 - `bq_analysis.json` — read `synthesis.catalyst_calendar` for factual dates
   already collected by the BQ layer. Start here; do not rebuild from scratch.
-- `data/03_company_news.json` — recent company news
+- `data/03_company_news.json` — recent company news. Two failure shapes to
+  check before citing a row. (1) When the Finnhub fallback supplied the
+  feed, `url` is an API endpoint of the form `finnhub.io/api/news?id=<hash>`
+  — it is neither a citable page nor fetchable, so it cannot back a
+  `[WebSearch: ...]` tag and a reader cannot follow it. Cite such a row as
+  `[API: 03_company_news, <outlet>/<headline>]` only, and if the claim is
+  load-bearing, find the real article by WebSearch and cite THAT instead.
+  (2) The feed is symbol-matched loosely and can return items about peers
+  or unrelated issuers — check each headline actually concerns THIS company
+  before it becomes a catalyst. A feed that survives neither check is
+  absent, not neutral: say the news channel was unusable and lean on
+  WebSearch.
 - `data/04_insider_data.json` — insider transactions
 - `data/08_institutional.json` — institutional holdings (13F filings)
 - `data/06_analyst_estimates.json` — consensus estimates and revisions
@@ -118,6 +129,21 @@ Classify the net insider direction over the trailing 6 months:
 diversification plans and carry no informational content about management's
 view of the stock. Flag them explicitly as "10b5-1 planned" and classify
 as neutral. Only unplanned, discretionary sales are negative signals.
+
+**But the feed carries NO 10b5-1 flag** — it is a Form 4 footnote the API
+does not expose. So absence of the label means UNKNOWN, never "unplanned":
+do not upgrade a sale to a negative signal on the strength of a field that
+does not exist. What the feed does give you is `transaction_type` per row
+and `summary.direction_basis` over the set; the summary already counts only
+open-market transactions and reports the rest as `other_count`. Use that
+split. A "Tax or exercise-related" row (Form 4 code F — shares withheld to
+cover withholding on a vest) is mechanical and carries no view, and its
+`transaction_value` is the GROSS value of the withheld shares: reading value
+without reading `transaction_type` turns routine tax withholding into a
+headline "CEO sold $73.7M", which is how one such vest was reported by the
+news feed. If a discretionary/planned split is load-bearing for your
+conclusion, corroborate it against the Form 4 itself (WebSearch, bound tag)
+or say the split is unverified and let the signal stay `neutral`.
 
 Assess `conviction_signal` (positive / neutral / negative) based on the
 informational content of the trades, not just the dollar volume.

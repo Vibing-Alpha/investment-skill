@@ -80,6 +80,19 @@ PLACEHOLDER_DESCRIPTORS: frozenset[str] = frozenset({
 })
 
 
+# A `WebSearch:` token appearing inside ANOTHER kind's descriptor. Deliberately
+# narrower than "the literal token appears anywhere in the string": prose may
+# legitimately name the tag kind while documenting the convention (INTC
+# 2026-08-13 writes "facts are tagged [WebSearch:] by source channel"), and a
+# bare `[WebSearch:]` is not a tag at all. Scoped to a non-WebSearch tag's
+# descriptor, the measured false-positive rate over 1,166 local artifacts /
+# 5,040 tag-bearing strings is zero.
+# IGNORECASE (cold review 2026-08-28): the outer-tag regex recognises the
+# KIND case-sensitively, so `[Calc: … [WEBSEARCH: …]]` was a recognised Calc
+# tag whose nested citation the exact-case token missed entirely.
+_NESTED_WEBSEARCH_RE = re.compile(r"\bWebSearch\s*:", re.IGNORECASE)
+
+
 def check_websearch_binding(value: str, *, artifact: str, path: str) -> None:
     """Strict-mode check: every [WebSearch: ...] tag in `value` must be
     bound — `[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]` with an
@@ -88,6 +101,22 @@ def check_websearch_binding(value: str, *, artifact: str, path: str) -> None:
     """
     for m in SOURCE_TAG_RE.finditer(value):
         if m.group(1) != "WebSearch":
+            # A WebSearch citation packed INSIDE another kind's brackets
+            # (`[Filing: 10-Q; WebSearch: outlet, url, accessed …]`,
+            # `[Calc: a / b = c, from WebSearch: …]`) is invisible to the
+            # loop below — SOURCE_TAG_RE reports the OUTER kind, so the
+            # binding grammar never runs on the citation. Measured in 5 real
+            # marked artifacts (MRAAY 2026-08-13, P 2026-08-10) and reported
+            # from the 2026-08-28 Cowork run. Tag by ONE source channel per
+            # bracket (.claude/rules/anti-hallucination.md); split them.
+            if _NESTED_WEBSEARCH_RE.search(m.group(2)):
+                raise SchemaError(
+                    artifact, path,
+                    f"nested WebSearch tag inside {m.group(1)} tag "
+                    f"{m.group(0)!r}: each bracket carries exactly ONE "
+                    f"source KIND — emit the WebSearch citation as its own "
+                    f"[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]",
+                )
             continue
         descriptor = m.group(2).strip()
         bm = WEBSEARCH_BOUND_RE.match(descriptor)

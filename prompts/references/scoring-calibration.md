@@ -27,28 +27,33 @@ action.
 
 ## Fundamental dimension
 
-### 1. Leverage basis — score on interest-bearing D/E, not the snapshot label
+### 1. Leverage basis — compute the ratio you mean, don't trust the label
 
-`metrics_snapshot.debt_to_equity` is computed on a **total-liabilities** basis
-(`total_liabilities / shareholders_equity`), not interest-bearing debt. For a
-company carrying large non-debt liabilities (deferred tax, pensions, payables,
-operating-lease liabilities) the two diverge widely — and anchoring the
-**Balance Sheet** sub-score on the total-liabilities figure mis-reads solvency by
-roughly a full point.
+`metrics_snapshot.debt_to_equity` carries no stated basis, and the basis is
+**not stable across tickers**. On VSH it was the total-liabilities ratio
+(≈ 1.03 against an interest-bearing 0.47); VRT showed the same (2.16 vs 0.69).
+On BE 2026-08-11 it is exactly the interest-bearing ratio —
+1.5470819442704022, equal to `total_debt / shareholders_equity` to the last
+digit, where the total-liabilities ratio would be 2.4738.
 
-Real case: VSH had `metrics_snapshot.debt_to_equity` ≈ 1.03 (total-liabilities
-basis) but interest-bearing `total_debt / shareholders_equity` ≈ 0.47. VRT
-showed the same pattern (snapshot ≈ 2.16 vs interest-bearing ≈ 0.69). A
-balance-sheet score built on the snapshot lands ~1 point lower than one built on
-the interest-bearing ratio — a recurring, avoidable drift.
+So neither "it's total-liabilities" nor "it's interest-bearing" is a safe
+assumption, and an earlier version of this section asserted the first one —
+which would have had you "correct" BE's already-interest-bearing number.
 
-**Action:** for solvency / refinancing-risk judgments, score on the
-interest-bearing ratio `total_debt / shareholders_equity`, computed from
-`balance_sheets[0]` — do not anchor on the `metrics_snapshot.debt_to_equity`
-label. State which basis you used in the evidence. Use the total-liabilities
-ratio only when that is your explicit intent (e.g. a near-term-claims view), and
-say so. The same lag caution applies to `interest_coverage` — recompute from the
-latest statement rather than trusting a possibly-stale snapshot.
+**Action:** compute BOTH from `balance_sheets[0]` —
+`total_debt / shareholders_equity` and
+`total_liabilities / shareholders_equity` — and score solvency /
+refinancing risk on the interest-bearing one. State the number you used and
+its basis in the evidence. Use the total-liabilities ratio only when that is
+your explicit intent (e.g. a near-term-claims view), and say so. If you
+mention the snapshot figure at all, say which of the two it matches, or that
+it matches neither.
+
+The same caution applies to `interest_coverage` — and more sharply, because
+it inherits both a possible snapshot lag and any `interest_expense` sign
+defect. Check `data_quality` in `02_financial_data.json`
+(`snapshot_period_alignment`, `sign_inconsistencies`) and recompute from the
+latest statements rather than quoting the snapshot.
 
 ### 2. Poisoned capital-efficiency ratios — don't score off null / anomalous returns
 

@@ -72,6 +72,7 @@ stays greyed out until the marketplace has refreshed.
 | `/write-report TICKER` | Readable Markdown report from an analysis |
 | `/generative-ui` | Standalone HTML dashboard from an analysis |
 | `/track-record` | Archive broker facts before they expire, tag orders with the thesis behind them, quarterly summary |
+| `/stock-v7-setup` | First-run setup, or re-check your config later (same work as `make setup`) |
 
 **Orders are recommendations — nothing here places a trade.** `/portfolio`
 proposes them and you execute at your own broker; the order vocabulary
@@ -173,6 +174,7 @@ marketplace → 点插件的 **Update** 按钮。marketplace 没刷新前,按钮
 | `/write-report TICKER` | 把分析写成可读的 Markdown 报告 |
 | `/generative-ui` | 把分析做成独立 HTML 看板 |
 | `/track-record` | 在券商记录过期前归档、给订单打上当时的投资理由、季度复盘 |
+| `/stock-v7-setup` | 首次安装,或之后重新检查配置(等同 `make setup`)|
 
 **订单只是建议 —— 本系统不下单。** `/portfolio` 给出建议,由你在自己的券商执行;
 订单词汇(`market` / `limit` / `stop` / `stop_limit` / `moc` / `loc` / `gtc`)

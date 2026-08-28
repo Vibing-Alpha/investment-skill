@@ -3,6 +3,16 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.15.0 — 2026-08-29
+
+- Indicators no longer compute on an incomplete trailing bar. A fetch that runs while the market is open got a mid-session stub as the newest daily bar, and MACD, Bollinger, ATR, RSI and volume all consumed it — measured on a live 13:31 ET run, the volume ratio read 0.59 where the completed session was 0.88, a fabricated 'bearish divergence', and ATR came out ~3% low so every ATR stop sat too tight. indicators.json now carries an input_completeness block saying which session the read is as of.
+- New data_quality block in 02_financial_data.json surfaces three provider defects the existing anomaly detector is not contracted to see: a sign that flips inside one column (interest_expense, capital_expenditure), a metrics_snapshot lagging the statements, and a statement basis that changes mid-series (a registration statement beside periodic filings). Evidence only — no value is altered or called corrupt.
+- 07_earnings.json gains surprise_eps_pct and surprise_revenue_pct. The single surprise_pct is the EPS surprise but sits between the revenue keys, and was read as the revenue beat on five of six tickers in one run (48.56% against a true 1.05%). surprise_pct is kept as a deprecated EPS alias.
+- peer_multiples.json gains per-metric dispersion (min/max/ratio) and a separately-named cross-currency ratio median set. A median tells you nothing about whether the cohort agrees — one run published a forward P/E median of 270.7 across peers spanning 23 to 1414 — and the USD-only currency filter had collapsed another cohort to a single contributor per metric even though every multiple is dimensionless.
+- Fail-closed: a WebSearch citation packed inside another kind's brackets ([Filing: ...; WebSearch: ...]) escaped every binding check. Marked artifacts now refuse it. Two stored artifacts carrying that shape will need re-running.
+- An absent share_based_compensation column no longer reads as 'SBC is low' in growth-stock detection, and a failed staging cleanup no longer masks the schema error it was cleaning up after.
+- Prompt and reference corrections where the text asserted something the code or data does not do: the growth-mode trigger table, the leverage-basis rule, analyst-estimate staleness, the alpha dimension-split axis, insider 10b5-1 handling, and the superseded partial-bar heuristic in both gotchas files.
+
 ## v1.14.4 — 2026-08-23
 
 - The alpha scan's events_freshness spec pointed at the wrong field and sliced a UTC timestamp where the code converts it to ET — a date label that could read a day early. The prompt now names the one helper that derives it instead of restating the rule a second time.

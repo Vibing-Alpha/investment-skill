@@ -147,6 +147,19 @@ isolation is meaningless — context is everything.
    weight the peer/absolute anchors up accordingly.
    Cross-check with `current_from_api.<method>` for the live snapshot.
 
+   **A median that EQUALS the current observation is not an anchor.** Compare
+   `summary.<method>.median` against `summary.<method>.current`: when they
+   are equal, "fair value = the historical median" is arithmetically "fair
+   value = today's price", and reporting it as an independent anchor
+   manufactures agreement out of a tautology. It happens on a steadily
+   re-rating stock, where the median is a point on the way through rather
+   than a level the stock returns to — measured on 5 of 33 stored runs, with
+   one carrying it on two methods at once. When it occurs: say the
+   self-historical anchor is tautological for that method, exclude it from
+   `implied_fair_value`, and lean on the peer and absolute anchors. Treat
+   `current` sitting at `min` or `max` the same way — a band whose current
+   value is its own extreme is describing a trend, not a range.
+
    **Read `status` and `warnings` on this file before using it** (same rule as
    `fcf_inputs.json` below). `status: "ok_with_warnings"` means the producer
    deliberately withheld or qualified something — most often `current_from_api`
@@ -201,6 +214,38 @@ isolation is meaningless — context is everything.
      keeping `mid` unchanged) [Cx-R11-K9: generic arithmetic, no concrete numerics].
 
    If `medians_currency == "USD"`: proceed normally.
+
+   **`medians_dispersion.<method>` — read it before quoting any median.**
+   It carries `{min, max, max_to_min_ratio}` over the same contributors.
+   A median tells you nothing about whether the cohort agrees: one stored
+   run published a `forward_pe` median of 270.72 across peers spanning
+   23.35 to 1414.29 (60.6x), and a `ps` median of 9.44 across 2.56 to
+   243.99 (95.3x) — a bimodal cohort with no member anywhere near the
+   middle. When `max_to_min_ratio` is large (roughly >3x on a mature
+   cohort, and any bimodal split however wide), the median is a summary
+   statistic, not an anchor: name the two clusters, say which one the
+   subject belongs to, and either anchor within that cluster or drop
+   `at_peer_median` and lower `confidence`. `null` means a single
+   contributor — no spread exists. The producer emits no usability verdict
+   on purpose; that judgment is yours.
+
+   **`cross_currency_ratio_medians` — the same cohort WITHOUT the currency
+   filter.** Every multiple here is dimensionless (a KRW price over KRW
+   earnings carries no currency), so a foreign peer's P/E is comparable on
+   units even though `medians` excludes it. It ships with its own
+   `cross_currency_ratio_sample_size` and `cross_currency_ratio_dispersion`,
+   and it still excludes suffix-resolved peers — that exclusion is an
+   identity argument, not a currency one.
+
+   Use it as a SEPARATELY NAMED cross-market anchor, never as a silent
+   substitute for `medians`. It earns its place when the USD-only cohort
+   has collapsed: one stored run left `medians_sample_size == 1` on every
+   metric after three Asian peers were filtered out, and the cross-market
+   `forward_pe` was 4.09 against the single-peer 6.13. When you use it,
+   say so explicitly, apply the cross-market caveat below (accounting
+   standard, conglomerate-vs-segment, market risk premium — those are real
+   and the units argument does not touch them), and report BOTH anchors
+   rather than replacing one with the other.
 
    **Cross-market caveat**: When peers include non-US tickers (e.g., 005930.KS
    for Samsung, 000660.KS for SK Hynix), be aware that their multiples may

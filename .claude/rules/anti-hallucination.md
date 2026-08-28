@@ -27,6 +27,15 @@ arithmetic or an explicit comparison — with the formula/comparison shown. So a
 `[News: ...]`. Likewise insider/estimates/earnings → `[API: 04_insider_data]`
 / `[API: 06_analyst_estimates]` / `[API: 07_earnings]`.
 
+**One KIND per bracket — never nest.** Each `[...]` carries exactly one
+source KIND and one source. A citation packed inside another kind's brackets
+(`[Filing: 10-Q; WebSearch: outlet, url, accessed ...]`,
+`[Calc: a / b = c, from WebSearch: ...]`) reports the OUTER kind to the
+validator, so the inner citation escapes every binding check. Emit them as
+adjacent tags instead: `[Filing: 10-Q] [WebSearch: outlet, url, accessed ...]`.
+Marked artifacts fail closed on a nested WebSearch token
+(`scripts/schemas/source_tag.py`).
+
 Content without a source tag is invalid. No source = does not exist.
 
 Scope: these tag rules bind the JSON analysis artifacts. Human-readable

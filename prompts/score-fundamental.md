@@ -274,6 +274,52 @@ is **never** earnings-validated, so corroborate `gross_profit` / `cost_of_revenu
 (filing / WebSearch) before letting the margin drive any profitability sub-score.
 Cite as `[API: 02_financial_data, anomalous_quarters]` when it shapes a sub-score.
 
+
+### Statement integrity (`data_quality`)
+
+`02_financial_data.json` also carries a `data_quality` block. Like
+`anomalous_quarters` it is DETERMINISTIC EVIDENCE, never a verdict — nothing
+in it says a number is wrong, only that it cannot be taken at face value
+without corroboration. Read it BEFORE computing any ratio.
+
+**`sign_inconsistencies`** — a column that carries both signs within one
+series (`interest_expense`, `capital_expenditure`). `sign_runs` is the
+run-length view: `[["positive", 15], ["negative", 1]]` is one stray period,
+`[["negative", 7], ["positive", 3]]` is a convention change part-way through.
+Either way, do NOT quote a provider-derived ratio built on that column —
+`metrics_snapshot.interest_coverage` read −7.55 on RKLB off a single negative
+quarter. Recompute from the periods whose sign matches the dominant
+convention, say which periods you used, or mark the metric `unknown`. Never
+"fix" the sign yourself and never silently drop the column.
+
+**`snapshot_period_alignment`** — when `statements_newer_than_snapshot` is
+above 0, `metrics_snapshot` describes an OLDER capital base than the
+statements. Recompute `debt_to_equity`, `interest_coverage`,
+`earnings_per_share` and margins from `income_statements` / `balance_sheets`
+and cite those, not the snapshot. A `null` means the lag could not be
+determined — treat it as unverified, not as zero.
+
+**`statement_basis_boundaries`** — rows drawn from a registration statement
+(S-1/A and the like) sitting beside periodic filings, duplicate
+`fiscal_period` labels, or mixed label formats. A field's jump across such a
+boundary may be a line-item mapping shift rather than a business event
+(SPCX: `deferred_revenue` 13,236M → 7,977M while `deposit_liabilities` went
+null → 14,286M — the deferred-revenue "collapse" was not real). Do not build
+a growth rate across a boundary without verifying it against the filing and
+saying so, and key every quarter by `report_period`, never by
+`fiscal_period`.
+
+**`undateable_rows`** — per family, how many rows carry a `report_period`
+that will not parse. Those rows are excluded from the two checks above
+(a row that cannot be dated cannot be ordered), so a non-zero count means
+the evidence above covers less than the whole series. Say so, and do not
+build a trend across a family with undateable rows without checking them.
+
+Anything this block makes you distrust belongs in `data_quality_caveats` with
+the reason. Cite as `[API: 02_financial_data, data_quality]` when it shapes a
+sub-score.
+
+
 ## Output Format
 
 Write a JSON file with this structure:

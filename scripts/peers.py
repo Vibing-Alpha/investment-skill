@@ -86,6 +86,56 @@ def _try_fetch(ticker: str, field_map: Dict, yf) -> tuple:
         return {}, {}
 
 
+def _aggregate(peer_recs: Dict, field_map: Dict) -> tuple:
+    """Median, contributor count and spread per multiple over `peer_recs`.
+
+    Returns `(medians, sample_size, dispersion)`. Dispersion is
+    `{min, max, max_to_min_ratio}`; the ratio is None for a single
+    observation — a spread over one peer is not a spread, and a 1.0 there
+    would read as a perfectly tight cohort.
+
+    Named failure mode for the dispersion block: SPCX 2026-08-11 published
+    a `forward_pe` median of 270.72 over a cohort running 23.35 to
+    1414.29, and `ps` 9.44 over 2.56 to 243.99. The median alone reads as
+    an anchor; the spread says no peer is anywhere near it. NO verdict
+    flag accompanies it (a `medians_usable` was proposed and refused):
+    usability turns on identity, accounting basis and business
+    comparability, none of which this producer can see.
+
+    Only multiples are aggregated. `market_cap` is currency-bearing and is
+    deliberately absent from every set here.
+    """
+    medians: Dict = {}
+    sample_size: Dict = {}
+    dispersion: Dict = {}
+    for field in field_map:
+        values = [
+            rec["multiples"][field]
+            for rec in peer_recs.values()
+            if field in rec.get("multiples", {})
+        ]
+        if not values:
+            continue
+        ordered = sorted(values)
+        n = len(ordered)
+        sample_size[field] = n
+        if n % 2 == 1:
+            medians[field] = ordered[n // 2]
+        else:
+            medians[field] = round(
+                (ordered[n // 2 - 1] + ordered[n // 2]) / 2, 2,
+            )
+        lo, hi = ordered[0], ordered[-1]
+        dispersion[field] = {
+            "min": lo,
+            "max": hi,
+            # _try_fetch admits only 0 < val <= 10_000, so lo is positive
+            # and the ratio is always well defined for n >= 2.
+            "max_to_min_ratio": round(hi / lo, 2) if n >= 2 else None,
+        }
+    return medians, sample_size, dispersion
+
+
 def fetch_peer_multiples(tickers: List[str]) -> Dict:
     """Fetch valuation multiples for a list of peer tickers.
 
@@ -171,7 +221,6 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
         t for t, rec in peers.items() if not _median_eligible(rec)
     ]
 
-    medians = {}
     # Per-metric contributor count. A median over a single peer is NOT a peer
     # benchmark — e.g. in a pre-profit peer set only the lone profitable name
     # carries a P/E, so medians["pe"] would silently be that one ticker's value
@@ -179,21 +228,34 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
     # consumer discount single-source medians, mirroring the medians_currency /
     # medians_excluded_tickers reliability metadata (DL3b). The producer only
     # reports N honestly; comparability judgment stays with the consumer.
-    medians_sample_size = {}
-    for field in field_map:
-        values = [
-            usd_peers[t]["multiples"][field]
-            for t in usd_peers
-            if field in usd_peers[t]["multiples"]
-        ]
-        if values:
-            s = sorted(values)
-            n = len(s)
-            medians_sample_size[field] = n
-            if n % 2 == 1:
-                medians[field] = s[n // 2]
-            else:
-                medians[field] = round((s[n // 2 - 1] + s[n // 2]) / 2, 2)
+    medians, medians_sample_size, medians_dispersion = _aggregate(
+        usd_peers, field_map,
+    )
+
+    # Cross-currency RATIO medians (2026-08-28 thesis-layer report). On SNDK
+    # the DL3b currency gate dropped all three non-USD peers and left
+    # medians_sample_size == 1 for every metric. But every field in
+    # field_map is DIMENSIONLESS — a KRW price over KRW earnings carries no
+    # currency — so the units argument for excluding them does not hold.
+    # Only `market_cap` is currency-bearing, and it is never aggregated
+    # here (a cross-currency market-cap median would need FX conversion,
+    # and no demonstrated failure asks for one).
+    #
+    # This is ADDITIVE. `medians` stays USD-only: it is the sanctioned DL3b
+    # anchor and CLAUDE.md requires an RFC to change it. The two sets are
+    # separately named so the consumer chooses explicitly; the valuation
+    # prompt says which is which.
+    #
+    # `resolved_as` peers stay excluded from BOTH. That gate is an IDENTITY
+    # argument, not a currency one: the exchange-suffix retry binds the
+    # first foreign listing sharing the symbol with no name re-verification,
+    # so the record may be a different company entirely.
+    identified_peers = {
+        t: rec for t, rec in peers.items() if "resolved_as" not in rec
+    }
+    (cross_currency_ratio_medians,
+     cross_currency_ratio_sample_size,
+     cross_currency_ratio_dispersion) = _aggregate(identified_peers, field_map)
 
     import datetime as _dt
 
@@ -203,6 +265,10 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
         "medians_currency": _MEDIANS_BASE_CURRENCY,           # NEW
         "medians_excluded_tickers": medians_excluded_tickers, # NEW
         "medians_sample_size": medians_sample_size,           # NEW: per-metric n
+        "medians_dispersion": medians_dispersion,
+        "cross_currency_ratio_medians": cross_currency_ratio_medians,
+        "cross_currency_ratio_sample_size": cross_currency_ratio_sample_size,
+        "cross_currency_ratio_dispersion": cross_currency_ratio_dispersion,
         "tickers_requested": tickers,
         "tickers_succeeded": list(peers.keys()),
         "data_source": "yfinance",

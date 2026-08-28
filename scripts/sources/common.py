@@ -187,6 +187,45 @@ def safe_num(v):
     return v
 
 
+def derive_surprise_percents(row):
+    """Add explicitly-named EPS and revenue surprise percentages to an
+    earnings snapshot row. Returns a NEW dict; never mutates the input.
+
+    Named failure mode (2026-08-28 Cowork run, 5 of 6 tickers): the single
+    field `surprise_pct` is the EPS surprise, but it is emitted between
+    `estimated_revenue` and `surprise_revenue`, so it reads as the revenue
+    surprise. On RKLB it says 48.56% where the revenue surprise is 1.05%;
+    on CRM 80.43% against 0.13%. `.claude/rules/producer-consumer.md` rule
+    1: a field name is a contract, and this one names no basis.
+
+    `surprise_pct` is KEPT as a deprecated alias for the EPS figure — it is
+    a published field with external readers — but it is now derived from
+    the same value as `surprise_eps_pct`, so the two can never diverge.
+
+    An uncomputable percentage is None, never 0.0: a 0.0 reads as "hit
+    consensus exactly" (producer-consumer rule 4).
+    """
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+
+    def _pct(surprise_key, estimate_key):
+        surprise = safe_num(out.get(surprise_key))
+        estimate = safe_num(out.get(estimate_key))
+        if surprise is None or not estimate:
+            return None
+        return surprise / abs(estimate) * 100.0
+
+    eps_pct = _pct("surprise_eps", "estimated_eps")
+    if eps_pct is None:
+        # Provider supplied the percentage but not the components.
+        eps_pct = safe_num(out.get("surprise_pct"))
+    out["surprise_eps_pct"] = eps_pct
+    out["surprise_revenue_pct"] = _pct("surprise_revenue", "estimated_revenue")
+    out["surprise_pct"] = eps_pct  # deprecated alias — EPS basis
+    return out
+
+
 def coerce_known_numeric_fields(obj, numeric_fields):
     """Walk a single-level dict and coerce values at known numeric keys
     to None when they are not finite-numeric. Keeps non-numeric fields

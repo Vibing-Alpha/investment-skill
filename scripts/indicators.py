@@ -27,7 +27,7 @@ Guards:
   - Bool rejection for numeric parameters
 """
 import math
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _sanitize_closes(closes: List) -> List[float]:
@@ -738,6 +738,8 @@ def _empty_volume_result() -> Dict:
 def calc_volume(
     volumes: List[float],
     closes: List[float],
+    *,
+    latest_session_excluded: bool = False,
 ) -> Dict:
     """Volume analysis with paired-bar alignment.
 
@@ -763,6 +765,17 @@ def calc_volume(
     # final volume 10000 → current_volume=100, ratio 1.0, 'neutral'
     # instead of 16.8x 'bullish_confirmation'). Current-labeled fields
     # fail closed; historical aggregates over valid bars remain.
+    # Cold review 2026-08-29: the original predicate required a VALID
+    # close, so the mirror case walked straight past it — a bar with a fine
+    # volume and an unusable CLOSE is dropped by the same pair-filter, and
+    # the prior session's volume wears the `current` label just the same
+    # (repro: [100]*25+[9999] with closes ending None -> current_volume=100,
+    # ratio 1.0, for a session that traded 9,999). Either leg unusable ->
+    # the current-labelled fields fail closed.
+    latest_bar_unusable = bool(
+        volumes and closes
+        and not (_valid_volume(volumes[-1]) and _valid_close(closes[-1]))
+    )
     latest_volume_missing = bool(
         volumes and _valid_close(closes[-1]) and not _valid_volume(volumes[-1])
     )
@@ -828,10 +841,14 @@ def calc_volume(
             else:
                 price_volume_rel = 'neutral'
 
-    if latest_volume_missing:
+    if latest_bar_unusable or latest_session_excluded:
         # obv_trend / volume_ma20 are statements about known history and
         # stay; everything claiming to describe the CURRENT session fails
         # closed (producer-consumer rule #4: unknown ≠ last-known-good).
+        # `latest_session_excluded` is the same hazard from the other
+        # direction: the caller dropped an incomplete trailing bar, so the
+        # newest bar left is the PRIOR session and must not wear the
+        # `current` label either.
         return {
             'current_volume': None,
             'volume_ma20': (int(round(vol_ma20))
@@ -840,7 +857,11 @@ def calc_volume(
             'volume_ratio_5d_20d': None,
             'obv_trend': obv_trend,
             'price_volume_relationship': 'insufficient_data',
-            'volume_note': 'latest_session_volume_missing',
+            'volume_note': (
+                'latest_session_volume_missing' if latest_volume_missing
+                else 'latest_session_bar_unusable' if latest_bar_unusable
+                else 'latest_session_excluded_incomplete'
+            ),
         }
 
     return {
@@ -907,6 +928,154 @@ def _parse_args():
     return parser.parse_args()
 
 
+
+def _parse_bar_date(raw: str):
+    """`datetime.date` from a bar's `time`, else None.
+
+    A bare `2026-08-14` and a full ISO timestamp (`2026-08-14T00:00:00Z`,
+    `2026-08-14 00:00:00`) are both legitimate provider forms; junk with a
+    date-shaped prefix (`2026-08-14JUNK`) is not. Slicing `[:10]` accepted
+    the junk; requiring exactly 10 characters rejected the timestamps.
+    Parse the WHOLE string (cold review 2026-08-29).
+    """
+    import datetime as _dt
+    s = raw.strip()
+    try:
+        return _dt.date.fromisoformat(s)
+    except ValueError:
+        pass
+    try:
+        norm = s[:-1] + '+00:00' if s.endswith('Z') else s
+        return _dt.datetime.fromisoformat(norm).date()
+    except ValueError:  # fail-open-ok: an unparseable bar date is reported as unknown_excluded and the bar is DROPPED — the caller never assumes a value from it
+        return None
+
+
+def classify_daily_tail(daily: List[Dict], snapshot: Any) -> Dict:
+    """Decide whether the newest daily bar is a COMPLETED session.
+
+    Named failure mode: a fetch that runs while the market is open gets a
+    mid-session stub as `daily[-1]`, and every block here computed on it.
+    `reports/INTC/20260813` was fetched at 10:50 ET and published
+    `volume_ratio_vs_ma20: 0.27` — it is 0.96 without the stub — while
+    `atr_14` came out 3.7% low, tightening every ATR stop.
+
+    The anchor is `snapshot.time`, which is DATA, so this stays
+    deterministic (tests/test_determinism.py forbids reading the clock).
+    A bar whose date is later than the last session that had closed at
+    the snapshot instant cannot be complete.
+
+    Deliberately NOT a volume heuristic. Over the 42 stored price
+    artifacts, "tail date == snapshot date AND volume < 0.5 * MA20" fires
+    3 times and 2 are false — BE 2026-08-11 at 0.491 is a genuinely quiet
+    session, MRAAY 2026-08-05 at 0.12 is genuinely thin OTC trading. The
+    timestamp predicate fires twice, both real.
+
+    Deliberately NO clock-skew grace either. MRAAY's snapshot is stamped
+    19:59:37Z — 23 seconds before the close — and its bar carried 95,973
+    shares against a ~740k MA20; excluding it moves the ratio 0.13 -> 1.02.
+    A 60-second grace would have passed that through.
+
+    Anything that cannot be PROVEN complete is excluded: losing one
+    session is cheap, keeping a stub was not.
+
+    Returns the `input_completeness` block; `daily_tail_status` is one of
+    `complete_used` / `partial_excluded` / `unknown_excluded`.
+    """
+    import datetime as _dt
+
+    block: Dict[str, Any] = {
+        'daily_tail_status': 'unknown_excluded',
+        'snapshot_time': None,
+        'tail_bar_time': None,
+        'session_close_et': None,
+        'reason': None,
+        'indicator_history_through': None,
+        # Whether the SERIES is current, which `daily_tail_status` does not
+        # answer — that only says the newest bar had closed. A provider can
+        # be a session behind: SPCX 2026-08-11 (post-close snapshot) had a
+        # 2026-08-10 tail, so every block described the PRIOR session while
+        # reading `complete_used`. 7 of 42 stored artifacts are behind.
+        'last_closed_session': None,
+        'sessions_behind_last_close': None,
+        # Which price the current-relative fields (Bollinger position,
+        # the ATR stops) are anchored to. Absent `snapshot.price`, calc_*
+        # falls back to `closes[-1]` — after a partial bar is trimmed that
+        # is the PRIOR close, so a fully-populated stop can be a session
+        # stale with nothing saying so.
+        'current_price_source': None,
+        'last_complete_session_volume': None,
+        'last_complete_session_volume_ratio_vs_ma20': None,
+    }
+
+    tail_raw = daily[-1].get('time') if (daily and isinstance(daily[-1], dict)) else None
+    if isinstance(tail_raw, str) and tail_raw:
+        # The FULL string must be a date. Taking `[:10]` accepted
+        # `2026-08-14JUNK` as a clean 2026-08-14 and blessed a malformed
+        # provider row `complete_used` (cold review 2026-08-28).
+        block['tail_bar_time'] = tail_raw.strip()
+
+    snap_raw = snapshot.get('time') if isinstance(snapshot, dict) else None
+    if isinstance(snap_raw, str) and snap_raw:
+        block['snapshot_time'] = snap_raw
+
+    if not isinstance(snap_raw, str) or not snap_raw:
+        block['reason'] = 'snapshot_time_absent'
+        return block
+    if not block['tail_bar_time']:
+        block['reason'] = 'tail_bar_time_absent'
+        return block
+
+    try:
+        norm = snap_raw.strip()
+        if norm.endswith('Z'):
+            norm = norm[:-1] + '+00:00'
+        snap_dt = _dt.datetime.fromisoformat(norm)
+    except (TypeError, ValueError):
+        block['reason'] = 'snapshot_time_unparseable'
+        return block
+    if snap_dt.tzinfo is None:
+        # A naive stamp would be read in the HOST timezone and could
+        # mis-anchor the session on a non-ET machine — the same trap
+        # `delta.calendar.last_closed_trading_day` refuses loudly.
+        block['reason'] = 'snapshot_time_not_timezone_aware'
+        return block
+
+    tail_date = _parse_bar_date(block['tail_bar_time'])
+    if tail_date is None:
+        block['reason'] = 'tail_bar_time_unparseable'
+        return block
+
+    from scripts.delta.calendar import (
+        session_close_et, last_closed_trading_day,
+    )
+    # Determinable from the snapshot alone, so record it even when the tail
+    # itself is unusable — withholding a known fact is its own defect.
+    block['last_closed_session'] = last_closed_trading_day(snap_dt).isoformat()
+    try:
+        close_dt = session_close_et(tail_date)
+    except ValueError:
+        # The bar is dated on a weekend or a market holiday: there is no
+        # scheduled close to compare against, and calling it complete
+        # would bless a bar we cannot account for.
+        block['reason'] = 'tail_bar_not_on_a_trading_day'
+        return block
+
+    block['session_close_et'] = close_dt.isoformat()
+    if snap_dt < close_dt:
+        block['daily_tail_status'] = 'partial_excluded'
+        block['reason'] = 'snapshot_precedes_session_close'
+        return block
+
+    block['daily_tail_status'] = 'complete_used'
+    block['reason'] = 'snapshot_at_or_after_session_close'
+    # The PARSED date, not the raw field: a provider timestamp
+    # (`2026-08-14T00:00:00Z`) left here unnormalized is unparseable to the
+    # staleness count below, which then reports null for a known value.
+    block['indicator_history_through'] = tail_date.isoformat()
+    return block
+
+
 def _main():
     """CLI main: read price JSON, compute all indicators, output combined JSON."""
     import json
@@ -927,6 +1096,51 @@ def _main():
 
     if not daily:
         print(f"indicators: historical.daily is empty in {args.price_json}", file=sys.stderr)
+        sys.exit(1)
+
+    # A mid-session fetch leaves a stub as daily[-1]. Classify it BEFORE
+    # any series is built, and drop it from ALL of them — ATR, Bollinger,
+    # MACD, RSI and volume every one consumed it. `snapshot.price` still
+    # supplies the live price for the current-price-relative fields, which
+    # calc_bollinger / calc_atr already accept separately.
+    completeness = classify_daily_tail(daily, data.get("snapshot"))
+    tail_excluded = completeness["daily_tail_status"] != "complete_used"
+    if tail_excluded:
+        daily = daily[:-1]
+        if daily:
+            last = daily[-1]
+            _t = last.get("time") if isinstance(last, dict) else None
+            _d = _parse_bar_date(_t) if isinstance(_t, str) else None
+            completeness["indicator_history_through"] = (
+                _d.isoformat() if _d is not None else None
+            )
+
+    # How far the SERIES trails the last session that had closed at the
+    # snapshot instant. `daily_tail_status` only says whether the newest bar
+    # had closed; a provider can be a whole session behind and still satisfy
+    # that (SPCX 2026-08-11 published a 2026-08-10 bar's volume as current).
+    # Measured on the used tail, so trimming a stub does not read as
+    # staleness. None where it cannot be determined — never 0.
+    _used_tail = completeness.get("indicator_history_through")
+    _last_closed = completeness.get("last_closed_session")
+    if _used_tail and _last_closed:
+        import datetime as _dt2
+        from scripts.delta.calendar import trading_days_between
+        try:
+            completeness["sessions_behind_last_close"] = trading_days_between(
+                _dt2.date.fromisoformat(_used_tail),
+                _dt2.date.fromisoformat(_last_closed),
+            )
+        except ValueError:
+            pass
+
+    if not daily:
+        print(
+            f"indicators: historical.daily has no COMPLETED session in "
+            f"{args.price_json} (tail {completeness['tail_bar_time']} "
+            f"excluded: {completeness['reason']})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -965,6 +1179,17 @@ def _main():
         if snapshot and isinstance(snapshot.get("price"), (int, float)):
             current_price = snapshot["price"]
 
+    # Must match what calc_bollinger / calc_atr ACCEPT, not merely "is a
+    # number": both require finite-positive and fall back to the last close
+    # otherwise, so a 0.0 / negative / NaN price was being named as an
+    # anchor the maths had rejected (cold review 2026-08-29).
+    if args.current_price is not None and _fin_pos(current_price):
+        completeness["current_price_source"] = "cli_override"
+    elif _fin_pos(current_price):
+        completeness["current_price_source"] = "snapshot"
+    else:
+        completeness["current_price_source"] = "last_close"
+
     # --- Bool rejection for numeric params ---
     if isinstance(current_price, bool):
         print("indicators: --current-price must be numeric, not bool", file=sys.stderr)
@@ -985,7 +1210,30 @@ def _main():
     result["rsi_divergence"] = detect_rsi_divergence(closes_clean, rsi_series)
 
     # Volume indicators (pair-alignment contract enforced inside)
-    result["volume"] = calc_volume(volumes, closes)
+    result["volume"] = calc_volume(
+        volumes, closes, latest_session_excluded=tail_excluded,
+    )
+
+    # Surface what the completed-session volume actually was. The
+    # current-labelled fields are nulled above (a prior session must never
+    # wear the `current` label — the same rule the latest_volume_missing
+    # branch already enforces), but the agent still needs the usable
+    # number, under a name that says which session it describes.
+    # Only when the newest REMAINING bar is itself usable on both legs.
+    # calc_volume's pair-filter drops a bar whose close is unusable even
+    # when its volume is fine, so an unguarded second call could hand back
+    # an OLDER bar's volume under this session's label — the same
+    # prior-session promotion `latest_volume_missing` exists to prevent.
+    if tail_excluded and volumes and closes and _valid_volume(volumes[-1]) \
+            and _valid_close(closes[-1]):
+        _complete = calc_volume(volumes, closes)
+        completeness["last_complete_session_volume"] = (
+            _complete.get("current_volume")
+        )
+        completeness["last_complete_session_volume_ratio_vs_ma20"] = (
+            _complete.get("volume_ratio_vs_ma20")
+        )
+    result["input_completeness"] = completeness
 
     # --- Output ---
     write_output(result, args.output)

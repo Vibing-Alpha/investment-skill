@@ -14,6 +14,33 @@ the technical picture so downstream agents can use it for sizing, timing, and ri
   - `historical.daily`: ~125 bars (6mo), `{time, open, high, low, close, volume}`
   - `historical.weekly`: ~104 bars (2yr), same OHLCV format
 - `data/indicators.json` — pre-computed by `scripts/indicators.py`:
+  - `input_completeness` — READ THIS FIRST. `daily_tail_status` is
+    `complete_used` (every block used the newest daily bar),
+    `partial_excluded` (the fetch ran mid-session, so the stub bar was
+    dropped from ALL blocks) or `unknown_excluded` (completeness could not
+    be proven — same treatment). On either excluded status:
+    `indicator_history_through` names the last session actually used;
+    `volume.current_volume` and `volume.volume_ratio_vs_ma20` are `null`
+    BY DESIGN — the prior session must not wear the `current` label — and
+    the usable figures are `last_complete_session_volume` /
+    `last_complete_session_volume_ratio_vs_ma20` in this block. Quote
+    those and say which session they describe. `snapshot.price` is still
+    live, so entry/stop distances and Bollinger position remain current.
+    Do NOT read a null volume ratio as "no volume".
+    `sessions_behind_last_close` is a SEPARATE question: it counts trading
+    sessions between the newest bar actually used and the last session that
+    had closed. `complete_used` with a positive count means the provider is
+    behind — the bar it gave you closed, but a newer one has too, so every
+    block (MACD, RSI, OBV, the volume ratio, the 5-session price/volume
+    read) describes an older session. It happens: one stored run published
+    the prior day's 169.9M as `current_volume` while the snapshot's own
+    session had traded 108.3M — the published figure was 57% ABOVE the
+    live one, which is 36% below it. Say which session your read is
+    as of, and lower confidence rather than presenting it as today's tape.
+    `current_price_source` is `snapshot` (live) or `last_close` — on
+    `last_close` the Bollinger position and every ATR stop are anchored to
+    a CLOSE, not the live price, so treat those levels as indicative and
+    say so.
   - `macd`: `{macd_line, signal_line, histogram, crossover, hist_trend, zero_side}`
     - `hist_trend` ∈ `expanding|contracting|flat|reversal|insufficient_data`
       - `reversal` = histogram changed sign between the last two bars
@@ -56,6 +83,16 @@ the output rather than inferring a default directional label.
 
 Compare price vs MA20/MA50 (from `historical.sma_20/sma_50`) and approximate
 MA200 from weekly data (~40 bars). Check MA20 vs MA50 ordering.
+
+**Clean the weekly tail before averaging.** On a mid-week run the provider
+emits TWO incomplete tail rows — a week-to-date bar and a current-day bar
+dated within the same ISO week — so dropping one still leaves a partial
+week in the average (measured on a real run: 158.91 against a clean
+161.77, a 1.8% error in a level being used as support).
+`indicators.json` does not read the weekly series at all, so do it here:
+keep at most ONE row per ISO week (the latest), then drop the snapshot's
+own ISO week unless it is provably complete. Say the MA200 is approximate
+and name the last complete week you used.
 
 Why MA alignment matters: when price > MA20 > MA50 > MA200, every timeframe
 participant is in profit — no trapped holders selling into rallies. Fully bearish
@@ -140,7 +177,14 @@ Synthesize all five dimensions into an entry favorability judgment (not a formul
 **Entry favorability levels:**
 - `strong_buy_zone`: Uptrend + pullback to support + RSI recovering from oversold + expanding volume
 - `favorable`: Trend up, indicators healthy, no red flags, not at ideal pullback
-- `neutral`: Sideways, MAs tangling, mixed signals — wait for clarity
+- `neutral`: Sideways, MAs tangling, mixed signals — wait for clarity. ALSO
+  the right label for a HEALTHY trend that is simply extended: strong
+  alignment and confirming signals, but price far above its moving averages,
+  RSI deeply overbought, outside the upper Bollinger band, or with an
+  unfilled gap below and no support until well down. `favorable` means the
+  entry is attractive now; a trend you like at a price you would not pay is
+  `neutral`, and the reasoning should say "wait for a pullback to <level>"
+  rather than pretending the trend is mixed
 - `unfavorable`: Trend weakening, breaking below MAs, burden of proof on bulls
 - `strong_avoid`: Downtrend + breakdown + high-volume selling. A single
   bullish RSI divergence does NOT soften `strong_avoid` to `unfavorable`
@@ -155,8 +199,18 @@ Synthesize all five dimensions into an entry favorability judgment (not a formul
 - `breakout_level`: price + basis (e.g., "52-week high")
 
 **Caution flags** — list regardless of favorability: Bollinger squeeze, bearish RSI
-divergence at highs, declining volume during trend, price extended far from MAs,
-approaching earnings.
+divergence at highs, declining volume during trend, price extended far from MAs.
+
+**One event candle is ONE signal, not four.** An earnings or announcement bar
+pushes RSI, %B, the MACD histogram and the MA deviation to extremes together
+by construction. Count that as a single observation and say which event drove
+it; reading them as four independent confirmations manufactures conviction
+out of one day.
+
+You have NO earnings date. `07_earnings.json` carries past prints only and is
+not in your inputs; the forward date is WebSearch-sourced by the events agent
+and lands in `events.json`. So do not flag — or rule out — "approaching
+earnings" here. The thesis layer applies catalyst proximity to your read.
 
 ## Output Format
 

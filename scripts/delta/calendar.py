@@ -115,6 +115,28 @@ def _close_hour_et(d: datetime.date) -> int:
     return _EARLY_CLOSES.get(d, 16)
 
 
+def session_close_et(d: datetime.date) -> datetime.datetime:
+    """The scheduled regular-session close for trading day `d`, as an
+    aware ET datetime (16:00, or 13:00 on a known early-close day).
+
+    Public counterpart to `_close_hour_et`, for callers that need to
+    compare a DATA timestamp against the close rather than the wall clock
+    — `scripts.indicators` uses it to decide whether the trailing daily
+    bar in a price artifact is a completed session or a mid-session stub.
+    Because it takes the date rather than reading the clock, callers stay
+    deterministic (tests/test_determinism.py).
+
+    Raises ValueError on a non-trading day: there is no close to compare
+    against, and returning a fabricated 16:00 would silently classify a
+    weekend/holiday bar as complete.
+    """
+    if not is_trading_day(d):
+        raise ValueError(f"{d.isoformat()} is not a US trading day")
+    return datetime.datetime(
+        d.year, d.month, d.day, _close_hour_et(d), 0, 0, tzinfo=ET,
+    )
+
+
 def _now_utc() -> datetime.datetime:
     """Seam for testing."""
     return datetime.datetime.now(datetime.timezone.utc)

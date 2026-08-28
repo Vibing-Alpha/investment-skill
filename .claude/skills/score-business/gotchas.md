@@ -342,12 +342,13 @@ GAAP EPS far below non-GAAP. When GAAP/non-GAAP < 0.7, downstream valuation
 must choose which basis for P/E comparisons, so the divergence needs
 surfacing (scoring action cross-referenced above).
 
-### Partial Trading Day Volume
-When data is fetched during market hours, the last bar has partial volume
-(e.g., 5M vs typical 30M). This distorts volume indicators computed by
-`scripts/indicators.py`. The indicators are still correct for the data
-given — but downstream technical analysis should check if the last bar's
-volume is anomalously low relative to the 20-day average.
+### Partial Trading Day Volume — handled in the producer now
+`scripts/indicators.py` classifies the trailing bar from `snapshot.time`
+and excludes an unproven one from every block, recording what it did in
+`indicators.json:input_completeness`. Downstream reads that field; it does
+NOT infer partiality from a low volume ratio, which was measured wrong 2
+times in 3 on the stored corpus. See
+`.claude/skills/investment-thesis/gotchas.md` §Partial trading day volume.
 
 ### Cyclical Stocks — Peak Metrics Misleading
 > → Scoring action: `prompts/references/scoring-calibration.md` §Fundamental 4.

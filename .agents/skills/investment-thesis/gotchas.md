@@ -2,12 +2,18 @@
 
 ## Data Issues
 
-### Partial trading day volume
-When data is fetched during market hours, the last bar has partial volume
-(e.g., 5M vs typical 30M). This distorts volume indicators (volume_ratio,
-price_volume_relationship) and can make the technical agent incorrectly
-flag "declining volume." Check if the last bar's volume is <50% of the
-20-day average — if so, note it as partial-day data.
+### Partial trading day volume — SUPERSEDED, do not apply the old heuristic
+`scripts/indicators.py` now decides this deterministically from
+`snapshot.time` and drops an unproven trailing bar from every block before
+computing. Read `indicators.json:input_completeness` and treat it as
+authoritative; `prompts/evaluate-technical.md` says how.
+
+**Do NOT judge it by volume.** The old rule here — "last bar's volume <50%
+of the 20-day average means partial-day data" — was measured against all 42
+stored price artifacts and is wrong 2 times in 3: BE 2026-08-11 sits at 0.49
+and MRAAY 2026-08-05 at 0.12, and both are COMPLETE sessions (a genuinely
+quiet day and genuinely thin OTC trading). Applying it there marks real
+sessions as unusable and lowers confidence for no reason.
 
 ### Price staleness
 BQ data may be days old when thesis is run. For volatile stocks (ATR >5%),

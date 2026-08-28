@@ -7,16 +7,61 @@ interpretation adapts.
 
 ## When to Use This Reference
 
-Apply growth stock analysis when the company shows 2+ of these signals:
-- Net income negative for the trailing 4 quarters
-- Gross margin > 50% (asset-light business model)
-- SBC > 15% of revenue
-- Cash + short-term investments > 40% of total assets
-- Revenue growing > 25% YoY with no clear profitability yet
+**You decide, from `02_financial_data.json`.** `00_validation.json` is NOT in
+a dimension agent's inputs (`.claude/skills/score-business/SKILL.md` says so
+explicitly), so do not go looking for a flag there — apply this reference
+when the company shows the characteristics below, per the pre-profit pointer
+in the skill's gotchas.
 
-Use judgment — a biotech with no revenue is different from a SaaS company
-with 60% gross margins burning cash on sales. This methodology is designed
-for the latter category (high-gross-margin companies investing for growth).
+A deterministic detector, `scripts.adr.detect.detect_growth_stock_mode`, runs
+during fetch and writes `00_validation.json:categories.growth_stock_mode` for
+the synthesis agent and the operator. It gates nothing here. Its thresholds
+are reproduced below because they define what this system means by
+"growth-stock characteristics" — not because you can read its verdict.
+
+Four weighted signals, each read off a different basis:
+
+| Signal | Threshold | Basis | Weight |
+|---|---|---|---|
+| Negative net income | sum < 0 | trailing 4 quarters of `income_statements` (1 row on an annual series) | 1.0 |
+| High gross margin | > 70% | `metrics_snapshot.gross_margin` | 1.0 |
+| High SBC ratio | SBC / revenue > 15% | the latest aligned income↔cash_flow quarter pair, SBC de-cumulated from YTD | 1.0 |
+| High cash ratio | > 40% | (cash + current investments) / total assets on the latest balance sheet | 0.5 |
+
+The gross-margin signal reads the provider's snapshot, which can lag the
+statements — check `data_quality.snapshot_period_alignment` in
+`02_financial_data.json` before treating that trigger as current.
+
+Mode is enabled at a total score ≥ 2.0. **This table is the code's, not a
+restatement of it** — an earlier version of this file listed five signals,
+a 50% gross-margin threshold and a bare "2+ of these", none of which the
+detector implements; an agent reading it concluded RKLB (score 1.5) had been
+misclassified. If you need the exact behaviour, read
+`scripts/adr/detect.py:detect_growth_stock_mode` — this table is a summary
+and the code wins.
+
+Only the SBC signal announces a skip: an absent
+`share_based_compensation` column appears as `sbc_ratio_skipped` in
+`trigger_values`, with no `sbc_ratio`, and must not be read as "SBC is low".
+
+The other three behave in two steps, and the difference matters. When their
+input ROWS are absent entirely the key is simply missing from
+`trigger_values` — verified: with empty statements the block contains
+`sbc_ratio_skipped` and nothing else. But when the rows are PRESENT and the
+values inside them are not, the missing values coerce to zero — verified:
+four income rows with no `net_income` yield `ttm_net_income: 0.0`, and a
+balance row with no cash fields yields `cash_ratio: 0.0`, both scoring
+False. So a 0.0 on those two means "missing values or a genuine zero" and
+the block cannot tell you which. Check the statements before reading either
+as a real zero.
+
+The mode is deliberately narrow: it targets high-gross-margin, asset-light
+companies investing for growth. A capital-intensive hardware business that
+is merely unprofitable and growing fast does NOT belong here — the standard
+dimensions already handle it, and the unit-economics lenses below would be
+invented rather than measured. Use judgment on top of the flag: a biotech
+with no revenue is different from a SaaS company with 60% gross margins
+burning cash on sales, and the methodology is written for the latter.
 
 ## 1. Unit Economics
 

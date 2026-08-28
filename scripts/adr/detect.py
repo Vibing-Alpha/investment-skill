@@ -46,7 +46,7 @@ _ADR_NUMERIC_FIELDS = frozenset({
 })
 
 
-from scripts.adr import safe_float as _sf
+from scripts.adr import safe_float as _sf, is_finite_numeric
 
 _PREFIX = "adr.detect"
 
@@ -561,7 +561,25 @@ def detect_growth_stock_mode(metrics_data: Dict, financials_data: Dict, *, ticke
 
         if sbc_pair is not None:
             latest_is, latest_cf = sbc_pair
-            sbc = _sf(latest_cf.get("share_based_compensation"))
+            # BE 2026-08-11: `share_based_compensation` was null on 10/10
+            # cash_flow rows, and `_sf(None) -> 0.0` turned an ABSENT column
+            # into an affirmative "SBC is low" signal (`sbc_ratio: 0.0`,
+            # `high_sbc_ratio: False`) that no consumer could tell apart from
+            # a company that genuinely pays no SBC. Gate on PRESENCE via
+            # is_finite_numeric, not on truthiness — a genuinely reported 0
+            # is data and still computes.
+            # (.claude/rules/producer-consumer.md §4: missing is not zero.)
+            _raw_sbc = latest_cf.get("share_based_compensation")
+            if not is_finite_numeric(_raw_sbc):
+                sbc_pair = None
+                result["trigger_values"]["sbc_ratio_skipped"] = (
+                    "share_based_compensation absent / non-numeric on the "
+                    f"aligned cash_flow row "
+                    f"({latest_cf.get('report_period')}) — ratio not computed"
+                )
+
+        if sbc_pair is not None:
+            sbc = _sf(_raw_sbc)
             # SNOW 2026-05-28: 10-Q cash-flow SBC is YTD-cumulative while the
             # income revenue below is discrete-quarter. De-cumulate to the
             # discrete quarter so the ratio is window-consistent (else a

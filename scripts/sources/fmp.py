@@ -15,6 +15,7 @@ from scripts.constants import FMP_BASE_URL, FMP_STABLE_BASE_URL
 from scripts.sources.common import (
     http_get, HttpStatusError, FMP_POLICY, SEC_POLICY, safe_http_get_json,
     safe_num, emit_with_numeric_coerce, normalize_currency,
+    derive_surprise_percents,
 )
 from scripts.sources.adapter_result import (
     AdapterError,
@@ -822,10 +823,6 @@ def _convert_fmp_earnings(surprises: List, calendar: List) -> Dict:
     actual = safe_num(latest.get("actualEarningResult"))
     est = safe_num(latest.get("estimatedEarning"))
     surprise = (actual - est) if (actual is not None and est is not None) else None
-    surprise_pct = None
-    if surprise is not None and est not in (None, 0):
-        surprise_pct = surprise / abs(est) * 100.0  # human percent (matches FDS convention)
-
     rev_actual = rev_est = None
     for c in calendar:
         if isinstance(c, dict) and c.get("date") == date:
@@ -835,18 +832,22 @@ def _convert_fmp_earnings(surprises: List, calendar: List) -> Dict:
     ra, re_ = safe_num(rev_actual), safe_num(rev_est)
     surprise_rev = (ra - re_) if (ra is not None and re_ is not None) else None
 
-    return {
+    # `surprise_pct` names no basis and sits between the revenue keys, so it
+    # reads as the revenue surprise when it is the EPS surprise (RKLB
+    # 48.56% vs 1.05%). derive_surprise_percents adds the explicitly-named
+    # pair and keeps `surprise_pct` as a deprecated EPS alias derived from
+    # the same value, so the two can never diverge.
+    return derive_surprise_percents({
         "report_period": date,
         "fiscal_period": None,
         "currency": None,
         "actual_eps": actual,
         "estimated_eps": est,
         "surprise_eps": surprise,
-        "surprise_pct": surprise_pct,
         "actual_revenue": rev_actual,
         "estimated_revenue": rev_est,
         "surprise_revenue": surprise_rev,
-    }
+    })
 
 
 class _FmpNonListError(Exception):

@@ -33,12 +33,23 @@ Look for these divergence patterns:
 |---------|-----------|---------|
 | **Framework mismatch** | Normalized P/E vs trailing P/E differ by >1.8x | Market applies cyclical discount to potentially structural business |
 | **Growth expectation gap** | Reverse DCF implied growth vs BQ-supported growth differ by >30% relative | Market prices in less (or more) growth than evidence supports |
-| **Dimension split** | Forward score exceeds Fundamental score by >1.5 points | Transformation underway but not yet in financials |
+| **Dimension split** | ANY two of the three BQ dimension scores (fundamental / forward / industry) differ by >1.5 points — name the axis and the direction | Transformation underway but not yet in financials; or a good business in a deteriorating industry |
 | **Smart money divergence** | Insider direction contradicts analyst consensus | Information asymmetry between those who operate vs those who model |
 | **Technical-fundamental disconnect** | BQ ≥ 7.5 but entry_favorability = strong_avoid (or vice versa) | Quality company in distressed price action — accumulation or value trap? |
 | **Peer valuation outlier** | Company multiple vs peer median deviates >50% without proportional fundamental premium | Possible mispricing relative to comparable businesses |
 
 ### Scan Rules
+
+- **Dimension split is PAIRWISE.** Scanning only `forward - fundamental`
+  misses the split entirely whenever the widest gap sits on another axis:
+  over the 10 stored `bq_analysis.json` runs carrying all three dimension
+  scores, 2 carried a clear >1.5 gap the canonical axis could not see (forward vs industry +2.45 and +2.30, against canonical readings
+  of +1.15 and +0.80) and a third sat exactly on the line at -1.50 against
+  a canonical -0.50. Take the largest absolute pairwise
+  difference, and state which two dimensions and which way — "industry
+  8.30 vs forward 6.80" is a different thesis from the reverse.
+  `synthesis.contradictions` in `bq_analysis.json` often already names the
+  tension in prose; read it, and do not contradict it silently.
 
 - Apply a significance threshold — only surface divergences where the
   magnitude is genuinely unusual, not just any difference.

@@ -424,6 +424,32 @@ NOT add `00_validation.json` (the dimension agents' input contract is
 deliberately data-only; validation state is the synthesis agent's read, and
 the two-phase merge in Step 3 already ran so the file is whole).
 
+**If this host has no sub-agent dispatch** (the skill was itself invoked
+from inside an agent context, so there is no Task tool), do NOT abandon the
+run and do NOT improvise a different output path. Execute SERIALLY in this
+context, one at a time, exactly the agents this tier would have dispatched
+— and no others:
+
+| Step | With dispatch | Serial fallback |
+|---|---|---|
+| 2 classifier | subagent, iff `PRIOR_DIR` non-empty | run the same prompt inline, same output file |
+| 3 dimensions | A (full only) + B + C | the SAME set — on `partial` that is B and C ONLY. Writing `fundamental.json` on a partial run would overwrite the score Step 3 just copied, while `AGENTS_RUN` still records `forward,industry,synthesis` — the artifact and its provenance would disagree |
+| 4 synthesis | subagent | run the same prompt inline, writing the same files (its markdown still goes through the Bash heredoc, per the note in Step 4) |
+
+Each reads the same inputs and writes the same paths as the dispatched
+form. Say so in the Step 8 report: the dimensions were scored in one
+context, so they are not independent — a judgment formed while reading
+`fundamental` can colour `forward` and `industry`, which parallel dispatch
+prevents. Everything downstream (assemble, the contract gate, the WebSearch
+binding check) is unchanged.
+
+Do not try to background these steps either. On at least one host
+(`device_bash`), a backgrounded process is reaped the moment the tool call
+returns — `nohup … &` and `setsid nohup … &` both leave no process and an
+empty log, so a failure is invisible. Every step here is seconds-scale
+(probe fetch ~20s, phase-2 fetch ~11s, indicators <1s, macro ~6s); run them
+in the foreground.
+
 The forward + industry agents MUST have WebSearch access — their prompts
 carry a fail-closed preflight (one real WebSearch call before any
 analysis; host lacks the tool → the agent reports
@@ -629,6 +655,11 @@ Each Task subagent call returns a usage block with `total_tokens`.
 Accumulate these across all agent invocations for this run (every LLM call
 contributes its `usage.total_tokens`; wall time runs from Step 0 to here) and
 substitute the totals into the heredoc below.
+
+If this host gave you no usage blocks (the serial no-sub-agent path above),
+write `"tokens": null`. Do NOT write `0`, and do NOT substitute an estimate:
+a 0 reads as a free run and an estimate is an invented measurement. Wall
+time is still measurable, so keep `duration_s`.
 
 Compose `$AGENTS_RUN` from what ACTUALLY ran this run, not from the
 tier alone. The **classifier** runs only when there was a prior run to

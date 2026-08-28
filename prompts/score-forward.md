@@ -48,7 +48,12 @@ Analyze:
 - Consensus EPS estimates for next quarter and next fiscal year
 - Beat/miss history (8 quarters minimum) — look for the PATTERN, not just stats.
   **Data reality:** `07_earnings.json` carries only the LATEST report, not a
-  history array. Build the history from WebSearch (bound tags) and/or by
+  history array. Its `surprise_eps_pct` and `surprise_revenue_pct` name their
+  own basis; use them. `surprise_pct` is a deprecated alias of the EPS figure
+  kept for older artifacts — it sits between the revenue keys and reads as the
+  revenue surprise, which is how five of six tickers were misread in one run
+  (RKLB: 48.56% EPS quoted as a 1.05% revenue beat). Never read `surprise_pct`
+  as a revenue number. Build the history from WebSearch (bound tags) and/or by
   comparing `06_analyst_estimates` vs actuals in `02_financial_data`; if you
   cannot ground ≥4 quarters, say "beat/miss history data-limited (N quarters)"
   and reduce the weight of this signal — never fabricate quarters.
@@ -57,6 +62,24 @@ Analyze:
   (no revision timestamps, no high/low spread). Revision direction must come
   from WebSearch (bound tags); absent that, mark the revision trend `unknown`
   — unknown must not tilt the score as if it were neutral.
+  **The LEVEL can be stale too, and there is no timestamp to tell you.**
+  Before quoting a forward estimate, sanity-check it against the two things
+  you can see: the latest reported actual in `02_financial_data`, and the
+  company's own guidance (WebSearch, bound tag). Measured misses in one run:
+  RKLB's next-quarter revenue estimate was $217.0M — BELOW the $234.1M it had
+  already reported and the $250M guidance floor; BE's was $871.9M against a
+  $1,065.4M actual; SNDK's $6.853B / $26.82 EPS against guidance of
+  $10.3–10.8B / $44–46 (−33% / −40%). An estimate below the last actual, or
+  outside issued guidance, is a reason to CHECK, not a finding on its own:
+  it happens in 21 of 41 stored artifacts, and seasonality or a genuine
+  contraction produce the same shape. There is no timestamp that settles
+  it. Guidance is what settles it — when a company's own issued range
+  contradicts the snapshot, the guidance wins and you say the snapshot
+  predates it. Absent guidance, mark the estimate `unverified` and do not
+  read it as a slowdown. For a company spun off or
+  IPO'd within about two years, treat vendor consensus as unusable unless a
+  bound source corroborates it (SNDK's vendor Q1 FY27 EPS was $0.650 against
+  guidance of $44–46).
 - Spread between highest and lowest estimate (consensus tightness)
 
 A company that consistently beats by 5%+ with rising estimates has a fundamentally
@@ -203,7 +226,7 @@ Write a JSON file with this structure:
       "data_points": [],
       "interpretation": "",
       "beat_miss_history": [
-        {"quarter": "Q? 20XX", "estimate": 0.00, "actual": 0.00, "surprise_pct": 0.0}
+        {"quarter": "Q? 20XX", "estimate": 0.00, "actual": 0.00, "surprise_eps_pct": 0.0}
       ]
     },
     "guidance_quality": {

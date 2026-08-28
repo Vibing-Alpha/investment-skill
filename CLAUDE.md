@@ -38,6 +38,7 @@ gitignored — never shared.
 | `/monitor` | Daily triage: what on your holdings/watchlist needs attention (routes to the right skill; never trades) |
 | `/write-report TICKER` | Turn an analysis into a readable Markdown report |
 | `/generative-ui` | Turn an analysis into a standalone HTML dashboard |
+| `/stock-v7-setup` | First-run setup, or re-check your config later (same work as `make setup`) |
 | `/track-record` | Archive broker facts before they expire, tag orders with the thesis behind them, quarterly summary. **Interactive Brokers only, via the IBKR MCP server** (read-only — it never places or amends an order) |
 
 ## How it works

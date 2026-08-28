@@ -3967,6 +3967,15 @@ def _main_impl(
             ticker=ticker,
             margin_reliable=_margin_reliable,
         )
+        # 2026-08-28 Cowork run: the COLUMN-level defects `anomalous_quarters`
+        # is not contracted to see — a sign that flips inside one column, a
+        # metrics_snapshot a quarter behind the statements, a statement basis
+        # that changes mid-series. Surfaces evidence only; see
+        # scripts/statement_integrity.py for the scope measurements.
+        from scripts.statement_integrity import detect_statement_integrity
+        financial_output["data_quality"] = detect_statement_integrity(
+            financial_output, ticker=ticker,
+        )
         save_json(financial_output, output_dir / "02_financial_data.json")
         print("    02_financial_data.json", file=sys.stderr)
 

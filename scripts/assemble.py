@@ -1093,6 +1093,24 @@ def _check_mixed_dl3c_modes(loaded_modes, converted_cert_dicts=None):
                 sys.exit(1)
 
 
+
+def _discard_staging(staging_path) -> None:
+    """Best-effort removal of the staging file — NEVER raises.
+
+    Cowork's virtiofs mount can refuse deletes (EPERM). A bare
+    `staging_path.unlink(missing_ok=True)` inside an `except SchemaError`
+    block then raised PermissionError, which REPLACED the SchemaError: the
+    user saw an unlink traceback and never the `contract validation failed`
+    line naming the real cause (2026-08-28 Cowork run, 2 tickers). Cleanup
+    must never outrank the error it is cleaning up after. Same shape as
+    `scripts/etf/stamp.py`'s staged-artifact cleanup.
+    """
+    try:
+        staging_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Assemble bq_analysis.json from score + synthesis files"
@@ -1372,7 +1390,7 @@ def main():
     try:
         load_bq_analysis(str(staging_path))
     except SchemaError as exc:
-        staging_path.unlink(missing_ok=True)
+        _discard_staging(staging_path)
         print(f"{PREFIX}: fatal: contract validation failed on "
               f"{output_path}: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1380,7 +1398,7 @@ def main():
         # Unexpected validator failure (not a contract SchemaError): keep
         # the error loud by re-raising, but don't leak the staging file.
         # Mirrors write_output's own temp-cleanup-then-raise pattern.
-        staging_path.unlink(missing_ok=True)
+        _discard_staging(staging_path)
         raise
 
     staging_path.replace(output_path)

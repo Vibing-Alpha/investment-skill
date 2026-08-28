@@ -160,7 +160,14 @@ Scoring anchors:
 R&D intensity — and ANY ratio you compute from `02_financial_data.json` — is
 only valid when numerator and denominator share one currency. For foreign ADRs
 the feed sometimes returns a USD/native MIX, so check the `currency_consistency`
-block before computing R&D ÷ revenue:
+block before computing R&D ÷ revenue.
+
+**The block is ABSENT — not null — whenever the detector found nothing to
+flag.** That is most tickers, and it is NOT a US-only condition: verified
+absent on US issuers and on foreign ADRs alike (TSM and TSEM carry no block;
+MRAAY, where the mix was real, does). Absence means the detector saw a
+single-currency statement set, so proceed normally and do not treat a
+missing block as an unresolved risk. When it IS present:
 
 - `status: "mixed_unrepairable"` — some statement fields were FX-converted to
   USD while others remain in the native currency (e.g. `revenue` in USD but
