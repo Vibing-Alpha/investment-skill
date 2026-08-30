@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 ## Step 0: Is this a fund?
@@ -161,6 +161,7 @@ do not carry `$VM`/`$OUT` across blocks).
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
 REPORT_DIR="reports/portfolio/$(echo "$RUN_DATE" | tr -d '-')"
 mkdir -p "$REPORT_DIR"
 printf 'VM=%s/portfolio_view_model.json\nOUT=%s/portfolio_dashboard.html\n' "$PWD/$REPORT_DIR" "$PWD/$REPORT_DIR"

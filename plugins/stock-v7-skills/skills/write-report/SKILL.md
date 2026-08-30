@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 ## Step 0: Validate ticker, locate the latest analyzed run
@@ -166,6 +166,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business --include-today)
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -c "
 from scripts.schemas.bq_analysis import load_bq_analysis
 import sys
@@ -223,6 +224,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business --include-today)
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 [ -s "$REPORT_DIR/report.md" ] \
   || { echo "FATAL: report.md was not produced — re-dispatch / re-compose" >&2; exit 1; }
 ```
@@ -244,6 +246,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business --include-today)
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -c 'import sys; from scripts.cli_utils import count_word_equivalents; print(count_word_equivalents(open(sys.argv[1], encoding="utf-8").read()))' "$REPORT_DIR/report.md"
 ```
 
@@ -251,6 +254,8 @@ There is no hard word cap — the report tracks the data ("readable in ~10 minut
 is the bar). Tell the user where the report landed and surface the verdict line.
 The report is opt-in and heavier than the auto-`summary.md`; it does not replace
 it (the summary serves the delta/changelog; the report is the deep read).
+
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ## Gotchas
 

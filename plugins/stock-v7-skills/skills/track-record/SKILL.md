@@ -118,7 +118,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 Every Bash block below starts with `cd "<captured-abs-ROOT>"` for the same
@@ -538,14 +538,56 @@ softened:**
 > quarter window with few fills) never get a file of their own. That is
 > not "no way to put the bytes on disk". Those hosts keep a **session
 > transcript** — Claude Code writes one per session under
-> `~/.claude/projects/<project>/<session-uuid>.jsonl`, with every
-> `tool_result` recorded verbatim — and **a script may copy a result out
-> of it by `tool_use_id` and write it to a file.** A program moving bytes
-> the host itself recorded preserves them exactly; the model retyping
-> what it read into a heredoc does not, and that is the only thing
-> forbidden. Verify the move the way any byte move is verified — compare
-> byte counts end to end and `json.load` the result — and say in your
-> report which path you used. Reading the rule as "inline result ⇒ do not
+> `~/.claude/projects/<project>/<session-uuid>.jsonl`. Most results are
+> recorded there verbatim — one too large to inline is NOT: the host writes
+> the payload to its own file and records a pointer naming it. **This repo
+> ships the extractor for both cases, so do not write one.** The block is
+> self-contained because each bash block is a fresh shell:
+>
+> ```bash
+> # PROJ is derived BEFORE the cd, and this is the one ordering that matters:
+> # Claude Code names the project directory after the session's ORIGINAL cwd,
+> # so a session started in a subdirectory is stored under
+> # `…-stock-v7-scripts`. Deriving after `cd` would silently search
+> # `…-stock-v7` — which EXISTS, so the `-d` check passes and you get
+> # plausible results from the wrong sessions.
+> # Encoding: every `/` AND every `.` becomes `-` (verified against the real
+> # directory; `s|/|-|g` alone leaves `2.invest` and finds nothing).
+> PROJ=~/.claude/projects/"$(pwd | sed 's|[/.]|-|g')"
+> [ -d "$PROJ" ] || { echo "FATAL: no transcript dir at $PROJ — this shell did not start in the session's original directory" >&2; exit 1; }
+> cd "<captured-abs-ROOT>"
+> PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+> # what the log holds (id / tool / ARGS / bytes / file). The args column is
+> # the one to read carefully: two get_account_trades rows differing only by
+> # `period` look identical otherwise, and `pull --args` derives the window
+> # the archive will forever claim to have covered.
+> "$PYBIN" -m scripts.track_record transcript list \
+>   --transcript "$PROJ" --tool get_account_trades
+> # move ONE result to a file, verbatim. Pick the id from the list above; the
+> # command echoes the TOOL it matched, which is your last chance to notice an
+> # id copied from the wrong row
+> # Name the file after the ID, not the tool: a session captures several
+> # windows of the SAME tool, and the extractor refuses an existing output —
+> # so one fixed name succeeds once and then blocks every later capture.
+> OUT="$PWD/reports/track-record/inbox"; mkdir -p "$OUT"
+> ID="<id-from-the-list>"
+> "$PYBIN" -m scripts.track_record transcript extract \
+>   --transcript "$PROJ" --tool-use-id "$ID" --output "$OUT/$ID.json"
+> ```
+>
+> A program moving bytes the host itself recorded preserves them exactly;
+> the model retyping what it read into a heredoc does not, and that is the
+> only thing forbidden. The extractor refuses rather than guesses on every
+> ambiguity that could produce a wrong archive — an `is_error` result, an id
+> recorded with two DIFFERENT bodies (identical replays around a compact
+> boundary are fine and are extracted), a block whose text is missing or not
+> a string, an output path that already exists, and a written file that does
+> not match the recorded bytes. **If it refuses with a "too large to inline"
+> pointer, that is not a failure:** the host already wrote the full payload,
+> the refusal names that file, and you archive it directly with
+> `pull --response <that path>`. Compare the byte count it prints against the
+> host-side count and `json.load` the file, exactly as for any other capture
+> path, and say in > your report which path you used. Reading the rule as "inline result ⇒ do not
 > archive" costs windows that are still in the broker's reach and will
 > not be later: one session gave up four of them that way, and the next
 > session archived all seven, byte-for-byte.

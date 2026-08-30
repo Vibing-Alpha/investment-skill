@@ -3,6 +3,12 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.17.0 — 2026-08-30
+
+- New: on a host that inlines small tool results, `/track-record` can now archive them. `python3 -m scripts.track_record transcript list|extract` moves a recorded result out of the session log BY PROGRAM (never by retyping it), so orders/positions/balances/performance pulls no longer go unarchived. A result too large to inline is detected and refused with the path of the file the host actually wrote, so you archive that instead of a 1.5KB placeholder.
+
+Fixes: every skill now fails closed when a run-directory resolution returns nothing — on a root session (Cowork) an empty path wrote the run into `/` and exited 0, silently placing the analysis where the delta layer can never find it. On a first run `--prior` is omitted rather than passed as the root path `/summary.changelog.md`, which could import unrelated content as a ticker changelog.
+
 ## v1.16.0 — 2026-08-30
 
 - - macro: a whole-structure outage was invisible at every status exit. When the provider drops the anchor session's daily bar, regime closes go null, every holding's price structure goes `unknown` and the volume leg becomes unusable — while `chart_statuses` read `{"status": "PASSED"}` for all 22 symbols and the process exited 0, because the status layer only inspected the meta QUOTE. Each entry now carries `anchor_session_covered` (mirroring the structure block, one computation) and `last_bar_session`, and one stderr WARN names the anchor and every affected symbol. `/portfolio` Step 4 gained hard STOPs for a held ticker that is unanchored and for a null regime leg on any index your principles read.

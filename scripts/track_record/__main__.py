@@ -1178,6 +1178,51 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _cmd_transcript(args) -> int:
+    """Move a tool result out of the host's session log — see
+    `scripts/track_record/transcript.py` for why this is a program and not a
+    one-liner the agent writes fresh over expiring broker facts."""
+    from .transcript import TranscriptRefusal, extract, list_results
+
+    path = Path(args.transcript)
+    try:
+        if args.transcript_cmd == "list":
+            rows, bad = list_results(path, args.tool)
+            if bad:
+                print(f"NOTE: {bad} unparseable line(s) skipped", file=sys.stderr)
+            if not rows:
+                print("no tool_result entries matched", file=sys.stderr)
+                return 1
+            print("tool_use_id\ttool\targs\tbytes\tfile\tnote")
+            for r in rows:
+                print(f"{r['tool_use_id']}\t{r['tool']}\t{r['args']}\t"
+                      f"{r['bytes']}\t{r['file']}\t{r['note']}")
+            return 0
+
+        info = extract(path, args.tool_use_id, Path(args.output))
+        if info["unparseable"]:
+            print(f"NOTE: {info['unparseable']} unparseable line(s) skipped "
+                  f"across {info['searched']} transcript(s)", file=sys.stderr)
+        if info["copies"] > 1:
+            print(f"NOTE: the id is recorded {info['copies']}x, all identical "
+                  f"(compact replay)", file=sys.stderr)
+        # The operator compares the byte count against the host-side count;
+        # that comparison is the whole fidelity claim, so it is stdout, not a
+        # log. The TOOL is here for the same reason: an id copied from the
+        # wrong row writes valid JSON of the wrong call, and this is the last
+        # moment anyone could notice.
+        print(f"wrote {info['bytes']} bytes to {Path(args.output).as_posix()}"
+              f" (tool: {info['tool'] or 'unknown'})")
+        return 0
+    except TranscriptRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="track_record", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1236,6 +1281,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--reports", default=_DEFAULT_REPORTS)
     p_report.add_argument("--quarter", required=True)
     p_report.set_defaults(func=_cmd_report)
+
+    p_tx = sub.add_parser(
+        "transcript",
+        help="Copy a tool_result out of the host's session log by tool_use_id "
+             "(inline-result hosts: the lawful alternative to retyping it)")
+    tx_sub = p_tx.add_subparsers(dest="transcript_cmd", required=True)
+    for name, helptext in (("list", "List recorded tool_results (id / tool / bytes)"),
+                           ("extract", "Write ONE recorded result to a file verbatim")):
+        sp = tx_sub.add_parser(name, help=helptext)
+        sp.add_argument("--transcript", required=True,
+                        help="the .jsonl session log, or the project "
+                             "directory holding them — a directory is searched "
+                             "RECURSIVELY, subagent transcripts included")
+        if name == "list":
+            sp.add_argument("--tool", default=None,
+                            help="substring match on the tool name")
+        else:
+            sp.add_argument("--tool-use-id", required=True)
+            sp.add_argument("--output", required=True,
+                            help="destination file; an existing one is never "
+                                 "overwritten")
+        sp.set_defaults(func=_cmd_transcript, transcript_cmd=name)
 
     return parser
 

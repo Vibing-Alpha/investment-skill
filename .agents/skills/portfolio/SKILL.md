@@ -463,6 +463,7 @@ from scripts.monitor import load_vendor_aliases
 print(json.dumps(load_vendor_aliases(pathlib.Path('portfolio-state.yaml'))))
 ") || { echo "FATAL: symbol_aliases in portfolio-state.yaml is malformed — fix it before fetching prices" >&2; exit 1; }
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -m scripts.macro \
   --tickers {ALL_TICKERS_SPACE_SEPARATED} \
   --vendor-aliases "$VENDOR_ALIASES" \
@@ -634,6 +635,7 @@ something not yet held.
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 mkdir -p "reports/portfolio/$ETDAY"
 VENDOR_ALIASES=$("$PYBIN" -c "
 import json, pathlib
@@ -686,6 +688,7 @@ undetected; the validation-time hash only covers validate→log).
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -c "
 import hashlib, json, pathlib
 import yaml
@@ -705,6 +708,8 @@ for t in tickers:
             pass
 out = pathlib.Path('reports/portfolio/$ETDAY')
 out.mkdir(parents=True, exist_ok=True)
+
+
 # Atomic write (round-34): a torn/truncated seal is treated by the log
 # writer as malformed → hard REFUSE, so never leave a partial file behind.
 import os
@@ -817,6 +822,8 @@ Assemble the full context and reason through the decision framework:
 
 Produce per-ticker decisions with specific order recommendations.
 
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
+
 ## Step 5.5: Write the ETF decision seal
 
 After the decision is authored, before any order is validated. This is a
@@ -832,6 +839,7 @@ logging is caught rather than silently logged against.
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -m scripts.etf.seal write \
   --manifest "reports/portfolio/$ETDAY/.etf_manifest.json" \
   --output "reports/portfolio/$ETDAY/.etf_decision_ctx.json" \
@@ -857,6 +865,7 @@ paths.
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 ORDERS_PATH="reports/portfolio/$ETDAY/.proposed_orders.json"
 # Same-day-rerun safety: clear the prior order set FIRST. If parsing the
 # heredoc fails below, the validate block must fail loudly on a MISSING
@@ -894,6 +903,7 @@ silence it. The fixed paths are reconstructable per-call, exactly like
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 # Clear any stale artifact FIRST. Step 8 deliberately KEEPS this file on a
 # refusal, and `scripts.validate` exits 1 WITHOUT writing when its inputs are
@@ -1103,6 +1113,7 @@ output is preserved for the re-run, and NO decision log exists yet:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 # Round-20 F4: the exit code MUST be checked — a cmd_write refusal
 # (blob shape violation, missing rationale/principle) writes NO
 # decisions.json, and the unconditional rm below would then delete the

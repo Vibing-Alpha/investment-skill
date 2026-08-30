@@ -78,7 +78,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 ## Preflight: Money-path config
@@ -229,11 +229,14 @@ them rather than duplicating here.
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+
+
 # ET session date — matches the convention used by the rest of the delta
 # layer (scripts/delta/calendar.session_et). Using `date +%Y%m%d` (local
 # system time) would misplace after-hours runs into the next UTC day and
 # silently break day-over-day diffs.
 DATE=$("$PYBIN" -c 'from scripts.delta.calendar import session_et; print(session_et().strftime("%Y%m%d"))')
+[ -n "$DATE" ] || { echo "FATAL: could not resolve DATE — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 SCOPE_TAG="<snake_case_summary_of_scope_and_window>"
 mkdir -p "reports/screen/$DATE"
 "$PYBIN" -m scripts.screen --scope ... --window ... [...] \
@@ -264,6 +267,8 @@ surface signal, not just dump rows. In priority order:
 
 If `attention` is empty and there's no prior run to diff against, it's
 a cold-start run — just present the table + observations normally.
+
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ## Edge cases
 

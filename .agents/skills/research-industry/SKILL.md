@@ -154,6 +154,7 @@ NORM=$("$PYBIN" -m scripts.industry.normalize_slug --industry "$RAW_INDUSTRY") |
 SLUG=$(echo "$NORM" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['slug'])")
 
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
 
@@ -199,6 +200,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
 
@@ -234,6 +236,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 ETF_JSON=$("$PYBIN" -m scripts.industry.sector_etf_map --slug "$SLUG")
 ETF=$(echo "$ETF_JSON" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['etf'])")
 
@@ -246,6 +249,8 @@ block — the mapping is a cheap deterministic local lookup) is non-empty when
 the ETF is a thematic proxy (e.g. SOXX for MLCC). It is passed to the agent
 via `.tier_context.json` so the regime_rationale can acknowledge it.
 
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
+
 ### Step 3: Tier-specific work
 
 **If `no_op`**: copy prior JSON, regenerate `summary.md` only (with delta note).
@@ -255,8 +260,11 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
+
+
 # Closing round-13 F2: fresh-destination guard (probe-4B family) — the
 # resolver excludes today, so a sequential same-day rerun after a
 # morning full/partial would resolve YESTERDAY as prior and this cp
@@ -318,6 +326,8 @@ fi
 
 **If `full`**: dispatch the full 4-phase research agent.
 
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
+
 #### Agent dispatch (full + partial)
 
 Assemble the agent's inputs at `$REPORT_DIR/.tier_context.json`. Everything
@@ -329,6 +339,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
 ETF_JSON=$("$PYBIN" -m scripts.industry.sector_etf_map --slug "$SLUG")
@@ -409,6 +420,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
 if [ "$TIER" != "no_op" ]; then
   "$PYBIN" -c "
@@ -502,6 +514,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 [ -s "$REPORT_DIR/summary.md" ] \
   || { echo "FATAL: summary subagent produced no summary.md — re-dispatch" >&2; exit 1; }
 ```
@@ -516,6 +529,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "industry/$SLUG" --skill research-industry)
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
@@ -583,7 +597,7 @@ RI_DELTA_SECTION_EOF
 
 "$PYBIN" -m scripts.delta.append_changelog \
     --ticker "industry/$SLUG" \
-    --prior "$PRIOR_DIR/summary.changelog.md" \
+    ${PRIOR_DIR:+--prior "$PRIOR_DIR/summary.changelog.md"} \
     --current "$REPORT_DIR/summary.changelog.md" \
     --delta-section "$DELTA_FILE" \
     || { echo "FATAL: append_changelog failed — summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }

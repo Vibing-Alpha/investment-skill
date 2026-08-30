@@ -152,6 +152,7 @@ Read the printed JSON:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
 REPORT_DIR="$PWD/reports/<TICKER>/$RUN_DATE"
 mkdir -p "$REPORT_DIR/data"
 "$PYBIN" -m scripts.macro --tickers "<TICKER>" --output "$REPORT_DIR/data/etf_market_snapshot.json"
@@ -160,6 +161,8 @@ printf 'REPORT_DIR=%s\n' "$REPORT_DIR"
 
 **CAPTURE the printed `REPORT_DIR`** and substitute it into every later block.
 Shell variables do not survive across blocks.
+
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ## Step 3 — Profile and eligibility
 
@@ -255,6 +258,8 @@ removed: an unbindable claim is the finding.
 ```bash
 [ -s "<captured-REPORT_DIR>/etf_thesis.json" ] || { echo "FATAL: no artifact written" >&2; exit 1; }
 ```
+
+If any block in this step exits non-zero, **STOP** and surface the error.
 
 ## Step 5.5 — Record the run
 

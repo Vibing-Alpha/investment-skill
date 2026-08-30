@@ -169,6 +169,7 @@ echo "$TICKER" | grep -Eq '^[A-Z][A-Z0-9.-]{0,9}$' \
   || { echo "FATAL: invalid ticker format: '$TICKER' (expected [A-Z][A-Z0-9.-]{0,9})" >&2; exit 1; }
 
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 # find-latest-prior excludes today's ET dir by default (safe-by-construction
 # guard against same-day self-comparison). No extra flags needed.
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
@@ -198,11 +199,14 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 01_price_data,02_financial_data,03_company_news,04_insider_data,06_analyst_estimates,07_earnings,09_macro_rates \
   --news-limit 10 \
   --tier-decided probe
 ```
+
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ### Step 2: Classifier + tier decision
 
@@ -219,6 +223,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -c "
 import json, pathlib
 pathlib.Path('$REPORT_DIR/.run_state.json').write_text(
@@ -234,8 +239,8 @@ own block — this shell inherits nothing from the last one:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
-REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
-  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.classifier_output.json" || exit 1
 ```
 
@@ -262,6 +267,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 TIER=$("$PYBIN" -m scripts.delta.probe decide-bq-tier \
@@ -298,6 +304,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 "$PYBIN" -c "
@@ -324,6 +331,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 
@@ -372,6 +380,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 
 # clear_stale FIRST, then copy: the `rm -f … || true` at the end of the
 # previous run is best-effort, so on a delete-restricted mount a leftover
@@ -418,6 +427,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 # full tier: also clear fundamental.json (Agent A regenerates it).
 # partial tier: clear forward/industry only.
 # TIER is READ FROM DISK, never substituted: `[ "<TIER>" != "full" ]` is TRUE
@@ -506,6 +516,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
@@ -532,8 +543,8 @@ light-mode input) points at the PRIOR run's dir, never at these files:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
-REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
-  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -m scripts.clear_stale "$REPORT_DIR/synthesis.json" "$REPORT_DIR/summary.md" || exit 1
 ```
 
@@ -567,6 +578,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 [ -s "$REPORT_DIR/summary.md" ] \
   || { echo "FATAL: synthesis produced no summary.md — re-dispatch synthesis agent" >&2; exit 1; }
 [ -s "$REPORT_DIR/synthesis.json" ] \
@@ -592,6 +604,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 "$PYBIN" -c "
 import json, pathlib, sys
 sys.stdout.reconfigure(encoding='utf-8')
@@ -625,6 +638,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
 
 # 1) Rewrite 00_validation.tier_decided to terminal tier
@@ -743,6 +757,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
@@ -803,6 +818,7 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
 PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
@@ -814,7 +830,7 @@ cat >> "$DELTA_FILE" <<'DELTA_SECTION_EOF'
 DELTA_SECTION_EOF
 
 "$PYBIN" -m scripts.delta.append_changelog \
-  --prior "$PRIOR_DIR/summary.changelog.md" \
+  ${PRIOR_DIR:+--prior "$PRIOR_DIR/summary.changelog.md"} \
   --current "$REPORT_DIR/summary.changelog.md" \
   --ticker "$TICKER" \
   --delta-section "$DELTA_FILE" \
@@ -842,6 +858,9 @@ cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+[ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
+
+
 # Existence-guard the gate (mirrors investment-thesis): a missing summary.md
 # would make the inline interpreter call fail, leave WORDS empty, and turn the
 # numeric test into a bash "integer expression expected" error. summary.md is
@@ -858,6 +877,8 @@ fi
 ```
 
 Do NOT abort — the word budget is a soft-fail per spec.
+
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ### Step 8: Report to user
 

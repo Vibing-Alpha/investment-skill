@@ -161,6 +161,7 @@ do not carry `$VM`/`$OUT` across blocks).
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
 REPORT_DIR="reports/portfolio/$(echo "$RUN_DATE" | tr -d '-')"
 mkdir -p "$REPORT_DIR"
 printf 'VM=%s/portfolio_view_model.json\nOUT=%s/portfolio_dashboard.html\n' "$PWD/$REPORT_DIR" "$PWD/$REPORT_DIR"

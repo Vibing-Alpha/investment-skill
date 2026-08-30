@@ -102,6 +102,7 @@ re-deriving returns the same dir all day).
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
 REPORT_DIR="reports/monitor/$(echo "$RUN_DATE" | tr -d '-')"
 printf 'RUN_DATE=%s\nREPORT_DIR=%s\n' "$RUN_DATE" "$REPORT_DIR"
 ```
@@ -109,12 +110,15 @@ printf 'RUN_DATE=%s\nREPORT_DIR=%s\n' "$RUN_DATE" "$REPORT_DIR"
 Note the printed `REPORT_DIR` (relative to the repo root) — you will substitute the
 absolute form `<captured-abs-ROOT>/<REPORT_DIR>` into the subagent dispatch in Step 2.
 
+If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
+
 ## Step 1: Probe (deterministic facts)
 
 ```bash
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
 REPORT_DIR="reports/monitor/$(echo "$RUN_DATE" | tr -d '-')"
 # Identity prepass first: the probe needs to know which tickers are funds.
 # `--etf-identity` is REQUIRED — without it every ticker would read as
