@@ -71,7 +71,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.18.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe):** same-day monitor runs
@@ -113,6 +113,52 @@ absolute form `<captured-abs-ROOT>/<REPORT_DIR>` into the subagent dispatch in S
 If any block in this step exits non-zero, **STOP** and surface the error. A failed path resolution in particular must not be worked around: the paths below would be built from an empty variable, and a run written outside its dated directory is one the delta layer can never find again.
 
 ## Step 1: Probe (deterministic facts)
+
+**First, archive any earlier run of the same ET day.** Every artifact below is
+written to a directory named for the calendar day, so a second run overwrites
+the first in place — and the SKILL says sequential reruns are fine. The morning
+run then no longer exists anywhere, which is exactly what a later run needs to
+answer "what changed since this morning" (feedback 2026-08-29 monitor ③). This
+COPIES, never moves: the rerun's own new/seen baseline is today's existing
+`action_plan.json`, read under its canonical name.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
+[ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE" >&2; exit 1; }
+REPORT_DIR="reports/monitor/$(echo "$RUN_DATE" | tr -d '-')"
+mkdir -p "$REPORT_DIR"
+"$PYBIN" -c '
+import datetime, pathlib, shutil, sys
+d = pathlib.Path(sys.argv[1])
+names = ("monitor_probe.json", "action_plan.json", "digest.md")
+live = [d / n for n in names if (d / n).is_file() and (d / n).stat().st_size > 0]
+# Each file stamped from its OWN mtime, and with the full UTC DATE. One
+# shared stamp taken from the earliest mtime mis-labels any run that
+# straddles UTC midnight - routine here, the evening runs are ET 22:0x -
+# and mis-groups a leftover from an earlier run as part of this one. A
+# date-less name also let two artifacts a day apart collide, and the
+# collision guard below then skipped the NEWER file, which this run goes
+# on to overwrite. A zero-byte file is skipped: clear_stale EMPTIES rather
+# than deletes on a delete-restricted mount, and archiving one would
+# manufacture a run that produced nothing.
+for p in live:
+    stamp = datetime.datetime.fromtimestamp(
+        p.stat().st_mtime, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dst = p.with_name(p.stem + "." + stamp + p.suffix)
+    if dst.exists():
+        continue          # same file, same mtime - already archived
+    shutil.copy2(p, dst)
+    print("archived " + p.name + " -> " + dst.name)
+' "$REPORT_DIR" \
+  || { echo "FATAL: could not archive the earlier same-day run; a rerun would destroy it. Fix what the error names and re-run this block." >&2; exit 1; }
+```
+
+The archived copies are inert — nothing reads them; they exist so a later run,
+or you, can diff. `action_plan.raw.json` is deliberately not archived: it is
+the pre-validation draft of the plan that IS archived.
+
 
 ```bash
 cd "<captured-abs-ROOT>"
@@ -185,7 +231,9 @@ SUBSTITUTE the literal absolute paths — e.g.
 instruct it to WRITE `<captured-abs-ROOT>/reports/monitor/20260601/action_plan.raw.json`
 — never a literal `$REPORT_DIR/...` string or a bare relative `reports/...` path (the
 subagent's shell would resolve those against ITS ephemeral cwd). Writing `.json` is
-allowed for subagents (only the `.md`-write tool is blocked). The router reads ONLY the
+allowed for subagents (only the `.md`-write tool is blocked) — but on a BRIDGED host a
+permitted Write still lands in the subagent's own container, so name the bridged Bash tool
++ heredoc in the dispatch prompt too (`.claude/rules/skill-architecture.md` #8). The router reads ONLY the
 probe (no other files, no WebSearch). After dispatch, HARD existence gate — if it exits
 non-zero the router produced nothing: re-dispatch ONCE with the same inputs; if the gate
 fails a second time, surface the error and STOP:

@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.17.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.18.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -469,6 +469,56 @@ ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et
   --vendor-aliases "$VENDOR_ALIASES" \
   --output "reports/portfolio/$ETDAY/macro.json"
 ```
+
+Then run the anchor gate — the two hard STOPs below, applied
+deterministically instead of by hand. It reads the artifact you just wrote
+and `portfolio-state.yaml`, so it knows which tickers are HELD and applies
+the held / watchlist-only asymmetry the STOPs describe:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY" >&2; exit 1; }
+"$PYBIN" -c '
+import json, pathlib, sys
+from scripts.monitor import load_universe
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+tp = (doc.get("chart_statuses") or {}).get("ticker_prices") or {}
+uni, _cash = load_universe(pathlib.Path("portfolio-state.yaml"))
+held = {u["ticker"] for u in uni if u["source"] == "holding"}
+def bad(t):
+    return (tp.get(t) or {}).get("anchor_session_covered") is not True
+def bar(t):
+    return (tp.get(t) or {}).get("last_bar_session")
+stop_t = sorted(t for t in held if bad(t))
+warn_t = sorted(t for t in tp if t not in held and bad(t))
+# The three legs the regime classifier reads, REQUIRED by name. Scanning
+# only the entries that happen to be present is a fail-open: an absent
+# `regime_inputs`, or one index simply missing, yielded an empty list and
+# exit 0 with every regime fact unavailable (producer-consumer.md #4 -
+# missing data is a failure, not zero). An unrelated extra index is not
+# not checked here.
+idx = ((doc.get("regime_inputs") or {}).get("indices")) or {}
+legs = [i for i in ("SPY", "QQQ", "^DJI")
+        if (idx.get(i) or {}).get("close") is None]
+for t in warn_t:
+    print("NOTE unanchored watchlist ticker " + t + " (last bar " + str(bar(t))
+          + ") - it cannot carry a buy/add this run")
+for t in stop_t:
+    print("STOP unanchored HOLDING " + t + " (last bar " + str(bar(t))
+          + ") - every closing-basis fact behind it is unknown", file=sys.stderr)
+for i in legs:
+    print("STOP regime index " + i + " has a null close", file=sys.stderr)
+sys.exit(1 if (stop_t or legs) else 0)
+' "reports/portfolio/$ETDAY/macro.json" \
+  || { echo "FATAL: Step 4 anchor gate refused - see the STOP lines above; do NOT proceed to Step 5" >&2; exit 1; }
+```
+
+A non-zero exit here is one of the two STOPs below, already located for you:
+relay which tickers / legs it named and STOP. A missing or unreadable
+`macro.json` also exits non-zero — the gate proves coverage, it never assumes
+it.
 
 Where `{ALL_TICKERS}` = all tickers from holdings + watchlist, substituted
 by you per block. The run-day directory is the **ET calendar day**, derived

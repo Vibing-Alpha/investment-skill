@@ -401,6 +401,13 @@ def select_cohort_event(series_by_ticker, *, market_sessions, anchor_session,
         "anchor_session": anchor_session,
         "universe_members": sorted(series_by_ticker),
         "excluded_members": [], "total_universe": n_uni,
+        # Diagnostic, not a gate. `excluded_members` says a member's window is
+        # incomplete; it never says WHICH session it lacks, so a whole-cohort
+        # anchor outage and a whole-cohort interior gap produced byte-identical
+        # blocks and `insufficient_eligible_members` read as "the pool is too
+        # small" (feedback 2026-08-29 portfolio-3 §2). Zero on the two early
+        # returns below, which name their own cause and never reach the window.
+        "unanchored_member_count": 0,
         "eligible_member_count": 0, "eligible_member_share_pct": None,
         "trough_session": None, "peak_session": None, "tied_sessions": [],
         "trough_date_counts": {}, "modal_count": 0, "share_of_universe_pct": None,
@@ -421,15 +428,18 @@ def select_cohort_event(series_by_ticker, *, market_sessions, anchor_session,
         return out
     out["oldest_session"] = window[0]
 
-    minima, excluded = {}, []
+    minima, excluded, unanchored = {}, [], 0
     for t, pairs in series_by_ticker.items():
         by_date = {d: c for d, c in _normalise(pairs) if d in window}
+        if anchor_session not in by_date:
+            unanchored += 1
         if len(by_date) != len(window):
             excluded.append(t)          # partial window: its observed minimum
             continue                    # is not its window minimum — no vote
         lowest = min(by_date.values())
         minima[t] = min(d for d, c in by_date.items() if c == lowest)
     out["excluded_members"] = sorted(excluded)
+    out["unanchored_member_count"] = unanchored
     out["eligible_member_count"] = len(minima)
     out["eligible_member_share_pct"] = round(len(minima) / n_uni * 100, 2)
 

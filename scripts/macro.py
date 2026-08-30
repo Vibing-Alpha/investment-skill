@@ -45,6 +45,8 @@ _NO_PRICE_PROVENANCE = {
     "price_as_of": None,
     "stale_meta_quote": False,
     "price_conflict_same_ts": False,
+    "close_backfilled_from_meta": False,
+    "close_backfill_session": None,
 }
 
 
@@ -507,6 +509,44 @@ def _fetch_chart_ohlcv(ticker, range_param="6mo", interval="1d"):
         status["price_as_of"] = price_as_of
         status["stale_meta_quote"] = stale_meta
         status["price_conflict_same_ts"] = conflict_same_ts
+
+        # Yahoo can serve a session's bar with every field intact EXCEPT
+        # `close` — open/high/low/volume all present, close null (feedback
+        # 2026-08-29/30; reproduced on 21/21 live symbols across three days,
+        # `^DJI` and `^VIX` included). That one null sinks `_fin_pos_close`,
+        # so `anchor_session_covered` goes false and the entire structure /
+        # regime / volume layer goes with it — while the SAME response's meta
+        # block carries that session's official close.
+        #
+        # Repaired from meta, not from a second vendor: `regularMarketVolume`
+        # equals the bar's own `volume` byte-for-byte on 21/21, so meta and
+        # the bar are ONE tape. A second vendor's bar would put a different
+        # tape's volume in the numerator of `volume_ratio_vs_ma20` against a
+        # Yahoo denominator — a silently mixed ratio, which is worse than the
+        # null it replaces because null fails closed.
+        #
+        # Guarded to the bar whose ET session EQUALS the meta quote's: during
+        # market hours that quote is the live running price, and writing it
+        # into any other session's bar would fabricate a close. (The live
+        # session's own bar is still dropped downstream by `_anchored_ohlcv`,
+        # which keeps only bars dated <= the anchor.)
+        #
+        # Not applied to a quote `stale_meta` has already condemned: there the
+        # series carries a usable close LATER than the quote, so the null sits
+        # on an INTERIOR bar — anchored consumers keep it, and a distribution
+        # after it would leave a raw-basis close inside the adjusted series.
+        # The scalar path refuses that quote; the array must refuse it too.
+        backfill_session = None
+        meta_session = _et_date_iso(rmt) if rmt is not None else None
+        if rmp is not None and meta_session is not None and not stale_meta:
+            closes_arr = ohlcv["close"]
+            for i, ts_i in enumerate(timestamps):
+                if (i < len(closes_arr) and closes_arr[i] is None
+                        and _et_date_iso(ts_i) == meta_session):
+                    closes_arr[i] = rmp
+                    backfill_session = meta_session
+        status["close_backfilled_from_meta"] = backfill_session is not None
+        status["close_backfill_session"] = backfill_session
 
         # ISS-220 4.18 (Loop34 cycle 1): downgrade status when price
         # is None despite envelope PASSED. Pre-fix Yahoo could return

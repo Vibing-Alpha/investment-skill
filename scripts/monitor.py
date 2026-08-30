@@ -221,6 +221,17 @@ def ticker_market_facts(ticker, snapshot, shares=None):
         "indicators_available": indicators_available,
         "indicator_unavailable_reason": reason,
         "market_value": market_value,
+        # The price layer and the STRUCTURE layer fail independently: a healthy
+        # meta quote with no daily bar on the anchor session reads PASSED here
+        # while every closing-basis fact behind it is `unknown` (observed
+        # 2026-08-29, all 21 symbols for three days). The router reads ONLY the
+        # probe, so a field absent from this dict is a fact it cannot have.
+        # Default False, never None: "we could not prove coverage" and "not
+        # covered" have the same consequence, and `.get()` ambiguity is what
+        # `chart_statuses` already refuses.
+        "anchor_session_covered":
+            status_entry.get("anchor_session_covered") is True,
+        "last_bar_session": status_entry.get("last_bar_session"),
     }
 
 
@@ -649,6 +660,17 @@ def render_digest(plan: dict, probe: dict) -> str:
                 # deliverable. An unrendered kind must be visible as a defect.
                 lines.append(f"- {e['kind']}: «{e['text']}»")
         lines.append("")
+    # The probe's own data-layer faults. Rendered because the digest is the
+    # WHOLE user-facing deliverable: pre-fix these lived only in
+    # `monitor_probe.json` and on stderr, so a three-day anchor outage produced
+    # a digest that read entirely healthy (feedback 2026-08-29 monitor-b ①).
+    # Producer-written strings, but `_oneline` anyway — a warning must not be
+    # able to form a heading either.
+    warns = [w for w in (probe.get("warnings") or []) if str(w).strip()]
+    if warns:
+        lines.append("## Data warnings")
+        lines.extend(f"- {_oneline(w)}" for w in warns)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -720,12 +742,19 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
     tickers = [u["ticker"] for u in universe]
     snap = _macro_snapshot(tickers, vendor_aliases=vendor_aliases) if tickers else {"ticker_prices": {}, "ticker_indicators": {}, "chart_statuses": {"ticker_prices": {}}}
     today = datetime.datetime.strptime(run_date, "%Y-%m-%d").date()
-    per_ticker, warnings = [], []
+    per_ticker, warnings, unanchored = [], [], []
     for u in universe:
         t = u["ticker"]
         facts = ticker_market_facts(t, snap, shares=u.get("shares"))
         if facts["price_status"] != "PASSED":
             warnings.append(f"{t}: price status {facts['price_status']}")
+        if facts["price_status"] == "PASSED" and not facts["anchor_session_covered"]:
+            # PASSED only: a failed fetch already warns above, and repeating it
+            # here would assert a bar-series gap where nothing was fetched at
+            # all. Collected, not emitted per ticker — a whole-universe outage
+            # is 21 near-identical lines and the digest renders these, so the
+            # one DISTINCT fault in the list would be buried.
+            unanchored.append((t, facts["last_bar_session"]))
         stale = ticker_staleness(t, reports_root=reports_root)
         identity_row = (identity_map or {}).get(t) or {}
         instrument_type = identity_row.get("instrument_type")
@@ -768,6 +797,8 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
             "indicators": facts["indicators"], "price_status": facts["price_status"],
             "indicators_available": facts["indicators_available"],
             "indicator_unavailable_reason": facts["indicator_unavailable_reason"],
+            "anchor_session_covered": facts["anchor_session_covered"],
+            "last_bar_session": facts["last_bar_session"],
             # news_status is an explicit per-ticker FACT (not just a line in warnings[]) so the
             # router can treat a failed feed as "news UNKNOWN" rather than "no material news"
             # (producer-consumer.md §4: absent != neutral). Common for foreign ADRs FDS 404s.
@@ -776,6 +807,16 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
             "evidence": evidence,
             "thesis_conditions": {"invalid_if": inv, "entry_attractive_if": ent},
         })
+    if unanchored:
+        # "NOT PROVEN", not "does not cover": a status entry that carries no
+        # coverage key reads false here too, and the two are not the same
+        # observation. Overstating it teaches the reader to skip the line.
+        warnings.insert(0,
+            "anchor-session coverage NOT PROVEN for "
+            f"{len(unanchored)} ticker(s) — their structure / volume facts are "
+            "UNANCHORED even where the price reads PASSED: "
+            + ", ".join(f"{t} (last bar {lb or 'unknown'})"
+                        for t, lb in unanchored))
     return {
         "run_date": run_date,
         "output_language": output_language,                  # spec §8; default zh-CN (MVP)

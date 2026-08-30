@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from scripts.clear_stale import clear_stale
 from scripts.cli_utils import normalize_ticker, write_output, write_text_atomic
 from scripts.etf.readiness import analysis_readiness
 from scripts.schemas.etf_thesis import (
@@ -267,6 +268,32 @@ def _read_bytes(path: str, label: str) -> bytes:
         raise SystemExit(1)
 
 
+def _clear_staging(*paths) -> None:
+    """Drop the staging pair — via `clear_stale`, not a bare `unlink`.
+
+    The Cowork virtiofs/FUSE mount answers EPERM to `unlink()` on an EXISTING
+    file while still allowing writes, so the old `except OSError: pass` left
+    the pair on disk for good (observed: SOXQ 20260828 kept a 9395 B
+    `etf_thesis.staging.json` beside its promoted thesis). `clear_stale`
+    falls back to emptying the file and verifies the size by read-back — the
+    same guard the other 19 sites got in v1.16.0.
+
+    Never raises: this runs AFTER a successful promotion, and a run that
+    produced both artifacts must not be reported as failed because its
+    scratch files could not be tidied. An unclearable path is announced
+    instead, because a residue nobody is told about is what produced this
+    feedback item.
+    """
+    for path in paths:
+        try:
+            clear_stale(path)
+        except OSError as exc:
+            print(f"{_PREFIX}: could not clear the staging file "
+                  f"{path.as_posix()} ({exc}) — it is left on disk; no "
+                  f"consumer reads it, but it is not this run's output.",
+                  file=sys.stderr)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="scripts.etf.stamp")
     ap.add_argument("--ticker", required=True)
@@ -348,11 +375,7 @@ def main(argv=None) -> int:
     except (OSError, ValueError) as exc:
         print(f"{_PREFIX}: staged artifact failed validation, nothing "
               f"promoted: {exc}", file=sys.stderr)
-        for stale in (staged_json, staged_md):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        _clear_staging(staged_json, staged_md)
         return 1
 
     # Per-file atomic replacement. NOT pair-atomic: a kill between the two
@@ -365,11 +388,7 @@ def main(argv=None) -> int:
         print(f"{_PREFIX}: promotion failed: {exc}", file=sys.stderr)
         return 1
     finally:
-        for stale in (staged_json, staged_md):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        _clear_staging(staged_json, staged_md)
 
     print(Path(args.output_json).as_posix())
     return 0

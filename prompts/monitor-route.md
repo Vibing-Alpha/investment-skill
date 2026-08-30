@@ -11,7 +11,8 @@ This is your SOLE input (no other files, no WebSearch). It contains, per the
 `/monitor` deterministic probe:
 - `run_date`, `output_language`, `universe` (held + watchlist tickers), `cash` (raw fact).
 - `per_ticker[]`: `price`, `indicators` (may be null), `price_status`, `indicators_available`
-  (+ `indicator_unavailable_reason`), `news_status (ok|failed)`, `holding {shares,cost_basis}` /
+  (+ `indicator_unavailable_reason`), `anchor_session_covered` (+ `last_bar_session`),
+  `news_status (ok|failed)`, `holding {shares,cost_basis}` /
   `market_value` (held only), `staleness {state, days_since_full_bq, days_since_thesis}`,
   `thesis_conditions {invalid_if[], entry_attractive_if[]}` (prose), and `evidence[]` — objects
   `{evidence_id, kind(condition|news|catalyst|staleness), text, meta}`. The `evidence_id`s
@@ -51,6 +52,13 @@ due catalysts. Cite the matched fact in your reason.
   it as "not fired" — emit a `watch` item routed to `/investment-thesis`, reason noting
   "indicators unavailable (<74 bars), deferred", referencing the affected condition's evidence_id.
 - Price-only conditions remain evaluable from `price` even when indicators are unavailable.
+- If a condition is **structure- or volume-dependent but `anchor_session_covered` is false**,
+  treat it the same way — deferred, not "not fired". The price layer and the structure layer
+  fail INDEPENDENTLY: `price_status` can read `PASSED` on a healthy quote while that ticker's
+  daily series has no bar on the last completed session, so every closing-basis fact behind it
+  (prior high, moving-average and breakout holds, drawdown, the volume ratio) is `unknown`.
+  Say which session the series actually reaches (`last_bar_session`) in `reason` — the remedy
+  differs by whether it is this ticker's own series or the whole run that lagged.
 
 ## Step 3 — Group into items + route
 

@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.18.0 — 2026-08-30
+
+- Repair a null anchor close from the same Yahoo response; make an unanchored session visible where it is acted on
+
 ## v1.17.0 — 2026-08-30
 
 - New: on a host that inlines small tool results, `/track-record` can now archive them. `python3 -m scripts.track_record transcript list|extract` moves a recorded result out of the session log BY PROGRAM (never by retyping it), so orders/positions/balances/performance pulls no longer go unarchived. A result too large to inline is detected and refused with the path of the file the host actually wrote, so you archive that instead of a 1.5KB placeholder.

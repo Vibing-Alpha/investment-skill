@@ -34,7 +34,17 @@ When creating or modifying skills:
      `cat > "$REPORT_DIR/…"` in the dispatch prompt would write to `/summary.md`.
      Substitute the real path when composing the dispatch prompt.
    Do NOT rely on the Write tool for subagent `.md` output (it fails, wastes a
-   turn, forces the workaround). The skill MUST ALSO keep a **hard post-dispatch
+   turn, forces the workaround). **And where the host reaches the repo through
+   a BRIDGE** — the repo is a mounted / remote-device path rather than the
+   agent's own filesystem — a *permitted* Write (`.json`, `.html`) is no safer:
+   it writes to the subagent's own container, so the file never appears in the
+   repo and the gate below fires on an artifact that was written successfully
+   somewhere else. So the dispatch prompt must name the WRITE TOOL as well as
+   the path — the same bridged Bash tool the orchestrator itself runs in, via
+   the heredoc above — for EVERY extension, never leaving the tool to the
+   subagent's default (feedback 2026-08-29 monitor ④: the router's
+   `action_plan.raw.json` vanished this way, and only a hand-added line in the
+   dispatch prompt saved the run). The skill MUST ALSO keep a **hard post-dispatch
    existence gate** (`[ -s "<path>/file.md" ] || { echo "FATAL…" >&2; exit 1; }`)
    — it catches a MISSING / EMPTY deliverable (the common silent-failure mode),
    though not a mid-file delimiter collision (handle that via the unique sentinel).
