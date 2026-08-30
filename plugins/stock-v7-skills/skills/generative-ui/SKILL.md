@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.15.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 ## Step 0: Is this a fund?
@@ -195,8 +195,9 @@ report dir is reused across runs):
 
 ```bash
 cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 OUT="<captured-OUT-path>"   # agent-substituted absolute literal from Step 1
-rm -f "$OUT"
+"$PYBIN" -m scripts.clear_stale "$OUT" || exit 1
 ```
 
 Dispatch a subagent with `<captured-abs-ROOT>/prompts/generative-ui.md` as its instructions and

@@ -47,8 +47,10 @@ from pathlib import Path
 from scripts.track_record.archive import (
     Envelope, write_envelope, read_envelopes, KNOWN_TOOLS, _TRADES_TOOL,
     _no_duplicate_keys,          # one implementation, per producer-consumer rule 3
+    _covered_range,              # ditto: the range resolver coverage_gap uses
 )
-from scripts.track_record.completeness import effective
+from scripts.track_record.completeness import (
+    effective, effective_verdict, ReductionCache)
 from scripts.track_record.journal import JournalError, append_event, open_theses
 from scripts.track_record.summary import (
     assemble, current_order_id, fills_from, fold_or_reason, is_one_order,
@@ -349,6 +351,28 @@ def _summable(value) -> bool:
 
 
 def _cmd_unlinked(args: argparse.Namespace) -> int:
+    # Validated BEFORE the archive is read: a malformed cutoff would
+    # otherwise compare as a plain string against `trade_time[:10]` and
+    # silently keep or drop the wrong half of the backlog. Refuse, never
+    # interpret — this command's whole contract is that its list can be
+    # trusted to be the backlog.
+    since = getattr(args, "since", None)
+    since_date = None
+    if since is not None:
+        try:
+            # `date.fromisoformat`, NOT `strptime("%Y-%m-%d")`: strptime accepts
+            # a non-zero-padded `2026-8-2`, which then LOSES the lexical
+            # comparison against a canonical `2026-08-29` — so the cutoff would
+            # hide the entire backlog INCLUDING today's fills while printing a
+            # NOTE that says it hid only the older ones. That is the exact
+            # failure this validator exists to prevent (codex review 2026-08-29).
+            since_date = datetime.strptime(since, "%Y-%m-%d").date()
+            if since_date.isoformat() != since:
+                raise ValueError("not canonical YYYY-MM-DD")
+        except (TypeError, ValueError):
+            print(f"REFUSED: --since must be a zero-padded ISO date "
+                  f"(YYYY-MM-DD), got {since!r}", file=sys.stderr)
+            return 1
     try:
         trades_envelopes = read_envelopes(Path(args.root), _TRADES_TOOL)
     except OSError as exc:
@@ -679,6 +703,36 @@ def _cmd_unlinked(args: argparse.Namespace) -> int:
     entries = [(key, agg) for key, agg in by_key.items() if key not in linked]
     entries.sort(key=lambda item: item[1]["latest"]["trade_time"], reverse=True)
 
+    # `--since` (feedback 2026-08-29 track-record B). The backlog is
+    # cumulative and only shrinks by tagging, so an operator adopting the
+    # tool with an archive going back a year meets it as 555 rows at once —
+    # and D6 asks a prediction per tag group, which is not executable at
+    # that size. There is deliberately NO `--limit`: a truncated list is
+    # indistinguishable from a short one, whereas a DATE the operator chose
+    # is a fact they can restate. And the filter always discloses what it
+    # hid, for the reason every NOTE in this command exists: a shortened
+    # backlog that does not say it was shortened reads as a cleared one.
+    # It filters the PRINTED rows only — the diagnostic NOTEs above still
+    # describe the whole archive, because a conflict or a split does not
+    # stop being true because it is old.
+    hidden = 0
+    if since_date is not None:
+        cutoff = since_date.isoformat()
+        # Both sides are now canonical `YYYY-MM-DD` — `trade_time` is
+        # normalised to canonical UTC by `fills_from`, and the cutoff was
+        # round-tripped through `date` above — so the lexical compare is the
+        # date compare.
+        kept = [(k, a) for k, a in entries
+                if a["latest"]["trade_time"][:10] >= cutoff]
+        hidden = len(entries) - len(kept)
+        entries = kept
+        if hidden:
+            print(f"NOTE: {hidden} untagged order(s) finished before "
+                  f"{cutoff} and are NOT listed below — `--since` hid them, "
+                  f"they are still untagged, and they will keep appearing "
+                  f"in an unfiltered run until they are linked or the "
+                  f"archive stops covering them.", file=sys.stderr)
+
     # csv.writer, not an f-string join: a field containing a comma (a symbol
     # like "ACME, INC", or a drifted non-scalar) used to split into an extra
     # column and shift every field after it — a row that still looks
@@ -1008,6 +1062,122 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_coverage(args: argparse.Namespace) -> int:
+    """List what the archive already holds, per tool: args, pull instant,
+    and the recorded completeness. Read-only, and it never runs `report`.
+
+    Why it exists (feedback 2026-08-29 track-record E). SKILL.md Step 2's
+    gap question is "read `reports/track-record/<QUARTER>/summary.md`; if it
+    is missing, pull" — but that file exists only once `report` has run, and
+    the same step forbids running `report` to answer the question. For an
+    operator who has never reached a quarter end the ASK therefore answers
+    "pull all four quarters" every time, which on a second run the same day
+    re-pulls windows that can only be duplicates and observe nothing. The
+    archive already knows; nothing exposed it, so the operator hand-rolled a
+    walk over `raw/*/*.json` printing exactly these three fields. That walk
+    is this command.
+
+    TWO completeness columns, and the difference is the whole point.
+    `completeness` is the pulling agent's own self-report at pull time
+    (SKILL.md — the CLI records what it is told and does not verify it).
+    `effective` is `completeness.effective_verdict` — the SAME function
+    `coverage_gap` gates on, which DEMOTES a stored-`complete` pull to
+    `truncated` when an overlapping pull holds an in-window execution it
+    lacks. Those two disagree in production; `archive.py` carries a
+    diagnostic string ("stored complete but effectively …") for exactly that
+    state. Deciding "already pulled" on the STORED field skips a quarter
+    that is really truncated, and once the broker's retention window closes
+    that data is gone — so `effective` is the column to read, and emitting
+    the canonical resolver's own answer beats restating its rules in prose
+    (producer-consumer §3). Whether a window is ADEQUATELY covered overall
+    still stays `report`'s question. A tool with nothing
+    archived is stated explicitly rather than omitted, for the same reason
+    `unlinked` refuses to let an empty list mean "nothing to do".
+
+    `covers_start` / `covers_end` come from `archive._covered_range` — the
+    SAME resolver `coverage_gap` uses, not a second spelling of it
+    (producer-consumer §3). They are the reason this command answers the
+    question at all: a RELATIVE period names a different quarter depending
+    on when it was pulled, so `LAST_QUARTER` pulled in 2026Q3 covers 2026Q2
+    while the same string pulled in 2027Q1 covers 2026Q4 — matching the
+    argument name alone mis-answers, and asking the reader to redo the
+    calendar arithmetic in prose invites them to get it wrong. Blank when
+    `_covered_range` does not recognise the args shape, which is its own
+    fail-closed contract: an unrecognised pull contributes no coverage
+    rather than a guessed window.
+    """
+    root = Path(args.root)
+    tools = ([args.tool] if getattr(args, "tool", None)
+             else sorted(KNOWN_TOOLS))
+    if getattr(args, "tool", None) and args.tool not in KNOWN_TOOLS:
+        print(f"REFUSED: unknown tool {args.tool!r}; known tools are "
+              f"{', '.join(sorted(KNOWN_TOOLS))}", file=sys.stderr)
+        return 1
+    unreadable: list[str] = []
+    # Proper CSV, and the `args` column is JSON — so it contains commas and
+    # quotes, and `cut -d,` splits it into extra fields. Read this with a CSV
+    # parser (`csv.reader`, `python3 -c`), never with `cut`.
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow(["tool", "args", "pulled_at", "completeness", "effective",
+                     "covers_start", "covers_end"])
+    for tool in tools:
+        try:
+            envs = read_envelopes(root, tool)
+        except OSError as exc:
+            print(f"REFUSED: cannot read the archive under "
+                  f"{root.as_posix()}: {exc}", file=sys.stderr)
+            return 1
+        rows = [e for e in envs if isinstance(e, Envelope)]
+        # `ParseFailure` always carries `path: Path` (archive.py), so no
+        # defensive getattr chain — a missing attribute would be corruption
+        # this command should not paper over.
+        unreadable += [e.path.as_posix() for e in envs
+                       if not isinstance(e, Envelope)]
+        if not rows:
+            # "no pull archived" and "no READABLE pull archived" are different
+            # answers to the question this command exists for: the first says
+            # go pull it, the second says a file is there and cannot be read.
+            reason = "no pull archived" if not envs else "no readable pull archived"
+            # A row, not prose, so one parser reads the whole output. NOTE the
+            # `args` column is JSON and contains commas — parse this as CSV
+            # (`csv.reader`, `python3 -c`), never `cut -d,`.
+            writer.writerow([tool, "", "", reason, "", "", ""])
+            continue
+        # ONE memo across every row of this tool, exactly as `coverage_gap`
+        # builds it — the reduction is quadratic without it. Bound to THIS
+        # envelope list and dies with this call, so it can never answer a
+        # later archive from a stale reduction.
+        cache = ReductionCache(envs)
+        for e in sorted(rows, key=lambda x: x.pulled_at):
+            try:
+                rng = _covered_range(e.tool, e.args, e.pulled_at)
+            except (ValueError, TypeError, OverflowError):
+                # Never let one odd row take the listing down: this command
+                # exists to be safe to run before deciding whether to pull.
+                rng = None
+            start, end = ((rng[0].isoformat(), rng[1].isoformat())
+                          if rng else ("", ""))
+            try:
+                eff = effective_verdict(e, envs, tool=tool, cache=cache)[0]
+            except Exception:  # noqa: BLE001 — same rule as `pull`'s
+                # A reduction that cannot be computed must not take the
+                # listing down, but it must never read as `complete`
+                # either: `unknown` is the conservative answer, and the
+                # SKILL treats anything but `complete` as "pull it".
+                eff = "unknown"
+            writer.writerow([e.tool, json.dumps(e.args, sort_keys=True,
+                                                separators=(",", ":")),
+                             e.pulled_at, e.completeness, eff, start, end])
+    if unreadable:
+        print(f"NOTE: {len(unreadable)} archive file(s) could not be read "
+              f"back as an envelope and are NOT reflected above — a window "
+              f"they cover may look unpulled here: "
+              f"{'; '.join(sorted(unreadable)[:10])}"
+              + (f" (+{len(unreadable) - 10} more)" if len(unreadable) > 10
+                 else ""), file=sys.stderr)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="track_record", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1033,6 +1203,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_unlinked.add_argument("--root", default=_DEFAULT_ROOT)
     p_unlinked.add_argument("--journal", default=_DEFAULT_JOURNAL)
     p_unlinked.set_defaults(func=_cmd_unlinked)
+
+    p_unlinked.add_argument("--since", default=None,
+                            help="zero-padded ISO date (YYYY-MM-DD); list "
+                                 "only orders whose last fill is on or after "
+                                 "it. When it hides any, the count is "
+                                 "reported — those orders stay untagged")
+
+    p_coverage = sub.add_parser(
+        "coverage",
+        help="List what the archive already holds per tool (args / pulled_at "
+             "/ completeness) — read-only, answers 'was this window already "
+             "pulled' without running report")
+    p_coverage.add_argument("--root", default=_DEFAULT_ROOT)
+    p_coverage.add_argument("--tool", default=None,
+                            help="narrow to one tool; default is all five")
+    p_coverage.set_defaults(func=_cmd_coverage)
 
     p_open = sub.add_parser("open", help="List thesis_ids not yet superseded or retired")
     p_open.add_argument("--journal", default=_DEFAULT_JOURNAL)

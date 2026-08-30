@@ -25,6 +25,7 @@ import errno
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -329,6 +330,7 @@ def write_bytes_new(path: Path, data: bytes) -> bool:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
                                     prefix=path.name + ".", suffix=".part")
     tmp = Path(tmp_name)
+    published = False
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -378,13 +380,50 @@ def write_bytes_new(path: Path, data: bytes) -> bool:
         # raises `FileExistsError` and `write_bytes_new` reports the name as
         # taken. The publish decision and the durability step are two
         # different questions; only the first belongs in that handler.
+        # SET BEFORE the durability step, not after: `os.link` / the
+        # claim-and-replace arm above have ALREADY published the name by this
+        # point, so a raising `_fsync_dir_chain` used to leave `published`
+        # False and suppress the leftover NOTE on a path where a `.part`
+        # really does survive. The flag answers "was the name published",
+        # which is a different question from "is this call about to return
+        # True" (pure-fresh probe, 2026-08-29).
+        published = True
         _fsync_dir_chain(path.parent)
         return True
     finally:
         try:
             tmp.unlink()
-        except OSError:
+        except FileNotFoundError:
+            # The no-hardlink arm publishes with `os.replace(tmp, path)`, which
+            # MOVES the stage file — so there is nothing left to unlink and
+            # nothing to report. This arm must be caught BEFORE the handler
+            # below: `FileNotFoundError` IS an `OSError`, so without it the
+            # NOTE fired on every successful publish on a hardlink-less mount,
+            # naming a file that does not exist and describing it as sharing an
+            # inode "on the hardlink path" — the arm that did not run.
             pass
+        except OSError as exc:
+            # The publish itself is unaffected — the leftover is a HARDLINK
+            # to (or, on the claim-and-replace arm, a sibling of) the file
+            # just published, and `read_envelopes` skips `.part` names — so
+            # this is never a refusal. But it was swallowed entirely, and on
+            # a delete-restricted mount (Cowork FUSE returns EPERM for an
+            # existing file) EVERY archive write leaves one: a weekly cron
+            # grew the archive to 13 `.json` beside 13 `.part` with nothing
+            # anywhere saying so (feedback 2026-08-29). Report it ONLY on
+            # the published path: on the name-taken / failed paths a NOTE
+            # would assert work the command did not do, which SKILL.md's
+            # three-channel contract says a `NOTE:` never means.
+            if published:
+                print(
+                    f"NOTE: the stage file {tmp.name} could not be removed "
+                    f"after publishing {path.name} ({exc.strerror or exc}). "
+                    f"It holds the same bytes as {path.name} (same inode on "
+                    f"the hardlink path), is ignored by every reader, and "
+                    f"deleting it loses nothing — this mount refuses "
+                    f"unlink, so it needs cleaning up outside this tool.",
+                    file=sys.stderr,
+                )
 
 
 def _compact_timestamp(pulled_at: str) -> str:

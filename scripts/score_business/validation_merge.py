@@ -164,6 +164,17 @@ def merge_validation(
     if not is_live_entry(p2_growth) and is_live_entry(p1_growth):
         merged["growth_stock_mode"] = p1_growth
 
+    # POSITIVE evidence that the two-phase merge ran (feedback 2026-08-29
+    # monitor ②b). score-business Step 4.5 used to prove it NEGATIVELY —
+    # "if `.validation_phase1.json` still exists, Step 3's merge did not
+    # run" — which reads a `rm -f` as if it always succeeds. On a Cowork
+    # FUSE mount `rm` returns EPERM for an existing file, so the temp file
+    # always survived and the assertion fired on every full/partial run
+    # while the merge had in fact succeeded. Set LAST and unconditionally,
+    # so an inherited value in either input cannot contradict what this
+    # call actually did.
+    merged["two_phase_merged"] = True
+
     return merged
 
 

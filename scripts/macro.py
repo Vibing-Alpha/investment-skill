@@ -293,6 +293,57 @@ def _anchored_series(ohlcv, anchor_iso):
     return close_at, closes_thru
 
 
+def _anchor_coverage(timestamps, closes, anchor_iso):
+    """``(covers_anchor, last_bar_session)`` over a ts-aligned close series.
+
+    `covers_anchor` is True only when a USABLE (finite-positive) close is
+    dated exactly on the anchor session; `last_bar_session` is the newest
+    session on-or-before the anchor that carries one (None if there is
+    none). Bars dated AFTER the anchor — the live partial bar — are ignored
+    on both counts, matching `_anchored_series` / `_anchored_ohlcv`.
+
+    This answers ONE question: does this symbol's own bar series reach the
+    anchor. For a TICKER that is only half of what makes its price-structure
+    block usable — `compute_ticker_price_structure` additionally requires the
+    anchor to sit in the PROVEN market calendar — so the ticker status takes
+    its `anchor_session_covered` from the structure block itself and uses
+    this function only for `last_bar_session`, the diagnostic that says WHICH
+    of the two layers broke. Indices and VIX have no structure block; for
+    them this IS the whole question, and it is exactly the condition that
+    makes `regime_inputs.indices[X].close` non-null.
+
+    Why the STATUS layer needs this (feedback 2026-08-29 portfolio-2 #1):
+    on 2026-08-29 Yahoo dropped the prior session's daily bar from every
+    chart series in the run. The meta quote was fine, so all 22 symbols
+    reported `{"status": "PASSED"}` and the process exited 0 — while
+    `regime_inputs.indices.*.close` went null, every
+    `ticker_price_structure[T]` went `anchor_session_covered: false`, and
+    the volume leg went `latest_session_bar_unusable`. A whole-structure
+    outage was invisible at every status exit; the caller had to open each
+    ticker's structure block by hand to see it.
+
+    The caller supplies the close series so this answers exactly the
+    question its consumer asks: indices/VIX pass RAW closes (what
+    `_anchored_series` builds `regime_inputs` from), tickers pass the
+    adjusted-merged series (what `compute_ticker_price_structure` sees).
+    Passing a different series would make `last_bar_session` describe a
+    series other than the one its block was built from.
+    """
+    covers = False
+    last_session = None
+    for ts_i, c in zip(timestamps or [], closes or []):
+        if not _fin_pos_close(c):
+            continue
+        d = _et_date_iso(ts_i)
+        if d is None or d > anchor_iso:
+            continue
+        if last_session is None or d > last_session:
+            last_session = d
+        if d == anchor_iso:
+            covers = True
+    return covers, last_session
+
+
 def _anchored_ohlcv(ohlcv, anchor_iso):
     """OHLCV dict filtered to bars dated <= anchor (drops the live partial bar).
 
@@ -801,6 +852,43 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     volatility_statuses = {VIX_TICKER: vix_status}
 
     # ------------------------------------------------------------------
+    # Anchor coverage in the STATUS layer (feedback 2026-08-29 portfolio-2 #1)
+    # ------------------------------------------------------------------
+    # Every status entry in the three sections that HAVE a bar-series
+    # consumer — market, volatility, ticker_prices — answers "is this symbol
+    # anchored", not just "is the meta quote healthy". Without it a run whose
+    # whole structure/regime layer had lost its anchor bar was byte-identical,
+    # at every status exit, to a healthy one.
+    #
+    # `treasury` is deliberately OUT of scope: its two entries describe point
+    # quotes that feed `rates.us_10y` / `us_5y`, and nothing anywhere builds
+    # an anchored series from them — a coverage key there would be a field
+    # with no consumer and no meaning (pinned by a test, so the omission is a
+    # decision rather than an oversight).
+    #
+    # Accumulated here and for the tickers below, then reported ONCE on
+    # stderr before returning — `scripts.macro` still exits 0 (the price
+    # layer is genuinely fine); the hard STOP belongs to the consuming skill,
+    # which reads these keys.
+    _uncovered = []
+    for _idx in MARKET_INDICES:
+        _tr = raw.get(("index", _idx))
+        _oh = _tr[1] if _tr and isinstance(_tr[1], dict) else {}
+        _cov, _last_bar = _anchor_coverage(_oh.get("timestamp"), _oh.get("close"), anchor)
+        market_statuses[_idx] = {**market_statuses[_idx],
+                                 "anchor_session_covered": _cov,
+                                 "last_bar_session": _last_bar}
+        if not _cov:
+            _uncovered.append(_idx)
+    _cov, _last_bar = _anchor_coverage(vix_ohlcv.get("timestamp"),
+                                       vix_ohlcv.get("close"), anchor)
+    volatility_statuses[VIX_TICKER] = {**vix_status,
+                                       "anchor_session_covered": _cov,
+                                       "last_bar_session": _last_bar}
+    if not _cov:
+        _uncovered.append(VIX_TICKER)
+
+    # ------------------------------------------------------------------
     # Clock-anchored regime inputs (feedback 2026-06-11 #2)
     # ------------------------------------------------------------------
     # All values anchored to the last COMPLETED ET session so the regime
@@ -1007,7 +1095,10 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         triple = raw.get(("ticker", t))
         if triple is None:
             ticker_prices[t] = None
-            ticker_price_statuses[t] = _missing_status
+            ticker_price_statuses[t] = {**_missing_status,
+                                        "anchor_session_covered": False,
+                                        "last_bar_session": None}
+            _uncovered.append(t)
             ticker_indicators[t] = None
             ticker_price_structure[t] = None
             ticker_indicator_statuses[t] = ticker_indicator_status(
@@ -1015,8 +1106,26 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             continue
         price, ohlcv, status = triple
         ticker_prices[t] = price
+        # `last_bar_session` on the ADJUSTED-merged series — the same closes
+        # `compute_ticker_price_structure` is fed below, so it describes the
+        # series that block was actually built from. `anchor_session_covered`
+        # is NOT computed here: it is copied from the structure block once
+        # that exists (see below), because the structure additionally
+        # requires the anchor to sit in the proven market calendar, and a
+        # second looser implementation of the same question read `true` while
+        # the structure read `false` (codex review 2026-08-29). Both keys are
+        # present on EVERY branch, failed fetch included, so a consumer never
+        # has to tell "no coverage" from "key absent" with .get().
+        _oh = ohlcv if isinstance(ohlcv, dict) else {}
+        _, _last_bar = _anchor_coverage(
+            _oh.get("timestamp"),
+            merge_adjusted_closes(_oh.get("close") or [], _oh.get("adjclose") or []),
+            anchor)
+        status = {**status,  # never mutate a possibly-shared status dict
+                  "anchor_session_covered": False,   # set from the structure below
+                  "last_bar_session": _last_bar}
         if t in vendor_aliases:
-            status = dict(status)  # don't mutate a possibly-shared dict
+            # safe to mutate: `status` is the fresh dict built just above
             status["vendor_symbol"] = vendor_aliases[t]
         ticker_price_statuses[t] = status
         if status.get("status") != "PASSED" or not isinstance(ohlcv, dict):
@@ -1024,6 +1133,7 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             ticker_price_structure[t] = None
             ticker_indicator_statuses[t] = ticker_indicator_status(
                 price_status=status, ohlcv=ohlcv, fetched=True)
+            _uncovered.append(t)   # no structure block -> nothing is anchored
             continue
 
         anchored = _anchored_ohlcv(ohlcv, anchor)
@@ -1052,6 +1162,16 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         ticker_price_structure[t] = compute_ticker_price_structure(
             pairs, anchor_session=anchor, market_sessions=_market_sessions,
             volumes=vols, first_trade_session=anchored.get("first_trade_session"))
+        # ONE fact, ONE name, ONE computation (producer-consumer §3/§4): the
+        # status layer MIRRORS the structure block's own verdict rather than
+        # re-deriving it. `last_bar_session` above stays series-local, so the
+        # pair still localises the cause — covered=false with
+        # last_bar_session == anchor_session means the market calendar is
+        # unproven, not that this ticker's bars lagged.
+        _cov = bool(ticker_price_structure[t]["anchor_session_covered"])
+        status["anchor_session_covered"] = _cov
+        if not _cov:
+            _uncovered.append(t)
 
         # null when there are too few bars; otherwise the raw block (its
         # legs carry their own null/insufficient_data sentinels). Series
@@ -1097,6 +1217,22 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
         max_staleness_sessions=MAX_EVENT_STALENESS_SESSIONS)
     _cohort = compute_cohort_recovery(_event, _series,
                                       market_sessions=_market_sessions)
+
+    # ONE stderr line for the whole run (feedback 2026-08-29 portfolio-2 #1).
+    # It names the anchor and the symbols so an operator reading only the
+    # command output sees the outage that the PASSED statuses hide.
+    if _uncovered:
+        # dict.fromkeys: a symbol can be fetched twice in one run (SPY is both
+        # a broad index and, for an index-holding portfolio, a ticker) and
+        # listing it twice reads like a bug in the message itself.
+        _u = list(dict.fromkeys(_uncovered))
+        print(
+            f"[WARN] fetch_macro_snapshot: bar series does not cover anchor "
+            f"session {anchor} for {len(_u)} symbol(s): {', '.join(_u)} — "
+            f"their structure / regime / volume facts are UNANCHORED even "
+            f"where the meta quote reads PASSED.",
+            file=sys.stderr,
+        )
 
     return {
         "market": market,

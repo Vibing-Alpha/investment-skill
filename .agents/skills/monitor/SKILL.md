@@ -71,7 +71,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe):** same-day monitor runs
@@ -169,7 +169,7 @@ output. Removing it first makes the gate prove THIS run produced a fresh plan:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")"
-rm -f "$REPORT_DIR/action_plan.raw.json"
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/action_plan.raw.json" || exit 1
 ```
 
 Dispatch a subagent with `<captured-abs-ROOT>/prompts/monitor-route.md` as its

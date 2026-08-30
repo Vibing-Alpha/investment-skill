@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -491,6 +491,61 @@ proceeding**:
   book. Downstream refusals exist but land at Step 8 — **after** the user may
   already have acted on Step 7's recommendations — and the validator's own
   missing-price gate only arms when a ratio constraint is set.
+- **Any HELD ticker whose `ticker_price_structure[T].anchor_session_covered`
+  is not `true` ⇒ STOP.** The price layer and the structure layer fail
+  INDEPENDENTLY: a healthy meta quote with no daily bar on the anchor
+  session (observed 2026-08-29, all 17 holdings at once) leaves every
+  closing-basis fact `unknown` — `closing_high_status`, the MA/cluster
+  holds, `high_water_drawdown`, and the volume leg
+  (`latest_session_bar_unusable`) — which is exactly the evidence #2/#3/#4
+  need. The price STOP above does NOT cover it; those prices were all legal.
+  `chart_statuses.ticker_prices[T].anchor_session_covered` MIRRORS this same
+  field — one computation, so the two can never disagree — so read it there
+  rather than opening each structure block by hand. `scripts.macro` also
+  prints one `[WARN] … does not cover anchor session …` line naming every
+  affected symbol. Check it for held tickers BEFORE Step 5; same reason as the
+  price STOP — Step 8's refusal lands after the user may already have acted on
+  Step 7. **Three different outages land here, and the pair
+  `anchor_session_covered` + `last_bar_session` tells them apart:**
+  `last_bar_session` EARLIER than `anchor_session` = this ticker's own daily
+  series lagged; `last_bar_session` EQUAL to it = the ticker's bars are fine
+  and the broad-index MARKET CALENDAR is unproven (fewer than three of
+  SPY/QQQ/^DJI returned bars, so no session can be confirmed real and every
+  ticker's structure goes `unknown` at once); `null` = this ticker has no
+  usable daily close on or before the anchor at all — which can happen with a
+  PASSED meta quote (bars present, every close null/non-positive), so do not
+  read it as "the fetch failed". Relay which one it is — the remedy differs.
+  **`anchor_session_covered: true` is a FLOOR, not a sufficiency proof, and
+  this is the one place the cheap read is not enough.** A gap-free suffix of a
+  single bar — an interior gap right before the anchor, or a listing too fresh
+  to have history — answers `true` with `bars_available: 1` and EVERY
+  closing-basis fact still `unknown`: no `closing_high_status`, no
+  `prior_high_close`, all three `moving_averages` null. So for a ticker you are
+  about to act on, read `closing_high_status` too: `unknown` there means the
+  entry evidence #2/#3/#4 need does not exist, whatever the coverage flag says.
+  Unknown is never neutral — it cannot support an entry, and it cannot be
+  reported as one.
+- **A `null` close on ANY `regime_inputs.indices.*` leg your principles
+  actually read ⇒ STOP** — check all three (`SPY` / `QQQ` / `^DJI`), not just
+  the one your framework happens to name today, and `regime_inputs.vix.close`
+  too when a principle reads VIX. `principle_notes.framework` binds regime
+  reading to the anchored `regime_inputs` block, and the live `market.*`
+  values are what that block exists to exclude — so a null leg means the
+  principle that reads it has no lawful input at all.
+  To be exact about what this does and does not prevent: the decision log's
+  own `_classify_regime` already fails CLOSED on a missing leg (it answers
+  `mixed` and says "Macro signals incomplete"), so nothing mis-classifies
+  silently. What the STOP buys is that the DECIDE agent is not asked to
+  reason about a regime its inputs cannot support, and that you find out
+  before Step 7 rather than after the user has acted on it.
+- A **watchlist-only** ticker whose `anchor_session_covered` is not `true`
+  ⇒ continue the run, but it **cannot carry a `buy` / `add` this run** — the
+  same rule as the no-price case below, for the same reason: entry evidence
+  it does not have. Say so explicitly rather than letting it reach Step 7 as
+  a candidate. `portfolio_log` refuses such an entry at Step 8
+  (`blocked_by_data_integrity`), but that refusal lands AFTER the user may
+  have acted on your recommendation — which is exactly why the held-ticker
+  STOP above exists.
 - A **watchlist-only** ticker without a price ⇒ continue the run, but say so,
   and treat ITS indicators and price structure as **unknown** (never neutral).
   It cannot carry a `buy` / `add` this run, whatever the order type — no
@@ -539,7 +594,15 @@ Read the output JSON. This provides:
   recovery lens in decide.md), and a member may read `unavailable` inside a
   `fresh` event.
 - `chart_statuses.ticker_prices[T].price_as_of` / `stale_meta_quote` /
-  `price_conflict_same_ts` — per-ticker price vintage + integrity. **Relay
+  `price_conflict_same_ts` / `anchor_session_covered` / `last_bar_session`
+  — per-ticker price vintage + integrity, plus whether that ticker's price
+  STRUCTURE is anchored (mirrors `ticker_price_structure[T]`) and the newest
+  session its own bar series carries. The last two are also emitted for each
+  index under `chart_statuses.market[IDX]` and for
+  `chart_statuses.volatility["^VIX"]`, where — those having no structure
+  block — `anchor_session_covered` is exactly the condition that makes that
+  symbol's `regime_inputs` close non-null. `status: PASSED` describes the meta
+  QUOTE only and says nothing about bar coverage — see the STOP above. **Relay
   any `stale_meta_quote: true`, any `price_conflict_same_ts: true` (the
   meta quote and the chart bar disagree at the same timestamp — the price
   used may be contested), or a
@@ -798,7 +861,7 @@ ORDERS_PATH="reports/portfolio/$ETDAY/.proposed_orders.json"
 # Same-day-rerun safety: clear the prior order set FIRST. If parsing the
 # heredoc fails below, the validate block must fail loudly on a MISSING
 # file — never silently validate an earlier run's stale order set.
-rm -f "$ORDERS_PATH"
+"$PYBIN" -m scripts.clear_stale "$ORDERS_PATH" || exit 1
 "$PYBIN" -c "
 import json, sys, pathlib
 sys.stdin.reconfigure(encoding='utf-8')
@@ -835,9 +898,16 @@ VALIDATOR_OUTPUT="reports/portfolio/$ETDAY/.validator_output.json"
 # Clear any stale artifact FIRST. Step 8 deliberately KEEPS this file on a
 # refusal, and `scripts.validate` exits 1 WITHOUT writing when its inputs are
 # unreadable — so without this, a run whose validate dies early would send you
-# to read the PREVIOUS run's verdict, possibly a stale PASS. Guarded: an
-# unguarded `rm -f` that itself fails leaves exactly that hazard.
-rm -f "$VALIDATOR_OUTPUT" || { echo "FATAL: cannot clear stale validator output: $VALIDATOR_OUTPUT" >&2; exit 1; }
+# to read the PREVIOUS run's verdict, possibly a stale PASS. `clear_stale`,
+# not `rm -f`: a delete-restricted mount (Cowork FUSE) refuses `unlink` on an
+# EXISTING file while still allowing writes, so `rm -f` fails on every SECOND
+# run of a day — silently leaving the stale verdict if unguarded, and making
+# the run unrunnable if guarded. `clear_stale` deletes, else empties the file,
+# else REFUSES — and only then is this FATAL. An emptied file is still
+# fail-closed downstream, but LOUDLY, not silently: `portfolio_log
+# --stress-test` finds the path present and dies parsing it (exit 2), rather
+# than reporting it absent. Either way no stale PASS can be attached.
+"$PYBIN" -m scripts.clear_stale "$VALIDATOR_OUTPUT" || { echo "FATAL: cannot clear stale validator output: $VALIDATOR_OUTPUT" >&2; exit 1; }
 
 "$PYBIN" -m scripts.validate \
   --state portfolio-state.yaml \
@@ -1048,8 +1118,12 @@ ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et
 
 # Clean up the validator output (its content is now in decisions.json).
 # $ETDAY is re-derived in THIS block (Step 6's shell variables do not
-# survive into this later call).
-rm -f "reports/portfolio/$ETDAY/.validator_output.json"
+# survive into this later call). BEST-EFFORT (`|| true`): the log is already
+# written by this point, and on a delete-restricted mount an unguarded `rm`
+# returns 1 and makes a SUCCEEDED Step 8 read as a failed one (feedback
+# 2026-08-29). A leftover here is harmless — Step 6 clears or neutralizes it
+# before the next validate.
+rm -f "reports/portfolio/$ETDAY/.validator_output.json" || true
 ```
 
 The script REFUSES (exit 2) when proposed orders or open broker orders

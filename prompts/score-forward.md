@@ -187,9 +187,27 @@ Identify and assess:
 For each catalyst:
 - Date or expected timeframe (MUST come from API or WebSearch, never memory)
 - Date precision — be honest about what you actually know:
-  - `confirmed`: company or exchange has published the exact date
-  - `estimated`: inferred from historical patterns or analyst expectations
+  - `confirmed`: **the issuer or the exchange itself has published this exact
+    date** — a company IR events page, a press release, an 8-K, an exchange
+    notice. The item's own `source` tag must be that publication. No
+    third-party or aggregator calendar can establish `confirmed`, however
+    exact its date looks; and where such a source labels its own date
+    unconfirmed or estimated, `confirmed` is forbidden outright — repeating
+    the date while dropping its publisher's caveat is the error, not the date.
+  - `estimated`: inferred from historical patterns, analyst expectations, or
+    ANY third-party calendar — this is where a precise-looking secondary
+    date belongs.
   - `approximate`: only a rough timeframe (quarter, half-year)
+  - Why this is stricter than it looks: the value is carried verbatim through
+    synthesis into `bq_analysis.synthesis.catalyst_calendar`, which a human
+    reads and acts on. `confirmed` asserts that the date has been PUBLISHED,
+    so a reader stops looking — a false one is a certainty nobody can audit,
+    and it suppresses the one action that would fix a wrong date (going to
+    find the issuer's own announcement). Downstream consumers deliberately
+    treat `confirmed` and `estimated` the same where day-precision is all
+    they need, so this rule buys honesty of provenance, not a different
+    branch: an `estimated` date you are unsure of costs nothing, a
+    `confirmed` one you invented costs the reader their check.
 - The forward **earnings** date comes from WebSearch (earnings calendar /
   company IR); `06_analyst_estimates` `fiscal_period` is the quarter-END
   (≈weeks before the report), so cite it only as corroboration, never as the

@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -286,14 +286,27 @@ If the printed `CANONICAL_ANCHOR` is empty (first run, pre-delta artifact,
 malformed meta): skip the classifier entirely (no prior to diff
 against); tier will be fresh-events.
 
-Otherwise: first clear any stale same-session classifier artifact —
-`rm -f "$REPORT_DIR/.classifier_output.json"` (cold-round 7: a reused
+Otherwise: first clear any stale same-session classifier artifact. Its own
+block — this shell inherits nothing from the last one. If it exits non-zero,
+**STOP** and surface the error: the guard could not be honoured, so an
+earlier same-session output could drive the reuse gates.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
+  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.classifier_output.json" || exit 1
+```
+
+(cold-round 7: a reused
 session dir + a missed classifier write would silently drive the reuse
 gates with the EARLIER invocation's counts; cleared, a missed write reads
 as classifier-absent → fail-open to rerun). Then spawn a subagent with
 `<captured-abs-ROOT>/prompts/delta/classify-news.md` as its instructions,
 passing articles from `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json`
-with `since_date = <the printed CANONICAL_ANCHOR>`. The rubric is at
+with `since_date = <the printed CANONICAL_ANCHOR>` and `session_date = <the run's session_et date as ISO `YYYY-MM-DD` — the run DIRECTORY spells that same session without separators, so a directory `<YYYYMMDD>` becomes `<YYYY>-<MM>-<DD>`; NOT the calendar date>` and `fetch_timestamp = <the `validated_at` string from `<REPORT_DIR>/data/00_validation.json` — the classifier cannot see the fetch time, the news file carries only `{company, news}`>`. `session_date` is what `fetch_timestamp_today` is judged against: a calendar comparison is false on every non-trading day and fail-opened the gate for a batch with no new article in it (2026-08-29). The rubric is at
 `<captured-abs-ROOT>/.claude/rules/delta-materiality.md`. Instruct it to WRITE
 its output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.json` —
 substitute the concrete absolute path into the dispatch prompt (the subagent
@@ -404,8 +417,18 @@ artifact (round-24) — do NOT treat the run as failed: switch to the
 (clear `events.json`, dispatch the events agent, write the rerun
 audit).
 
-If `rerun`: FIRST clear the stale destination — `rm -f
-"$REPORT_DIR/events.json"` (cold-round 7: the session dir is reused, so
+If `rerun`: FIRST clear the stale destination, in its own block:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
+  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/events.json" || exit 1
+```
+
+(cold-round 7: the session dir is reused, so
 if the events agent fails to write, an earlier same-session events.json
 would otherwise be stamped and validated as freshly regenerated; with the
 file cleared, a missed write fails the stamp step loudly instead). The
@@ -479,7 +502,7 @@ except Exception:
     sys.exit(1)
 ga = m.get('generated_at') if isinstance(m, dict) else None
 sys.exit(0 if (ga and _safe_normalize_to_et_date(ga)) else 1)
-" || { "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] stamp_events_meta failed AND the agent fallback generated_at is missing/unnormalizable — events.json would hard-fail Step 6.5. run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Aborting." >&2; exit 1; }
+" || { "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] stamp_events_meta failed AND the agent fallback generated_at is missing/unnormalizable — events.json would hard-fail Step 6.5. run_meta.thesis was ASKED to stamp NOT-completed — that command is guarded so it cannot mask this failure, which also means it MAY ITSELF HAVE FAILED: check its own stderr above before retrying (round-24: the partial events.json must not sit behind a stale completed=true). Aborting." >&2; exit 1; }
 fi
 ```
 
@@ -528,7 +551,7 @@ try:
 except ValueError as e:
     print(f'FATAL: events.json WebSearch source-binding validation failed: {e}', file=sys.stderr)
     sys.exit(1)
-" || { rm -f "$REPORT_DIR/events.json"; "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] events.json failed its structural floor / version / WebSearch source-binding validation — the INVALID file has been DELETED so a same-day retry cannot adopt it as fresh — a fresh events output must carry all contracted sections and bind every [WebSearch:] tag (outlet + url + access-date). run_meta.thesis stamped NOT-completed (round-24: the partial events.json must not sit behind a stale completed=true). Re-dispatch the events agent with the error above; if it fails again, STOP." >&2; exit 1; }
+" || { "$PYBIN" -m scripts.clear_stale "$REPORT_DIR/events.json" || echo "[fatal] AND the invalid events.json could NOT be cleared (see the REFUSED line above) — delete it by hand before any retry today, or the retry will adopt it as this run's fresh output." >&2; "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" --ticker "$TICKER" --skill investment-thesis --no-completed || true; echo "[fatal] events.json failed its structural floor / version / WebSearch source-binding validation — the INVALID file has been cleared so a same-day retry cannot adopt it as fresh (unless a REFUSED line above says it could not be, in which case delete it by hand) — a fresh events output must carry all contracted sections and bind every [WebSearch:] tag (outlet + url + access-date). run_meta.thesis was ASKED to stamp NOT-completed — that command is guarded so it cannot mask this failure, which also means it MAY ITSELF HAVE FAILED: check its own stderr above before retrying (round-24: the partial events.json must not sit behind a stale completed=true). Re-dispatch the events agent with the error above; if it fails again, STOP." >&2; exit 1; }
 ```
 
 ### Step 5: Valuation + Technical (always fresh)
@@ -568,12 +591,12 @@ REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKE
 # (below) would leave a prior run's reverse_dcf.json for the agent to read
 # instead of emitting a `status: skipped` stub. (indicators.json is NOT cleared —
 # it may be the valid /score-business output the technical agent needs.)
-rm -f "$REPORT_DIR/data/historical_multiples.json" \
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/data/historical_multiples.json" \
       "$REPORT_DIR/data/fcf_inputs.json" \
       "$REPORT_DIR/data/peer_multiples.json" \
       "$REPORT_DIR/data/reverse_dcf.json" \
       "$REPORT_DIR/alpha_scan.json" \
-      "$REPORT_DIR/.alpha_status.json"
+      "$REPORT_DIR/.alpha_status.json" || exit 1
 # (closing round-15 F4: alpha artifacts are THIS run's products too — a
 # same-day rerun otherwise let a missed Phase-1 write serve the MORNING
 # run's candidates/phase label as current.)
@@ -679,9 +702,11 @@ that file). Same rationale for `investment_thesis.json` +
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
-REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
-rm -f "$REPORT_DIR/valuation.json" "$REPORT_DIR/technical.json" \
-      "$REPORT_DIR/investment_thesis.json" "$REPORT_DIR/thesis_summary.md"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
+  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/valuation.json" "$REPORT_DIR/technical.json" \
+      "$REPORT_DIR/investment_thesis.json" "$REPORT_DIR/thesis_summary.md" \
+      || exit 1
 ```
 
 Then run both agents on today's data:
@@ -916,7 +941,7 @@ if ! "$PYBIN" -m scripts.schemas.investment_thesis "$REPORT_DIR/investment_thesi
   # cannot serve the invalid artifact as a fresh completed thesis.
   "$PYBIN" -m scripts.delta.run_meta write --run-dir "$REPORT_DIR" \
     --ticker "$TICKER" --skill investment-thesis --no-completed || true
-  echo "[fatal] investment_thesis.json failed contract validation — see SchemaError above. run_meta.thesis stamped NOT-completed. Aborting run." >&2
+  echo "[fatal] investment_thesis.json failed contract validation — see SchemaError above. run_meta.thesis was ASKED to stamp NOT-completed — that command is guarded so it cannot mask this failure, which also means it MAY ITSELF HAVE FAILED: check its own stderr above before retrying. Aborting run." >&2
   exit 1
 fi
 ```

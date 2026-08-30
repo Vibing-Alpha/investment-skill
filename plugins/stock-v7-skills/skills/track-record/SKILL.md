@@ -38,7 +38,7 @@ user_invocable: true
 
 Orchestration only. Every coverage gate, count and render decision lives in
 `scripts/track_record/{archive,journal,summary}.py`, invoked through the
-`due | pull | tag | unlinked | open | report` CLI (`python3 -m
+`due | pull | tag | unlinked | coverage | open | report` CLI (`python3 -m
 scripts.track_record ...`) — this skill has no analysis methodology of its
 own and makes no portfolio decision.
 
@@ -118,7 +118,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.15.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 Every Bash block below starts with `cd "<captured-abs-ROOT>"` for the same
@@ -363,17 +363,57 @@ Per D1's frozen cadence, one pull session covers:
   > `LAST_QUARTER` / `TWO_QUARTERS_AGO` / `THREE_QUARTERS_AGO` /
   > `FOUR_QUARTERS_AGO` argument.
   >
-  > **Ask by READING `<captured-abs-ROOT>/reports/track-record/<YYYYQn>/summary.md`.**
-  > A quarter counts as already covered only when that file exists AND its
-  > `DATA` line opens with a fill COUNT; an absent file, a `coverage gap`
-  > reason, or any other `unavailable` there means pull it. This is a cheap
-  > ASK, not a proof: the file says what the archive looked like the last
-  > time that quarter's report ran, and completeness is decided at read
-  > time, so pulls archived since can change the answer. When it does not
-  > say plainly that the quarter has fills, or you cannot tell how old it
-  > is, pull. An extra pull costs one broker call and archives a window
-  > that corroborates what is already there; the other mistake loses the
-  > window for good.
+  > **Ask the ARCHIVE first — it always has an answer.** Run the `coverage`
+  > block below (it is read-only and writes nothing, so it is safe to run
+  > before deciding), then apply these rules:
+  >
+  > **The archive alone can answer "already pulled".** A header row, then one
+  > CSV row per archived pull:
+  > `tool,args,pulled_at,completeness,effective,covers_start,covers_end`,
+  > plus an explicit `no pull archived` / `no readable pull archived` row for
+  > a tool with nothing. `args` is JSON and contains commas, so parse the
+  > output as CSV, never with `cut -d,`.
+  >
+  > **Read `effective`, NOT `completeness`.** `completeness` is what the
+  > pulling session said about its own call; `effective` is what the
+  > archive's own resolver concludes once every other pull is taken into
+  > account, and it DEMOTES a stored `complete` to `truncated` when a
+  > narrower pull holds an execution the wider one missed. The two disagree
+  > in practice. Deciding on the stored field skips a quarter that is really
+  > truncated — and once the broker's retention window closes, that is gone
+  > for good.
+  >
+  > **`covers_start` / `covers_end` are the resolved UTC window — do NOT
+  > redo that arithmetic yourself, and do NOT match on the argument name.**
+  > A relative period names a different quarter depending on when it was
+  > pulled: `LAST_QUARTER` pulled in 2026Q3 covers 2026Q2, the same string
+  > pulled in 2027Q1 covers 2026Q4. **A quarter is already pulled when some
+  > row's window CONTAINS that quarter AND that row's `effective` is
+  > `complete`.** Anything else — `truncated`, `unknown`, a blank window
+  > (args the resolver does not recognise) — means pull it.
+  >
+  > **`reports/track-record/<YYYYQn>/summary.md` is corroboration, never a
+  > requirement.** If it exists, read it: a `DATA` line opening with a fill
+  > COUNT agrees with the archive, while a `coverage gap` or any
+  > `unavailable` there DISAGREES — and a disagreement means pull. Its
+  > ABSENCE means nothing at all: it exists only once Step 6 has run for
+  > that quarter, so for an operator who has not yet reached a quarter end
+  > it is absent forever, and treating that as "not covered" is what makes
+  > every session re-pull five windows that can only be duplicates.
+  >
+  > Neither is a proof: `completeness` is what the pulling session reported
+  > about its own call, and the summary says what the archive looked like
+  > the last time that quarter's report ran. When neither says plainly that
+  > the quarter is covered, pull. An extra pull costs one broker call and
+  > archives a window that corroborates what is already there; the other
+  > mistake loses the window for good.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.track_record coverage --tool get_account_trades
+```
+
   >
   > **Do not run `report` to ask.** That is Step 6's command and it WRITES:
   > it truncates and rewrites the very `summary.md` you would be reading,
@@ -489,6 +529,26 @@ softened:**
 > largest and least-corroborated capture of the whole tool's life. If your harness gives you no way to put the bytes on
 > disk, STOP and say so; a session with no capture is recoverable, a
 > session with a retyped capture is not.
+>
+> **The line is WHO MOVES THE BYTES, not where they were.** Some hosts
+> inline a tool result into the model's context and write only an
+> OVERSIZED one to a file — Cowork's remote sessions do exactly this, so
+> the small pulls (`get_account_orders`, `get_account_positions`,
+> `get_account_balances`, `get_pa_performance_all_periods`, and any
+> quarter window with few fills) never get a file of their own. That is
+> not "no way to put the bytes on disk". Those hosts keep a **session
+> transcript** — Claude Code writes one per session under
+> `~/.claude/projects/<project>/<session-uuid>.jsonl`, with every
+> `tool_result` recorded verbatim — and **a script may copy a result out
+> of it by `tool_use_id` and write it to a file.** A program moving bytes
+> the host itself recorded preserves them exactly; the model retyping
+> what it read into a heredoc does not, and that is the only thing
+> forbidden. Verify the move the way any byte move is verified — compare
+> byte counts end to end and `json.load` the result — and say in your
+> report which path you used. Reading the rule as "inline result ⇒ do not
+> archive" costs windows that are still in the broker's reach and will
+> not be later: one session gave up four of them that way, and the next
+> session archived all seven, byte-for-byte.
 
 **The `--args` value is the other half of that, and nothing compares it
 against the bytes.** The archive derives the window this pull will forever
@@ -851,6 +911,30 @@ first two columns (`account,order_id`) are the machine key the `tag` step
 keys off (below); the rest exist so a person can actually recognize which
 decision an order was — a bare `account,order_id,symbol` line gives no way
 to tell one order from another once there are hundreds in a quarter.
+
+**The backlog is cumulative, and on a first session it can be a wall.** It
+only shrinks by tagging, so an operator adopting this tool against a year of
+archived pulls meets every untagged order at once — one real first run
+printed 555 rows, and the per-group prediction this step asks for is not
+executable at that size. `--since YYYY-MM-DD` bounds what is LISTED:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -m scripts.track_record unlinked --since <captured-CUTOFF>
+```
+
+`<captured-CUTOFF>` is a zero-padded `YYYY-MM-DD` the USER chose — say what
+you are about to cut off and why before you run it, and substitute their
+answer. Never pick a date yourself, and never carry one from an example: a
+cutoff is a decision about which of their own trades to set aside.
+
+When it hides anything it prints a `NOTE:` counting what it hid — silence means the cutoff hid nothing — and those orders are
+**still untagged** — they return in the next unfiltered run. Use it to work
+the backlog in passes, newest first, and tell the user how many are behind
+the cutoff; never present a filtered list as the whole backlog. There is
+deliberately no `--limit`: a truncated list is indistinguishable from a
+short one, while a date the user chose is a fact they can restate.
 
 **`size` and `price` describe the WHOLE order:** size is every fill summed,
 price is their volume-weighted average. `date` and `side` come from the

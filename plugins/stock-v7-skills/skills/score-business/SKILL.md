@@ -76,7 +76,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.15.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync
+"$PYBIN" -m scripts.version_skew --expected-min "1.16.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -227,8 +227,19 @@ print('TIER=full')
 "
 ```
 
-**Otherwise**: first clear any stale same-session classifier artifact —
-`rm -f "$REPORT_DIR/.classifier_output.json"` (cold-round 7: the session
+**Otherwise**: first clear any stale same-session classifier artifact. Its
+own block — this shell inherits nothing from the last one:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
+  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.classifier_output.json" || exit 1
+```
+
+(cold-round 7: the session
 dir is reused, and if the classifier subagent fails to write, an earlier
 same-session output would silently drive the tier; with the file cleared,
 a missed write reads as classifier-absent → the tier decision fail-opens
@@ -236,7 +247,7 @@ conservatively instead). Then spawn a subagent with
 `<captured-abs-ROOT>/prompts/delta/classify-news.md`
 as its instructions, passing articles from
 `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json` with
-`since_date = <prior run's et_trading_day>`. The rubric is at
+`since_date = <prior run's et_trading_day>` and `session_date = <the run's session_et date as ISO `YYYY-MM-DD` — the run DIRECTORY spells that same session without separators, so a directory `<YYYYMMDD>` becomes `<YYYY>-<MM>-<DD>`; NOT the calendar date>` and `fetch_timestamp = <the `validated_at` string from `<REPORT_DIR>/data/00_validation.json` — the classifier cannot see the fetch time, the news file carries only `{company, news}`>`. `session_date` is what `fetch_timestamp_today` is judged against: a calendar comparison is false on every non-trading day and fail-opened the gate for a batch with no new article in it (2026-08-29). The rubric is at
 `<captured-abs-ROOT>/.claude/rules/delta-materiality.md`. Instruct it to WRITE its
 output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.json` — substitute
 the concrete absolute path into the dispatch prompt (the subagent inherits neither
@@ -317,6 +328,12 @@ PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill score-business)
 
 # Save phase 1's validation before phase 2 fetch (merged right below).
+# clear_stale FIRST, then copy: the `rm -f … || true` at the end of the
+# previous run is best-effort, so on a delete-restricted mount a leftover
+# survives — and that mount is also documented to leave the TAIL of an
+# over-written file in place, which would make this `cp` produce a
+# corrupt phase-1 JSON. clear_stale empties it to zero bytes first.
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.validation_phase1.json" || exit 1
 cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
@@ -333,7 +350,7 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
     --phase2 "$REPORT_DIR/data/00_validation.json" \
     || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
-rm -f "$REPORT_DIR/.validation_phase1.json"
+rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
 
 # Copy fundamental dim from prior
 "$PYBIN" -c "
@@ -356,6 +373,12 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 
+# clear_stale FIRST, then copy: the `rm -f … || true` at the end of the
+# previous run is best-effort, so on a delete-restricted mount a leftover
+# survives — and that mount is also documented to leave the TAIL of an
+# over-written file in place, which would make this `cp` produce a
+# corrupt phase-1 JSON. clear_stale empties it to zero bytes first.
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.validation_phase1.json" || exit 1
 cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
@@ -372,7 +395,7 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
     --phase2 "$REPORT_DIR/data/00_validation.json" \
     || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
-rm -f "$REPORT_DIR/.validation_phase1.json"
+rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
 
 "$PYBIN" -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
   --output "$REPORT_DIR/data/indicators.json"
@@ -397,13 +420,28 @@ TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 # full tier: also clear fundamental.json (Agent A regenerates it).
 # partial tier: clear forward/industry only.
-rm -f "$REPORT_DIR/scores/forward.json" "$REPORT_DIR/scores/industry.json"
-[ "<TIER>" = "full" ] && rm -f "$REPORT_DIR/scores/fundamental.json"
+# TIER is READ FROM DISK, never substituted: `[ "<TIER>" != "full" ]` is TRUE
+# for an empty or unsubstituted placeholder, so a full-tier run would have
+# silently kept yesterday's fundamental.json and let a missed Agent-A write
+# pass every non-empty gate (codex review 2026-08-29).
+TIER=$("$PYBIN" -c "
+import json, pathlib, sys
+sys.stdout.reconfigure(encoding='utf-8')
+print(json.loads(pathlib.Path('$REPORT_DIR/.run_state.json').read_text(encoding='utf-8'))['tier'])
+") || { echo "FATAL: cannot read the decided tier from $REPORT_DIR/.run_state.json" >&2; exit 1; }
+case "$TIER" in
+  full|partial) ;;
+  *) echo "FATAL: unexpected tier '$TIER' in .run_state.json" >&2; exit 1 ;;
+esac
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/scores/forward.json" "$REPORT_DIR/scores/industry.json" \
+  || exit 1
+[ "$TIER" != "full" ] || "$PYBIN" -m scripts.clear_stale "$REPORT_DIR/scores/fundamental.json" || exit 1
 ```
 
-(`<TIER>` is the tier decided in Step 2 — substitute it like `<TICKER>`.
-This block belongs to the full/partial branch only; on no_op the score
-files are owned by the copy guards.)
+(The tier is re-read from `$REPORT_DIR/.run_state.json` inside the block —
+Step 2 persists it there precisely so later fresh shells do not depend on a
+substituted literal. This block belongs to the full/partial branch only; on
+no_op the score files are owned by the copy guards.)
 
 Spawn agents in parallel:
 
@@ -494,8 +532,9 @@ light-mode input) points at the PRIOR run's dir, never at these files:
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
-REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
-rm -f "$REPORT_DIR/synthesis.json" "$REPORT_DIR/summary.md"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER") \
+  || { echo "FATAL: could not allocate the run directory — the clear below would be handed an EMPTY \$REPORT_DIR" >&2; exit 1; }
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/synthesis.json" "$REPORT_DIR/summary.md" || exit 1
 ```
 
 Spawn the synthesis agent with `<captured-abs-ROOT>/prompts/score-synthesize.md`.
@@ -540,9 +579,39 @@ The two-phase merge now runs at the END of Step 3, immediately after the
 phase-2 fetch (probe-2 C1: it previously ran here — AFTER the synthesis
 agent had already read the phase-2-stubbed 00_validation.json and
 mislabeled clean phase-1 categories as SKIPPED in its freshness
-narrative). Nothing to do in this step; if `.validation_phase1.json`
-still exists at this point, Step 3's merge did not run — STOP and re-run
-the Step 3 merge block before assembling.
+narrative).
+
+One thing to CHECK, and only on the `full` / `partial` branches (on `no_op`
+no phase 2 ran, so there is no merge to prove). `two_phase_merged` is written
+by `scripts.score_business.validation_merge` and by nothing else, so its
+presence proves the merge ran over THIS file. The tier is re-read from disk,
+not substituted:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+TICKER="<TICKER>"
+REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
+"$PYBIN" -c "
+import json, pathlib, sys
+sys.stdout.reconfigure(encoding='utf-8')
+rd = pathlib.Path('$REPORT_DIR')
+tier = json.loads((rd / '.run_state.json').read_text(encoding='utf-8'))['tier']
+if tier == 'no_op':
+    print('SKIP: no_op ran no phase 2'); raise SystemExit(0)
+v = json.loads((rd / 'data' / '00_validation.json').read_text(encoding='utf-8'))
+if v.get('two_phase_merged') is not True:
+    print('two_phase_merged absent', file=sys.stderr); raise SystemExit(1)
+print('OK: two-phase merge recorded')
+" || { echo "FATAL: Step 3's two-phase validation merge did not run over this run's 00_validation.json — re-run the Step 3 merge block before assembling; if it is still absent, STOP." >&2; exit 1; }
+```
+
+Do NOT judge this by whether `$REPORT_DIR/.validation_phase1.json` is
+gone. Its deletion is best-effort: a delete-restricted mount (Cowork
+FUSE) returns `Operation not permitted` for an existing file, so a
+leftover there means the host refused an `rm`, not that the merge was
+skipped — reading absence as evidence made this a permanent STOP on that
+host while the merge had in fact succeeded (feedback 2026-08-29).
 
 ### Step 5: Assemble
 
@@ -616,9 +685,9 @@ ctx_p.write_text(json.dumps(ctx, indent=2, ensure_ascii=False), encoding='utf-8'
 "$PYBIN" -m scripts.assemble \
   --report-dir "$REPORT_DIR" \
   --tier-context-json "$TIER_CONTEXT_JSON" \
-  || { rm -f "$TIER_CONTEXT_JSON"; echo "FATAL: scripts.assemble failed — the canonical bq_analysis.json (if present) is a PRIOR run's artifact, not this run's. Fix the failed score/synthesis input and re-run; do NOT record this run as completed." >&2; exit 1; }
+  || { "$PYBIN" -m scripts.clear_stale "$TIER_CONTEXT_JSON" || true; echo "FATAL: scripts.assemble failed — the canonical bq_analysis.json (if present) is a PRIOR run's artifact, not this run's. Fix the failed score/synthesis input and re-run; do NOT record this run as completed." >&2; exit 1; }
 
-rm "$TIER_CONTEXT_JSON"
+rm -f "$TIER_CONTEXT_JSON" || true   # best-effort cleanup: regenerated next run, and a delete-restricted mount must not make a SUCCEEDED assemble read as failed
 
 # 4) Explicit fail-close schema validation. Mirrors investment-thesis
 # Step 6.4 — bq_analysis.json must load through the typed loader before
