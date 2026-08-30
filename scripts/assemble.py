@@ -1254,6 +1254,15 @@ def main():
     # (full: 3 dims; partial: forward+industry; no_op: none).
     from scripts.schemas import SchemaError as _SchemaError
     from scripts.schemas.source_tag import validate_source_tags
+    # EVERY offending dim is reported, not just the first. Assembly is the
+    # expensive step and the loop has already walked all of them, so exiting
+    # on the first one bought nothing and cost a whole re-run per violation
+    # (feedback 2026-08-30 score-business ②: three assemblies for three
+    # findings). Note the residual, deliberately not closed here: this
+    # enumerates DIMS, and `validate_source_tags` still raises on the first
+    # violation WITHIN a dim — accumulating inside the validator would change
+    # a raise-based contract several loaders depend on.
+    _binding_failures: list = []
     for dim_name in WEBSEARCH_FRESH_DIMS_BY_TIER.get(ctier, ()):
         if dim_name not in score_files:
             continue
@@ -1264,15 +1273,25 @@ def main():
                 strict_websearch=True,
             )
         except _SchemaError as exc:
+            _binding_failures.append((dim_name, exc))
+    if _binding_failures:
+        for dim_name, exc in _binding_failures:
             print(
                 f"{PREFIX}: FATAL — WebSearch source-binding violation in "
                 f"scores/{dim_name}.json (fresh this run, tier={ctier}): "
-                f"{exc}. Every [WebSearch:] citation in a fresh dimension "
-                f"must be [WebSearch: <outlet>, <url>, accessed "
-                f"<YYYY-MM-DD>] backed by a real search.",
+                f"{exc}",
                 file=sys.stderr,
             )
-            sys.exit(1)
+        print(
+            f"{PREFIX}: {len(_binding_failures)} fresh dimension(s) failed the "
+            f"binding gate — fix ALL of them before re-running, and note that "
+            f"each file is reported at its FIRST violation, so one may hold "
+            f"more. Every [WebSearch:] citation in a fresh dimension must be "
+            f"[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>] backed by a "
+            f"real search.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Determine ticker (from validation or first score file)
     ticker = validation.get("ticker")

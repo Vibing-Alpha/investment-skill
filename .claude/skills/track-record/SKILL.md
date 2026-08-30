@@ -542,7 +542,8 @@ softened:**
 > recorded there verbatim — one too large to inline is NOT: the host writes
 > the payload to its own file and records a pointer naming it. **This repo
 > ships the extractor for both cases, so do not write one.** The block is
-> self-contained because each bash block is a fresh shell:
+> self-contained because each bash block is a fresh shell (on a cross-machine
+> host its FATAL branch is expected — see the note below it):
 >
 > ```bash
 > # PROJ is derived BEFORE the cd, and this is the one ordering that matters:
@@ -554,7 +555,7 @@ softened:**
 > # Encoding: every `/` AND every `.` becomes `-` (verified against the real
 > # directory; `s|/|-|g` alone leaves `2.invest` and finds nothing).
 > PROJ=~/.claude/projects/"$(pwd | sed 's|[/.]|-|g')"
-> [ -d "$PROJ" ] || { echo "FATAL: no transcript dir at $PROJ — this shell did not start in the session's original directory" >&2; exit 1; }
+> [ -d "$PROJ" ] || { echo "FATAL: no transcript dir at $PROJ — either this shell did not start in the session's original directory, or the transcript is not on THIS machine at all (see 'when the transcript and the clone are on different machines' below)" >&2; exit 1; }
 > cd "<captured-abs-ROOT>"
 > PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 > # what the log holds (id / tool / ARGS / bytes / file). The args column is
@@ -591,6 +592,34 @@ softened:**
 > archive" costs windows that are still in the broker's reach and will
 > not be later: one session gave up four of them that way, and the next
 > session archived all seven, byte-for-byte.
+>
+> **When the transcript and the clone are on different machines.** A cloud
+> session bridged to a device holds the transcript in the CLOUD container
+> (`~/.claude/projects/<project>/<uuid>.jsonl`) while the clone, the `.venv`
+> and the archive root live on the DEVICE, reachable only through the bridged
+> bash tool. The block above then runs on the device, where there is no
+> `~/.claude` at all, so it takes its FATAL branch — and the cwd is not the
+> problem, so re-deriving `PROJ` will not fix it. The check is only
+> `[ -d "$PROJ" ]`, which cannot tell WHICH machine's sessions it found: if the
+> device happens to have its own `~/.claude/projects/<same-name>`, the check
+> PASSES and lists unrelated device-side sessions. Either way what you are
+> looking for is not there.
+>
+> `--transcript` takes **a single `.jsonl` file** as readily as a directory,
+> and that is the way through: move the whole session log to a path the clone
+> can see, then point the two commands at that FILE.
+>
+> 1. Copy the cloud-side `<uuid>.jsonl` to the device, WHOLE and by a
+>    file-moving mechanism — never by the model re-emitting what it read. Put
+>    it somewhere outside the archive root (a scratch dir), since it is not an
+>    archive artifact.
+> 2. Run `transcript list --transcript "<that file>" --tool <tool>` and then
+>    `transcript extract --transcript "<that file>" --tool-use-id "$ID"`
+>    exactly as in the block above — nothing else changes.
+> 3. Report the byte counts the extractor prints and confirm each output
+>    `json.load`s, the same check as every other capture path, and say that
+>    you used the cross-machine route.
+>
 
 **The `--args` value is the other half of that, and nothing compares it
 against the bytes.** The archive derives the window this pull will forever

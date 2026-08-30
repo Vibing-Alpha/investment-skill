@@ -26,8 +26,12 @@ from scripts.sources.adapter_result import (
 )
 from scripts.sources.yfinance_guard import yfinance_call
 from scripts.sources.common import sanitize_dict_numerics, emit_with_numeric_coerce
+from scripts.schemas.errors import SchemaError
 from scripts.schemas.quarter_window import (
     aligned_pair,
+    AlignedQuarter,
+    cumulative_detection_ran,
+    detect_cumulative_cash_flow,
     InsufficientQuartersError,
     row_matches_period,
 )
@@ -287,45 +291,118 @@ def _parse_fiscal_quarter(fp: object) -> Optional[tuple]:
     return int(m.group(1)), int(m.group(2))
 
 
-def _discrete_quarter_sbc(latest_cf: Mapping, cf_rows, raw_sbc: float) -> float:
-    """De-cumulate a YTD share-based-comp figure to the discrete quarter.
+_SBC_PROBE_TAG = "[Calc: sbc period-basis probe]"
 
-    US-GAAP 10-Q cash-flow statements report SBC as a YTD-cumulative figure
-    (there is no discrete-quarter cash-flow statement in a 10-Q), while the
-    income statement reports the discrete quarter. Dividing a 9-month YTD SBC
-    by a single-quarter revenue overstates the ratio ~Nx (SNOW Q3 FY26:
-    1.196B / 1.213B = 0.986 vs the true ~0.34) and can falsely trip
-    high_sbc_ratio near the 0.15 threshold.
 
-    De-cumulation applies ONLY to YTD-cumulative sources. The yfinance
-    fallback (`quarterly_cashflow`) already reports DISCRETE per-quarter
-    cash flows tagged ``data_source == "yfinance"`` — de-cumulating those
-    would wrongly subtract a real prior quarter and UNDERSTATE the ratio
-    (a false negative). So yfinance rows short-circuit to the raw value.
-    FDS 10-Q rows (no ``data_source == "yfinance"`` tag) are YTD and get
-    de-cumulated: when the latest matched row is fiscal quarter N>1 and the
-    immediately-prior same-FY quarter (N-1) is present in the SAME currency
-    with a strictly smaller |SBC| (confirming accumulation), the discrete
-    quarter is ``latest_ytd - prior_ytd``.
+def _sbc_period_basis(latest_cf: Mapping, cf_rows) -> tuple[Optional[str], Optional[str]]:
+    """Is `latest_cf` a year-to-date CUMULATIVE row or a standalone quarter?
 
-    Returns the raw value unchanged for: yfinance-sourced rows, Q1
-    (YTD == discrete), annual/malformed fiscal_period, a missing or
-    currency-mismatched prior row, or a non-increasing pair (the magnitude
-    guard — a secondary backstop for any unknown discrete source). Known
-    limitation: when the immediate prior quarter is absent from a YTD source
-    (a gap right before the latest quarter), the raw YTD is used and the
-    overstatement persists for that one quarter — no worse than pre-fix,
-    and rare for the Jan-FYE cohort whose only gap is the unfetched Q4.
+    Returns ``("cumulative" | "discrete", None)`` or ``(None, reason)`` when
+    the basis cannot be established.
+
+    The two answers differ by an order of magnitude on the same column, so
+    this must be decided by EVIDENCE, not by the SBC column's own slope. It
+    delegates to `scripts.schemas.quarter_window.detect_cumulative_cash_flow`
+    — the repo's one implementation of that question, the same probe
+    `extract_fcf` fails closed on — over a two-row window of the latest row
+    and its same-fiscal-year Q1 (the only row guaranteed standalone, since a
+    YTD Q1 IS a standalone Q1).
+
+    Why the delegation and not a local test (ADBE 2026-08-30, live-verified):
+    the prior evidence was `|latest| > |prior|`, which every RISING DISCRETE
+    series satisfies. ADBE's provider rows are discrete (534 / 509 / 489),
+    so 534M was "de-cumulated" to 25M — a 21x understatement published as
+    `trigger_values.sbc_amount`. The provider's basis is genuinely mixed
+    per-ticker (NOW's 2026-Q2 row IS cumulative on the same feed), so
+    neither always-subtract nor never-subtract is right; only the probe is.
     """
-    # yfinance reports discrete quarters — never de-cumulate (would understate).
     if latest_cf.get("data_source") == "yfinance":
-        return raw_sbc
+        # yfinance `quarterly_cashflow` is discrete by contract — an
+        # attestation, so no probe is needed.
+        return "discrete", None
     parsed = _parse_fiscal_quarter(latest_cf.get("fiscal_period"))
     if parsed is None:
-        return raw_sbc
+        return None, ("period basis unknown: fiscal_period "
+                      f"{latest_cf.get('fiscal_period')!r} is not YYYY-QN")
     fy, q = parsed
     if q <= 1:
-        return raw_sbc  # Q1 YTD == discrete quarter
+        return "discrete", None      # a YTD Q1 IS the standalone Q1
+    latest_cur = str(latest_cf.get("currency") or "").strip().upper()
+    q1_row = None
+    currency_mismatch = False
+    for row in cf_rows:
+        if row is latest_cf or not isinstance(row, Mapping):
+            continue
+        if row.get("data_source") == "yfinance":
+            continue
+        if _parse_fiscal_quarter(row.get("fiscal_period")) != (fy, 1):
+            continue
+        # The D&A ratio is NOT currency-invariant: a USD baseline under a EUR
+        # candidate measures an FX move as accumulation, which is why
+        # `detect_cumulative_cash_flow` refuses an FX-converted window
+        # outright. `_discrete_quarter_sbc` already rejected a mismatched
+        # prior; the probe that decides WHETHER to subtract did not (codex
+        # review, 2026-08-30).
+        row_cur = str(row.get("currency") or "").strip().upper()
+        if latest_cur and row_cur and row_cur != latest_cur:
+            currency_mismatch = True
+            continue
+        q1_row = row
+        break
+    if q1_row is None:
+        if currency_mismatch:
+            return None, (f"period basis unknown: the fiscal {fy}-Q1 baseline "
+                          f"is in a different currency than "
+                          f"{latest_cf.get('fiscal_period')}, and the probe "
+                          f"ratio is not currency-invariant")
+        return None, (f"period basis unknown: no fiscal {fy}-Q1 cash_flow row "
+                      f"to baseline {latest_cf.get('fiscal_period')} against")
+    try:
+        window = [
+            AlignedQuarter(
+                report_period=str(r.get("report_period")),
+                fiscal_period=str(r.get("fiscal_period")),
+                period_kind="quarterly",
+                statement_currency=str(r.get("currency") or "USD"),
+                income_row={}, cash_flow_row=r, balance_row={},
+                source_tag=_SBC_PROBE_TAG,
+            )
+            for r in (q1_row, latest_cf)
+        ]
+    except (SchemaError, ValueError, TypeError) as exc:
+        return None, f"period basis unknown: probe window not constructible ({exc})"
+    if not cumulative_detection_ran(window):
+        return None, ("period basis unknown: the cumulative probe could not "
+                      "run (no usable depreciation_and_amortization baseline)")
+    return ("cumulative" if detect_cumulative_cash_flow(window) else "discrete"), None
+
+
+def _discrete_quarter_sbc(latest_cf: Mapping, cf_rows,
+                          raw_sbc: float) -> tuple[Optional[float], Optional[str]]:
+    """De-cumulate a YTD share-based-comp figure to the discrete quarter.
+
+    Called ONLY after `_sbc_period_basis` has answered "cumulative". US-GAAP
+    10-Q cash-flow statements are year-to-date by construction while the
+    income statement reports the discrete quarter, so dividing a 9-month YTD
+    SBC by a single-quarter revenue overstates the ratio ~Nx (SNOW Q3 FY26:
+    1.196B / 1.213B = 0.986 vs the true ~0.34).
+
+    The discrete quarter is ``latest_ytd - prior_ytd`` where the prior row is
+    the immediately-preceding same-FY quarter in the SAME currency. Returns
+    ``(value, None)``, or ``(None, reason)`` when it cannot be computed:
+
+    * no prior same-FY quarter to subtract — the YTD figure is all there is,
+      and dividing it by a discrete-quarter revenue overstates the ratio ~Nx;
+    * the pair does not INCREASE in magnitude. A year-to-date SBC accumulates
+      monotonically, so a drop contradicts the basis the probe established
+      and means the column is corrupt (NOW 2026-Q2 read -368,000,000 beside a
+      prior +547,000,000; the 10-Q says +655M). Returning the raw value there
+      published the corrupt figure as the quarter.
+    """
+    parsed = _parse_fiscal_quarter(latest_cf.get("fiscal_period"))
+    if parsed is None:
+        return None, "cannot de-cumulate: fiscal_period is not YYYY-QN"
+    fy, q = parsed
     target = (fy, q - 1)
     latest_cur = str(latest_cf.get("currency") or "").strip().upper()
     prior_sbc = None
@@ -333,13 +410,8 @@ def _discrete_quarter_sbc(latest_cf: Mapping, cf_rows, raw_sbc: float) -> float:
         if row is latest_cf or not isinstance(row, Mapping):
             continue
         # Never subtract a DISCRETE (yfinance) prior from a YTD (FDS) latest.
-        # Today cash_flows is single-source (yfinance fills only when FDS is
-        # empty), so this never excludes anything — it makes that invariant
-        # explicit and robust if a future path ever mixes sources.
         if row.get("data_source") == "yfinance":
             continue
-        # Normalized fiscal-quarter compare (parity with latest parsing —
-        # tolerate whitespace/format variance that a raw string == would miss).
         if _parse_fiscal_quarter(row.get("fiscal_period")) != target:
             continue
         # Don't subtract across a currency mismatch (mixed-currency ADR rows).
@@ -349,13 +421,24 @@ def _discrete_quarter_sbc(latest_cf: Mapping, cf_rows, raw_sbc: float) -> float:
         prior_sbc = _sf(row.get("share_based_compensation"))
         break
     if prior_sbc is None:
-        return raw_sbc  # no prior YTD row to subtract — degrade to raw
-    # Confirm accumulation: a YTD figure strictly exceeds the prior YTD in
-    # magnitude. If not (anomalous data / unknown discrete source), keep the
-    # raw value rather than risk a spurious difference.
+        return None, (f"cannot de-cumulate the year-to-date "
+                      f"{latest_cf.get('fiscal_period')} row: no fiscal "
+                      f"{fy}-Q{q - 1} cash_flow row to subtract")
+    # A year-to-date column accumulates in ONE direction. Opposite signs mean
+    # the column is corrupt, not accumulating — and the subtraction would
+    # produce a number neither quarter contains (+100 -> -200 gives -300).
+    if raw_sbc and prior_sbc and (raw_sbc > 0) != (prior_sbc > 0):
+        return None, (f"share_based_compensation changes sign across the "
+                      f"year-to-date pair ({prior_sbc:,.0f} -> {raw_sbc:,.0f}): "
+                      f"a cumulative column accumulates in one direction, so "
+                      f"the quarter cannot be recovered from it")
     if abs(raw_sbc) <= abs(prior_sbc):
-        return raw_sbc
-    return raw_sbc - prior_sbc
+        return None, (f"share_based_compensation does not accumulate across "
+                      f"the year-to-date pair ({prior_sbc:,.0f} -> "
+                      f"{raw_sbc:,.0f}): the column contradicts the period "
+                      f"basis the probe established, so the quarter cannot "
+                      f"be recovered from it")
+    return raw_sbc - prior_sbc, None
 
 
 def detect_growth_stock_mode(metrics_data: Dict, financials_data: Dict, *, ticker: str) -> Dict:
@@ -587,7 +670,22 @@ def detect_growth_stock_mode(metrics_data: Dict, financials_data: Dict, *, ticke
             # falsely trip high_sbc_ratio). Quarterly path only; no-op for
             # Q1 / annual / missing-prior / already-discrete rows.
             if not is_annual:
-                sbc = _discrete_quarter_sbc(latest_cf, sbc_cf_rows, sbc)
+                basis, basis_reason = _sbc_period_basis(latest_cf, sbc_cf_rows)
+                if basis is None:
+                    # Neither answer is safe to guess: a YTD row read as
+                    # discrete overstates the ratio ~Nx, and a discrete row
+                    # read as YTD understated ADBE's by 21x. Skip, and say
+                    # which question could not be answered.
+                    result["trigger_values"]["sbc_ratio_skipped"] = basis_reason
+                    sbc_pair = None
+                elif basis == "cumulative":
+                    sbc_de, de_reason = _discrete_quarter_sbc(
+                        latest_cf, sbc_cf_rows, sbc)
+                    if sbc_de is None:
+                        result["trigger_values"]["sbc_ratio_skipped"] = de_reason
+                        sbc_pair = None
+                    else:
+                        sbc = sbc_de
             # ISS-220 4.34 (Loop38 cycle 1, iter7): two-step `is not
             # None` selection. Pre-fix `_sf(a) or _sf(b)` treated a
             # legitimate `total_revenue=0` as falsy and silently
@@ -600,7 +698,7 @@ def detect_growth_stock_mode(metrics_data: Dict, financials_data: Dict, *, ticke
             raw_rev = tr if tr is not None else latest_is.get("revenue")
             revenue = _sf(raw_rev)
 
-            if revenue and revenue > 0:
+            if sbc_pair is not None and revenue and revenue > 0:
                 sbc_ratio = abs(sbc) / revenue  # SBC is often negative in cash flow
                 result["trigger_values"]["sbc_ratio"] = round(sbc_ratio, 4)
                 result["trigger_values"]["sbc_amount"] = sbc

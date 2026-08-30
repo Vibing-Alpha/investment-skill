@@ -162,11 +162,26 @@ isolation is meaningless — context is everything.
 
    **Read `status` and `warnings` on this file before using it** (same rule as
    `fcf_inputs.json` below). `status: "ok_with_warnings"` means the producer
-   deliberately withheld or qualified something — most often `current_from_api`
-   was omitted because the snapshot's period basis could not be established, in
-   which case the live cross-check is UNAVAILABLE, not merely absent. Say so in
-   the write-up and lower confidence accordingly; do not treat a missing
-   `current_from_api` as a normal gap.
+   deliberately withheld or qualified something, and it has more than one
+   cause — read the warning text, never the status alone:
+
+   - `current_from_api` omitted because the snapshot's period basis could not
+     be established: the live cross-check is UNAVAILABLE, not merely absent.
+   - a **share count basis break**: `outstanding_shares` stepped between two
+     adjacent quarters by more than the capital base explains — the signature
+     of a split or reverse split, though the producer observes the step and
+     the equity, not the corporate action itself. Every window before that
+     date was DROPPED: this provider's price history is retroactively
+     adjusted onto the current share basis while those quarters' share counts
+     are not, so their market cap would be wrong by that factor. The band is
+     then SHORTER than its date range suggests — count the entries in
+     `quarterly_detail`, say how many you have and over what span, and treat
+     anything under ~6 points as a weak anchor rather than a median to revert
+     to. One or two points is not a band at all; say so and drop the
+     self-historical anchor.
+
+   Say which one fired in the write-up and lower confidence accordingly; do
+   not treat a missing `current_from_api` as a normal gap.
 
 2. **Peer comparison** (from `peer_multiples.json`): How does the market price
    this company vs comparable businesses? Use peer_tickers from
@@ -360,6 +375,15 @@ heuristic-picked base).
 ### Reverse DCF Limitations
 
 The implied growth rate is only as meaningful as the base FCF is representative.
+When `fcf_inputs.json` has `status: "error"` the REASON is in `errors` — a
+LIST, not a `reason` / `error` / `notes` scalar. Probing the singular names
+returns nothing and the file reads as "failed, cause unstated" when it in
+fact names the row, the ratio, the threshold and the consequence. Read
+`errors` and quote it. One fail-close there directly removes the reverse DCF
+and the FCF-yield lens, and it commonly coincides with `historical_multiples`
+suppressing EV/EBITDA for the same cash-flow reason — check that file rather
+than assuming it. Saying which one reason removed what is the whole point.
+
 Check `fcf_inputs.json` for `warnings` — they flag known reliability issues:
 
 - **Negative-FCF quarters**: If 1+ of the 4 TTM quarters had zero/negative FCF,

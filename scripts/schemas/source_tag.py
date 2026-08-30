@@ -107,15 +107,29 @@ def check_websearch_binding(value: str, *, artifact: str, path: str) -> None:
             # loop below — SOURCE_TAG_RE reports the OUTER kind, so the
             # binding grammar never runs on the citation. Measured in 5 real
             # marked artifacts (MRAAY 2026-08-13, P 2026-08-10) and reported
-            # from the 2026-08-28 Cowork run. Tag by ONE source channel per
-            # bracket (.claude/rules/anti-hallucination.md); split them.
+            # from the 2026-08-28 Cowork run.
+            #
+            # SCOPE — WebSearch ONLY, and the message says so. This is a
+            # WebSearch-BINDING check: WebSearch is the one kind with a
+            # binding grammar (outlet + url + accessed date), so it is the
+            # one kind nesting can smuggle past a check. A nested `API:` or
+            # `Calc:` escapes nothing. The message used to read "each bracket
+            # carries exactly ONE source KIND", which is a rule this function
+            # does not apply: measured over the 1,897 stored artifacts,
+            # 1,153 brackets mix kinds and 814 of those are the
+            # `[Calc: … from [API: <file>, <field>]]` operand attribution
+            # `prompts/` explicitly asks a Calc to carry. Enforcing the
+            # sentence literally would reject all of them (2026-08-30
+            # score-business feedback ①).
             if _NESTED_WEBSEARCH_RE.search(m.group(2)):
                 raise SchemaError(
                     artifact, path,
                     f"nested WebSearch tag inside {m.group(1)} tag "
-                    f"{m.group(0)!r}: each bracket carries exactly ONE "
-                    f"source KIND — emit the WebSearch citation as its own "
-                    f"[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]",
+                    f"{m.group(0)!r}: a WebSearch citation must stand in its "
+                    f"OWN bracket, or its outlet/url/accessed-date binding is "
+                    f"never checked — emit it as "
+                    f"[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>] "
+                    f"alongside the {m.group(1)} tag",
                 )
             continue
         descriptor = m.group(2).strip()

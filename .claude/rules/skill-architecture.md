@@ -48,6 +48,23 @@ When creating or modifying skills:
    existence gate** (`[ -s "<path>/file.md" ] || { echo "FATAL…" >&2; exit 1; }`)
    — it catches a MISSING / EMPTY deliverable (the common silent-failure mode),
    though not a mid-file delimiter collision (handle that via the unique sentinel).
+
+   **Say WHICH MACHINE the repo is on, in the dispatch prompt itself.** A
+   subagent's Read / Write / Bash default to the agent's OWN container, and on
+   a bridged host that is not where the repo is — so a subagent following an
+   unqualified "write it with the Write tool" writes a file that exists,
+   somewhere nobody will look, and the orchestrator's `[ -s ... ]` gate then
+   reports "the agent did not write the file". The diagnosis points at the
+   wrong cause and a re-dispatch fails the same way (feedback 2026-08-30
+   score-business ⑧ / investment-thesis ⑦: all 8 dispatches needed this line
+   hand-added; 8/8 succeeded once it was there). Detect it the way the
+   orchestrator already knows — if IT reaches the repo through a bridged bash
+   tool, so must every agent it dispatches — and add one sentence naming the
+   tool and the root, e.g.: *"The repo is on the user's device, not in your
+   container: do every read and write through `<the bridged bash tool>`; the
+   repo root is `<absolute path>`. Your own Read/Write/Bash address a
+   different filesystem and must not be used for these paths."* On a
+   single-machine host the sentence is simply omitted.
 9. **Artifacts live under `<ROOT>/reports/` — never improvise a fallback.**
    If `allocate-bq-run` / a report write fails (corrupt mount, permissions),
    STOP and surface the error to the user. Do NOT redirect output to `/tmp`,

@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.19.0 — 2026-08-31
+
+- market-cap split-basis guard, SBC period-basis probe, and the statement-integrity coverage checks
+
 ## v1.18.0 — 2026-08-30
 
 - Repair a null anchor close from the same Yahoo response; make an unanchored session visible where it is acted on

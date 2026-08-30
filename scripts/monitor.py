@@ -671,6 +671,24 @@ def render_digest(plan: dict, probe: dict) -> str:
         lines.append("## Data warnings")
         lines.extend(f"- {_oneline(w)}" for w in warns)
         lines.append("")
+    # Provenance, NOT a warning — see `price_provenance`. Its own section so a
+    # run whose numbers are all sound does not read as a run with a fault.
+    prov = probe.get("price_provenance") or {}
+    rows = [r for r in (prov.get("meta_backfilled") or []) if isinstance(r, dict)]
+    if rows:
+        # Grouped BY SESSION so each symbol stays attached to the session its
+        # close was taken from — two symbols anchored to different sessions is
+        # a different fact from both being anchored to one.
+        by_session: dict = {}
+        for r in rows:
+            by_session.setdefault(str(r.get("session") or "unknown"), []).append(
+                str(r.get("symbol")))
+        lines.append("## Data provenance")
+        for sess in sorted(by_session):
+            lines.append(
+                f"- anchor-session close of {sess} came from the META QUOTE, not a "
+                f"daily bar, for: {_oneline(', '.join(sorted(by_session[sess])))}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -736,6 +754,52 @@ def _output_language(strategy_path="strategy.yaml"):
             return (yaml.safe_load(f) or {}).get("output_language") or "zh-CN"
     except (OSError, yaml.YAMLError):
         return "zh-CN"
+
+
+def price_provenance(snapshot) -> dict:
+    """Which anchor-session closes came from the meta quote, not a daily bar.
+
+    v1.18.0 back-fills a missing bar close from the same tape's meta quote, so
+    `anchor_session_covered` reads true and the value is right — but it is a
+    source-grade DOWNGRADE, and nothing carried it to the reader (feedback
+    2026-08-30 monitor ②: the whole cross-section was meta-sourced and the
+    digest read entirely healthy). Reported as provenance, never as a warning:
+    a back-filled close is not a fault, and rendering it as one teaches the
+    reader to skip the warnings that are.
+
+    Every section of `chart_statuses` is scanned, not just `ticker_prices` —
+    the indices, VIX and the treasury legs are the ones the structural read
+    rests on, and they are not in `per_ticker`.
+
+    Reported as (symbol, session) PAIRS — deliberately not as a ratio, and not
+    as two independent lists. No ratio, because a denominator over these
+    sections would count things that are not alike: treasury point quotes have
+    no bar series to back-fill, a FAILED status has no close at all, and a
+    benchmark the owner also watches is fetched twice (SPY in both `market` and
+    `ticker_prices`). Pairs rather than two sets, because the sessions can
+    differ per symbol and a symbol list beside a session list only implies
+    their cross-product — losing the very correspondence the reader needs
+    (codex review, 2026-08-30).
+
+    One row per SYMBOL: a symbol fetched twice is reported once, back-filled if
+    either reading was, which is the conservative direction for a provenance
+    note. `session` is None when the producer recorded no session for it.
+    """
+    pairs: dict = {}
+    for section in (snapshot.get("chart_statuses") or {}).values():
+        if not isinstance(section, dict):
+            continue
+        for symbol, status in section.items():
+            if not isinstance(status, dict):
+                continue
+            if status.get("close_backfilled_from_meta") is not True:
+                continue
+            sess = status.get("close_backfill_session")
+            sess = sess if isinstance(sess, str) and sess.strip() else None
+            if pairs.get(symbol) is None:
+                pairs[symbol] = sess
+    return {"meta_backfilled": [{"symbol": sym, "session": pairs[sym]}
+                                for sym in sorted(pairs)]}
 
 
 def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN", vendor_aliases=None, identity_map=None):
@@ -826,6 +890,7 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
         "prior_evidence_ids": sorted(load_prior_evidence_ids(monitor_root, current_dirname)),
         "per_ticker": per_ticker,
         "warnings": warnings,
+        "price_provenance": price_provenance(snap),
     }
 
 

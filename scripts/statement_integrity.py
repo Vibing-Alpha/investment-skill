@@ -60,9 +60,31 @@ from typing import Any, Dict, List, Mapping, Optional
 # Columns whose sign is fixed by reporting convention rather than by the
 # business. Each earns its place with a demonstrated failure (see module
 # docstring); do not widen this set without another one.
+# Fields with a FIXED sign convention within one provider's series, so that
+# both signs appearing in one column is evidence of something (a convention
+# change, a netting/reversal, or a mapping error). The detector is generic;
+# only this list decides what it looks at, and a field missing from it is a
+# defect nothing reports — NOW 2026-08-30 carried a -368,000,000 SBC quarter
+# among four positive ones (the 10-Q says +655M) and it passed unremarked
+# into `growth_stock_mode.sbc_ratio`.
+# Fields a PROVIDER TTM ratio divides by, where the column can be populated
+# on some quarters and null on others. A sparse denominator produces a ratio
+# whose numerator spans 12 months and whose denominator spans 3 — positive,
+# correctly signed and ~4x flattering, which is invisible to every other
+# check here. NOW 2026-08-30: `interest_expense` on 1 of 5 quarters,
+# `metrics_snapshot.interest_coverage` 36.55 against a recomputed 7.6x.
+# Add a field here only with a named ratio it corrupts.
+_TTM_INPUT_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("income_statements", "interest_expense",
+     "metrics_snapshot.interest_coverage"),
+)
+_TTM_WINDOW_QUARTERS = 4
+
 _SIGN_CHECKED_FIELDS: tuple[tuple[str, str], ...] = (
     ("income_statements", "interest_expense"),
     ("cash_flows", "capital_expenditure"),
+    ("cash_flows", "share_based_compensation"),
+    ("cash_flows", "depreciation_and_amortization"),
 )
 
 # Periodic reports. Anything else in `form_type` — S-1, S-1/A, F-1, 424B4,
@@ -229,6 +251,58 @@ def _detect_sign_inconsistencies(payload: Mapping) -> List[Dict]:
     return out
 
 
+def _detect_sparse_ttm_inputs(payload: Mapping) -> List[Dict]:
+    """Fields that are populated on SOME of the trailing quarters but not all.
+
+    Reports coverage, never a verdict: a provider TTM ratio built on a
+    partly-null column mixes window lengths, and the consumer cannot tell
+    that from the ratio's face.
+
+    A column null on EVERY quarter is excluded, on the narrower ground that
+    it carries no PARTIAL evidence to mis-weight — not on any claim about
+    what the provider builds from it (measured 2026-08-30: no stored artifact
+    has a wholly-absent trailing-4Q `interest_expense` beside a finite
+    snapshot `interest_coverage`, so the case is unobserved here). If one
+    appears, `snapshot_period_alignment` and the sign check still speak; this
+    detector answers only "is the column partly populated".
+
+    The window is the last four DATEABLE rows of the family, which is not
+    guaranteed to be the window the provider's own ratio used — 8 of 22
+    stored snapshots carry a `report_period` different from their latest
+    statement. `snapshot_period_alignment` is the field that answers that
+    question; this one answers coverage.
+    """
+    out: List[Dict] = []
+    for family, field, ratio in _TTM_INPUT_FIELDS:
+        rows = _chronological(_dict_rows(payload, family))
+        rows = [r for r in rows if _as_date(r.get("report_period")) is not None]
+        window = rows[-_TTM_WINDOW_QUARTERS:]
+        if len(window) < _TTM_WINDOW_QUARTERS:
+            continue      # not a full trailing window — nothing to compare
+        populated = [r for r in window if _finite(r.get(field)) is not None]
+        if not populated or len(populated) == len(window):
+            continue      # wholly absent, or complete
+        out.append({
+            "family": family,
+            "field": field,
+            "window_quarters": len(window),
+            "populated_quarters": len(populated),
+            "populated_periods": [r.get("report_period") for r in populated],
+            "note": (
+                f"`{field}` is reported on {len(populated)} of the trailing "
+                f"{len(window)} quarters. A provider TTM ratio built on it "
+                f"(`{ratio}`) divides a 12-month numerator by a "
+                f"{len(populated)}-quarter denominator, which flatters it by "
+                f"roughly {len(window) / len(populated):.0f}x. This is "
+                f"evidence about COVERAGE, not about the values themselves — "
+                f"each reported figure may be perfectly correct. Recompute "
+                f"from the quarters that carry the field, say which ones, or "
+                f"mark the ratio `unknown`."
+            ),
+        })
+    return out
+
+
 def _detect_snapshot_alignment(payload: Mapping) -> Dict:
     snapshot = payload.get("metrics_snapshot")
     snapshot_rp_raw = (
@@ -375,6 +449,7 @@ def detect_statement_integrity(
             for fam in ("income_statements", "balance_sheets", "cash_flows")
         },
         "sign_inconsistencies": _detect_sign_inconsistencies(financial_output),
+        "sparse_ttm_inputs": _detect_sparse_ttm_inputs(financial_output),
         "snapshot_period_alignment": _detect_snapshot_alignment(
             financial_output),
         "statement_basis_boundaries": _detect_basis_boundaries(

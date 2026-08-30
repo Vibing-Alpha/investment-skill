@@ -228,15 +228,29 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 # FILE inside it — passing the directory makes the stamp exit 1 with
 # "Is a directory", which would kill every second-day run on a ticker that
 # already has a thesis, i.e. exactly when a held position's exit conditions
-# matter most. `include_today` is deliberately NOT set: a run must not be
-# its own prior.
+# matter most. A run must not be its own prior — but "its own" is THIS
+# run's directory, which Step 2 allocated from `today_et`. The resolver's
+# default exclusion instead assumes `session_et`, and on a NON-TRADING day
+# those differ: it would drop the real prior (Friday) and keep the run's
+# own dir. So the run dir is passed explicitly. Its name is re-derived from
+# the captured path rather than from the clock, so a run spanning ET
+# midnight still excludes the directory it is actually writing.
+# The lookup is NOT allowed to fail quietly: a swallowed error reads as
+# `none`, and `none` on a held fund silently reports a re-analysis as the
+# fund's first ever (feedback 2026-08-30 monitor ①).
 PRIOR=$("$PYBIN" -c "
 from pathlib import Path
 from scripts.delta.resolver import find_latest_prior
-d = find_latest_prior('<TICKER>', 'etf-thesis')
+run_dir = Path(r'<captured-REPORT_DIR>').name
+if not (len(run_dir) == 8 and run_dir.isdigit()):
+    raise SystemExit('REPORT_DIR basename %r is not a YYYYMMDD run dir' % run_dir)
+d = find_latest_prior('<TICKER>', 'etf-thesis', exclude_date=run_dir)
 p = (Path(d) / 'etf_thesis.json') if d else None
 print(p.as_posix() if p and p.is_file() else 'none')
-" 2>/dev/null || echo none)
+") || { echo "FATAL: prior-thesis lookup failed — see the error above. Do NOT continue with 'none': that would stamp this run as the fund's first analysis and drop every comparison against the prior thesis." >&2; exit 1; }
+# Say which prior this run is judged against — `none` here on a fund you
+# have analysed before is the visible symptom of a lost comparison.
+printf 'prior thesis: %s\n' "$PRIOR"
 MODEL_ARG=""
 [ -f "<captured-REPORT_DIR>/data/etf_model.json" ] && MODEL_ARG="--model-json <captured-REPORT_DIR>/data/etf_model.json"
 "$PYBIN" -m scripts.etf.stamp --ticker "<TICKER>" \

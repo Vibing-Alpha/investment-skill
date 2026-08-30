@@ -187,6 +187,99 @@ def _median(values: List[float]) -> float:
     return (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+# A share count that steps by this factor between ADJACENT quarters is a
+# candidate basis change. Compared to the alternative of measuring every
+# quarter against the latest one, which a genuine two-year dilution also
+# trips: a basis change is a single STEP, dilution is a slope.
+#
+# 1.2 rather than 1.5, measured: over all 492 consecutive-quarter pairs in
+# the stored corpus a 1.2 bar raises exactly two raw hits (ASTS dilution at
+# 1.349x and 1.280x) and the equity test below clears both — their
+# divergence is 0.81 / 0.83 against a 1.5 bar, while NOW's real 5:1 split
+# sits at 4.38. A 1.5 bar would have walked past 4:3 and 5:4 splits, whose
+# market caps are still out by 33% and 25%.
+_SHARE_BASIS_BREAK_FACTOR = 1.2
+# A basis change moves the share count and leaves the capital base alone; a
+# capital event moves both. The test is scale-free — equity must explain less
+# than HALF the share move, measured geometrically (`equity_ratio <=
+# sqrt(shares_ratio)`) — because a fixed bar cannot serve both ends: one
+# calibrated on a 5:1 split (equity would have to diverge 4.4x) rejects a 4:3
+# split, where the same clean signature only diverges 1.31x.
+#
+# Measured on all four known cases: NOW's 5:1 split sr=5.03 er=1.15 (bar
+# 2.24) FLAGGED; a 4:3 split sr=1.33 er=1.02 (bar 1.16) FLAGGED; SPCX's
+# capital raise sr=2.27 er=3.68 (bar 1.51) passes; ASTS's dilution sr=1.35
+# er=1.66 (bar 1.16) passes. Those two are the ONLY corpus pairs at or above
+# the step threshold, and both correctly pass.
+
+
+def _share_basis_break(windows) -> Optional[tuple]:
+    """The most recent adjacent-quarter STEP in `outstanding_shares`, or None.
+
+    Returns ``(break_report_period, prior_shares, break_shares)`` — every
+    window anchored STRICTLY BEFORE `break_report_period` states its share
+    count on a superseded basis.
+
+    Why this exists (NOW 2026-08-30, live-verified against the provider that
+    day). `market_cap = price x outstanding_shares` is only meaningful when
+    both sides are on ONE share basis. Provider price history is
+    retroactively split-adjusted; provider `outstanding_shares` is NOT
+    reliably restated — NOW reads 208,000,000 for 2025-Q3 and 1,046,000,000
+    for 2025-Q4 across its 5:1 split, while ANET (4:1, 2024-12) reads the
+    post-split 1.25bn for every pre-split quarter. So the two conventions
+    coexist in one feed and "split-consistent by construction" is false: for
+    NOW every pre-split window's market cap was understated ~5x, its `pe`
+    median came out 29.15 against a current 68.87, and a mean-reversion read
+    off that band prices a $145 stock near $47.
+
+    A step of this size can also be a genuine capital event, and those need
+    NO correction — both sides of a share issuance are already on one basis.
+    `shareholders_equity` separates them: a split leaves the capital base
+    alone, a raise moves it too. When equity is unusable on either side of
+    the step (absent, non-numeric, or non-positive — negative equity is real
+    and makes the ratio meaningless) the two cannot be told apart, and the
+    step is treated as a break: a dropped window carrying its reason costs
+    less than a market cap wrong by that factor reaching a valuation.
+    """
+    ordered = []
+    for w in windows:
+        anchor = w[3]
+        value = anchor.balance_row.get("outstanding_shares")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(value) or value <= 0:
+            continue
+        # Adjacency is over the anchors that HAVE a share count. A window
+        # whose count is unusable is skipped for the multiples anyway, so
+        # comparing across it is the only comparison available.
+        ordered.append((anchor.report_period, float(value),
+                        _positive_or_none(anchor.balance_row.get("shareholders_equity"))))
+    ordered.sort(key=lambda t: t[0])
+    break_at = None
+    for (_, prev, prev_eq), (rp, cur, cur_eq) in zip(ordered, ordered[1:]):
+        ratio = cur / prev
+        if not (ratio >= _SHARE_BASIS_BREAK_FACTOR
+                or ratio <= 1.0 / _SHARE_BASIS_BREAK_FACTOR):
+            continue
+        if prev_eq is not None and cur_eq is not None:
+            share_move = max(ratio, 1.0 / ratio)
+            equity_move = max(cur_eq / prev_eq, prev_eq / cur_eq)
+            if equity_move > math.sqrt(share_move):
+                continue     # equity moved with the count — a capital event
+        break_at = (rp, prev, cur)
+    return break_at
+
+
+def _positive_or_none(value) -> Optional[float]:
+    """Finite, strictly-positive float, else None. Bool is rejected, not
+    coerced — `float(True) == 1.0` would manufacture a ratio."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
 def compute_historical_multiples(
     financial_data: Dict,
     price_data: Dict,
@@ -616,6 +709,10 @@ def compute_historical_multiples(
     fragile_denominator_notes: list = []  # probe-2 D5
     ev_windows_with_investments = 0      # probe-2 round-15 F4
     ev_windows_without_investments = 0   # probe-2 round-15 F4
+    # Pre-pass: which windows state their share count on a superseded basis.
+    # Computed over the whole band before any window is priced, because the
+    # answer is a property of the SERIES, not of one window.
+    _basis_break = _share_basis_break(valid_windows)
     for w in valid_windows:
         anchor_q = w[3]
         period_key = anchor_q.report_period
@@ -825,6 +922,23 @@ def compute_historical_multiples(
                     f"forward_anchor_price returned None for "
                     f"target_date={target_date_str} (no weekly bar within "
                     f"14d forward window of report_period+filing-lag)."
+                ),
+            })
+            continue
+        if _basis_break is not None and period_key < _basis_break[0]:
+            skipped_serialized.append({
+                "anchor_report_period": period_key,
+                "failure_kind": "share_count_basis_break",
+                "detail": (
+                    f"outstanding_shares steps {_basis_break[1]:,.0f} -> "
+                    f"{_basis_break[2]:,.0f} at {_basis_break[0]} "
+                    f"({_basis_break[2] / _basis_break[1]:.2f}x), a basis "
+                    f"step the capital base does not explain — the "
+                    f"signature of a split or reverse split. Price history is "
+                    f"retroactively adjusted onto the CURRENT basis, so "
+                    f"price x shares for this earlier window mixes two bases; "
+                    f"window dropped rather than emit a market cap off by "
+                    f"~{max(_basis_break[2] / _basis_break[1], _basis_break[1] / _basis_break[2]):.2f}x."
                 ),
             })
             continue
@@ -1290,6 +1404,22 @@ def compute_historical_multiples(
             status = "ok_with_warnings"
     if _ms_shape_warning:
         out_warnings.append(_ms_shape_warning)
+        if status == "ok":
+            status = "ok_with_warnings"
+    if _basis_break is not None:
+        out_warnings.append(
+            f"share count basis break at {_basis_break[0]}: "
+            f"outstanding_shares steps {_basis_break[1]:,.0f} -> "
+            f"{_basis_break[2]:,.0f}, a "
+            f"~{max(_basis_break[2] / _basis_break[1], _basis_break[1] / _basis_break[2]):.2f}x "
+            f"change the capital base does not explain. "
+            f"Windows anchored before that date were DROPPED — their share "
+            f"count is stated on a superseded basis while the price history "
+            f"is retroactively adjusted onto the current one, so their market "
+            f"cap (and every multiple built on it) would be wrong by that "
+            f"factor. The remaining band is shorter than it looks; treat it "
+            f"as a weak anchor and say so."
+        )
         if status == "ok":
             status = "ok_with_warnings"
     if stale_period_warning:

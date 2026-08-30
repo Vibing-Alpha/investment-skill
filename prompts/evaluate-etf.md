@@ -96,6 +96,44 @@ Two absences worth knowing: there are **no return windows** — no 5-day,
 `rsi_divergence` returns the string `"none"` when there is no divergence; that
 is a real reading, not a missing one.
 
+Those leaves live under `ticker_indicators.<TICKER>`, and that is the
+`field_path` you write: the full dotted path into the artifact, with the real
+ticker in it (`ticker_indicators.SOXQ.macd.macd_line`), never a placeholder.
+
+## The price-structure fields you may cite
+
+`etf_market_snapshot` also carries a closing-basis structure block under
+`ticker_price_structure.<TICKER>` — where the fund sits against its own
+one-year high, and against its moving averages. These are usually the most
+direct evidence there is for a timing call, so prefer them over an indirect
+proxy (`bollinger.middle` is numerically ma20, but a reader cannot tell that
+you meant the moving average):
+
+`anchor_session`, `anchor_close`, `bars_available`, `lookback_sessions`,
+`lookback_complete`, `prior_high_close`, `prior_high_date`,
+`pct_vs_prior_high_close`, `closing_high_status`,
+`high_water_drawdown.status`, `high_water_drawdown.peak_close`,
+`high_water_drawdown.peak_date`, `high_water_drawdown.trough_close`,
+`high_water_drawdown.trough_date`, `high_water_drawdown.depth_pct`,
+`high_water_drawdown.pct_off_trough`, `high_water_drawdown.pct_retraced`,
+`high_water_drawdown.sessions_since_trough`, `moving_averages.ma20`,
+`moving_averages.ma50`, `moving_averages.ma200`.
+
+Plus one indicator leaf outside the guaranteed list above:
+`volume.price_volume_relationship`, which classifies whether a move carried
+volume with it.
+
+**Every key is always present, but some hold `null`.** You are only asked to
+write when readiness already proved the block — it covers the anchor session
+and the one-year lookback (or the fund's whole life) — so there are exactly
+two CLASSES of null to expect: every `high_water_drawdown` measurement when
+its `status` reads `no_active_drawdown` (the fund is at its own high; that
+status IS the finding), and `moving_averages.ma200` on a fund younger than 200
+sessions. `volume.price_volume_relationship` degrades on its own and reads
+`insufficient_data` on a fund with many zero-volume sessions. Cite a field
+only where it holds an actual value: a null cited as a number fails the run,
+and an absence is not evidence of anything.
+
 ## What you write
 
 ### `merit_recommendation` — one of `strong_add`, `add`, `watch`, `pass`, `avoid`
@@ -112,6 +150,13 @@ plainly rather than dress it up:
 
 `merit_evidence` carries at least one bound reference. A merit with no
 evidence is an opinion.
+
+When you cite `max_holding_weight`, cite `coverage_pct` beside it whenever
+that is not null. It is NOT a denominator — each holding weight is already a
+fraction of the whole fund, so `13.06%` does mean 13.06% of the fund. What
+coverage says is how much of the fund the provider actually disclosed: the
+maximum is taken over the rows that came back, and 62% disclosed is a weaker
+basis for a concentration claim than 95% disclosed. Say which one you had.
 
 ### `kind` — one of `broad`, `sector`, `thematic`, `unknown`
 

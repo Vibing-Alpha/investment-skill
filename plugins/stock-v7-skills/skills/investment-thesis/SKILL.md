@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.18.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.19.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -729,7 +729,13 @@ Agent T: <captured-abs-ROOT>/prompts/evaluate-technical.md → <captured-abs-ROO
 
 Compose each dispatch prompt with **concrete absolute paths** (substitute the
 captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
-shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
+shell's variables nor its cwd. `.json` writes via the Write tool are permitted
+by the harness — but permitted is not the same as ARRIVING: if this session
+reaches the repo through a bridged bash tool (the repo is on the user's
+device, not in this container), the subagent's own Write lands in ITS
+container and the file never appears here. Name the tool and the root in the
+dispatch prompt whenever that is how you are reaching the repo — see
+`.claude/rules/skill-architecture.md` #8, "Say WHICH MACHINE the repo is on".
 
 Do NOT include `strategy.yaml` (or any `principles:` / `mandate` content) in
 the Agent V / Agent T dispatches — the evidence layer is lens-free by design;
@@ -1009,6 +1015,14 @@ detected — expected for well-covered large-cap").
 If candidates exist, present them to the user via AskUserQuestion with
 options: (0) skip all, (1..N) investigate candidate N. On skip,
 proceed to Step 7.
+
+**`AskUserQuestion` is the presentation, not the gate.** Where the host does
+not offer that tool — it is absent on some, and Phase 1 itself never needs it
+— ask in plain text: list the candidates numbered the same way, say that 0
+skips, and WAIT for the reply. Do not treat a missing tool as a reason to
+skip Phases 2-4; the same applies to every `AskUserQuestion` below. What must
+not happen is the analysis proceeding without the user's choice, and a text
+question satisfies that (feedback 2026-08-30 investment-thesis ⑥).
 
 On user selection:
 

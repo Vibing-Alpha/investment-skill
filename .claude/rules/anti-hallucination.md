@@ -27,14 +27,28 @@ arithmetic or an explicit comparison — with the formula/comparison shown. So a
 `[News: ...]`. Likewise insider/estimates/earnings → `[API: 04_insider_data]`
 / `[API: 06_analyst_estimates]` / `[API: 07_earnings]`.
 
-**One KIND per bracket — never nest.** Each `[...]` carries exactly one
-source KIND and one source. A citation packed inside another kind's brackets
-(`[Filing: 10-Q; WebSearch: outlet, url, accessed ...]`,
-`[Calc: a / b = c, from WebSearch: ...]`) reports the OUTER kind to the
-validator, so the inner citation escapes every binding check. Emit them as
-adjacent tags instead: `[Filing: 10-Q] [WebSearch: outlet, url, accessed ...]`.
-Marked artifacts fail closed on a nested WebSearch token
-(`scripts/schemas/source_tag.py`).
+**Never nest a WebSearch citation in another kind's bracket.** A citation
+packed inside another kind's brackets (`[Filing: 10-Q; WebSearch: outlet,
+url, accessed ...]`, `[Calc: a / b = c, from WebSearch: ...]`) reports the
+OUTER kind to the validator, so the inner citation escapes the outlet / url /
+accessed-date binding check. Emit them as adjacent tags instead:
+`[Filing: 10-Q] [WebSearch: outlet, url, accessed ...]`. Marked artifacts
+fail closed on a nested WebSearch token (`scripts/schemas/source_tag.py`).
+
+Only the WebSearch case is ENFORCED, and the gate's message says so. That is
+a migration decision, not a claim that the others are harmless: scanning the
+1,897 stored artifacts found 1,153 brackets carrying a second KIND token, the
+bulk of them `[Calc: <formula>, from [API: <file>, <field>]]` — the operand
+attribution a Calc is supposed to carry — so a general gate would fail-close
+on the existing corpus and needs its own migration.
+
+**The residual is real, so write the operand path BARE.** A nested bracket
+ends the outer tag's match at its own `]`, which hides the inner descriptor
+from the per-tag checks: `[Calc: 1 + 1 = 2 from [API: <field>]]` passes today,
+while the same `[API: <field>]` alone is refused as placeholder theater
+(reproduced 2026-08-30). So write
+`[Calc: 150.3/507.0 = 0.2964, from 02_financial_data, income_statements.gross_profit]`
+— the field path named, no second bracket.
 
 Content without a source tag is invalid. No source = does not exist.
 

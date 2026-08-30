@@ -463,7 +463,13 @@ Agent C: <captured-abs-ROOT>/prompts/score-industry.md → <captured-abs-ROOT>/<
 
 Compose each dispatch prompt with **concrete absolute paths** (substitute the
 captured root + the printed `REPORT_DIR`) — a subagent inherits neither this
-shell's variables nor its cwd, and `.json` writes via the Write tool are allowed.
+shell's variables nor its cwd. `.json` writes via the Write tool are permitted
+by the harness — but permitted is not the same as ARRIVING: if this session
+reaches the repo through a bridged bash tool (the repo is on the user's
+device, not in this container), the subagent's own Write lands in ITS
+container and the file never appears here. Name the tool and the root in the
+dispatch prompt whenever that is how you are reaching the repo — see
+`.claude/rules/skill-architecture.md` #8, "Say WHICH MACHINE the repo is on".
 Agent inputs as in pre-delta (02_financial for fundamental; 02+06+03+05+07
 for forward — the prompt derives beat/miss from estimates-vs-actuals and
 reads `currency_consistency.status` from 02; 02+03 + WebSearch for

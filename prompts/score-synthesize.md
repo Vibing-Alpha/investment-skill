@@ -44,6 +44,20 @@ including its url + access-date binding
 (`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`); never strip the
 binding and never relabel it `[API: 07_earnings]`.
 
+**Every UPSTREAM citation you emit is COPIED, never re-typed.** You have no
+WebSearch and no raw API files, so you cannot author a `[WebSearch: ...]`,
+`[API: ...]` or `[Filing: ...]` tag — the only correct ones are already in
+`scores/*.json`. (A `[Calc: ...]` for arithmetic YOU perform here is yours to
+write, naming its operands' field paths as usual.) Find the tag on the
+dimension fact you are carrying and paste it character-for-character,
+including the url and the access date. Three shapes have each been emitted from memory beside a
+dimension file that already held the correct one twelve times over, and each
+fails the load: two outlets compressed into one bracket
+(`[WebSearch: <outlet A> release; <outlet B> slides]`), a bound tag shortened
+to `[WebSearch: <outlet>]`, and the article's PUBLICATION date substituted for
+the access date (`[WebSearch: <outlet>, <YYYY-MM-DD>]`). If you cannot find
+the tag to copy, the claim does not belong in synthesis.
+
 **On `partial` tier**: one or two dims were copied from the prior run.
 Reconsider `watchlist_recommendation`, `conviction`, and the `thesis`
 sentence in light of the fresh dims (forward + industry), but preserve

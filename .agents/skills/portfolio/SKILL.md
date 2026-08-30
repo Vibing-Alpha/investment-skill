@@ -1155,6 +1155,65 @@ silently); the Write tool sidesteps all of it. Content shape:
 (`candidate_scan` is REQUIRED when `orders_proposed` is empty — Phase 3
 zero-order discipline.)
 
+**If the Write tool cannot reach that path, use this block instead.** When the
+repo is a REMOTE DEVICE mount and this session runs in a cloud container, the
+two filesystems are invisible to each other: the Write tool writes the
+container, `<captured-abs-ROOT>` names the device, and a Read of the path you
+just "wrote" returns `File does not exist`. The bash tool is the bridged one,
+so on that host the heredoc is the path available, not the discouraged one.
+What the rule above is really protecting is the BLOB SURVIVING INTACT, so the
+block below keeps as much of that as a shell can: the heredoc is parsed and
+its top-level keys checked BEFORE anything is written, and the write goes to a
+temp file renamed into place. A document cut mid-JSON, or cut at a line that
+happened to equal the delimiter and so lost a trailing key, fails the block —
+it never half-replaces a blob that was already there.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY" >&2; exit 1; }
+# The heredoc body is NEVER written straight to disk: it is parsed first, and
+# only a document that parses is written. `sys.stdin.reconfigure` because the
+# blob carries CJK and an inline `-c` does not import `scripts` (its UTF-8
+# reconfigure never runs) — on a Windows cp936 console the read would raise on
+# the first non-ASCII byte. The write is temp-then-rename: a direct
+# open(path, "w") truncates the blob already there before writing the new one,
+# a destructive failure surface the Write tool did not have.
+"$PYBIN" -c "
+import json, os, sys
+sys.stdin.reconfigure(encoding='utf-8')
+blob = json.loads(sys.stdin.read())
+# ALL SIX authored keys, not just the two lists: a heredoc cut at a delimiter
+# collision drops TRAILING keys and still parses, and the logger only warns
+# about some of them. Requiring the full set is what makes a silent truncation
+# loud (codex review, 2026-08-30).
+missing = [k for k in ('decisions', 'orders_proposed', 'follow_ups',
+                       'candidate_scan', 'principle_audit_interpretation', 'notes')
+           if k not in blob]
+if missing:
+    raise SystemExit('blob is missing %s — truncated or malformed' % ', '.join(missing))
+for key in ('decisions', 'orders_proposed'):
+    if not isinstance(blob.get(key), list):
+        raise SystemExit('blob has no %s list — truncated or malformed' % key)
+dest = 'reports/portfolio/$ETDAY/.decisions_blob.json'
+tmp = dest + '.tmp'
+with open(tmp, 'w', encoding='utf-8') as fh:
+    json.dump(blob, fh, ensure_ascii=False)
+os.replace(tmp, dest)
+print('WROTE decisions=%d orders_proposed=%d' % (len(blob['decisions']), len(blob['orders_proposed'])))
+" <<'DECISIONS_BLOB_JSON_EOF' || { echo "FATAL: the blob was NOT written — see the error above. Re-emit it; do NOT hand-patch the file on disk." >&2; exit 1; }
+<the-decisions-blob-json>
+DECISIONS_BLOB_JSON_EOF
+```
+
+**Read the two printed counts back against what you authored.** The checks
+above catch a document that lost a whole key; they cannot catch one that lost
+an ENTRY — a `decisions` list one ticker short parses and carries all six
+keys. The counts are the only thing that catches that, and they are yours to
+check: nothing downstream can. If either is not what you wrote, re-emit with a
+different delimiter, and do not proceed to the logger on a mismatch.
+
 Then call the logger. If the write command fails (the `|| { …; exit 1; }`
 guard fires), STOP — the refusal reason is on stderr, the validator
 output is preserved for the re-run, and NO decision log exists yet:

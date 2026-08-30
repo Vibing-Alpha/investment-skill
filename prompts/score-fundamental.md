@@ -283,7 +283,8 @@ in it says a number is wrong, only that it cannot be taken at face value
 without corroboration. Read it BEFORE computing any ratio.
 
 **`sign_inconsistencies`** — a column that carries both signs within one
-series (`interest_expense`, `capital_expenditure`). `sign_runs` is the
+series (`interest_expense`, `capital_expenditure`,
+`share_based_compensation`, `depreciation_and_amortization`). `sign_runs` is the
 run-length view: `[["positive", 15], ["negative", 1]]` is one stray period,
 `[["negative", 7], ["positive", 3]]` is a convention change part-way through.
 Either way, do NOT quote a provider-derived ratio built on that column —
@@ -291,6 +292,18 @@ Either way, do NOT quote a provider-derived ratio built on that column —
 quarter. Recompute from the periods whose sign matches the dominant
 convention, say which periods you used, or mark the metric `unknown`. Never
 "fix" the sign yourself and never silently drop the column.
+
+**`sparse_ttm_inputs`** — a column reported on SOME of the trailing four
+quarters and null on the others. This is a coverage defect, not a value
+defect: every figure present may be exactly right, which is why the sign
+check above cannot see it. The provider's formula is not visible from here,
+but the arithmetic is: NOW's `metrics_snapshot.interest_coverage` read 36.55
+while only one of the trailing four quarters carried `interest_expense`, and
+36.55 x that quarter's 66M is exactly the TTM EBIT — a twelve-month numerator
+over a three-month denominator, against a recomputed 7.6x. Treat any snapshot
+ratio over a sparse column as unverified: recompute from the quarters that
+carry the field and say which ones, or mark it `unknown`. Never annualise the
+partial column to fill the gap.
 
 **`snapshot_period_alignment`** — when `statements_newer_than_snapshot` is
 above 0, `metrics_snapshot` describes an OLDER capital base than the
