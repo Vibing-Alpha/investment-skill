@@ -2588,6 +2588,70 @@ def cmd_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def _review_state_freshness(prior: pathlib.Path,
+                            log: Dict[str, Any],
+                            state_path: Optional[str]) -> None:
+    """Print whether the prior decision set still covers the CURRENT state.
+
+    Feedback 2026-08-30(b) ②: after a same-day `portfolio-state.yaml` edit,
+    review's three lines all looked healthy, so an unattended rerun had to
+    choose blind between clobbering a still-valid log and missing a real
+    change. Both facts were already in review's own inputs. Advisory only —
+    never changes the exit code, because "the state moved" is a reason to
+    look, not a reason to stop.
+    """
+    if not state_path:
+        return
+    sp = pathlib.Path(state_path)
+    try:
+        state_bytes = sp.read_bytes()
+        state = yaml.safe_load(state_bytes.decode("utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return  # cmd_write owns the loud refusal; review must not crash Step 0
+    if not isinstance(state, dict):
+        return
+    cur_sha = hashlib.sha256(state_bytes).hexdigest()
+
+    prior_sha = None
+    ctx_path = prior.parent / ".decision_ctx.json"
+    if ctx_path.exists():
+        try:
+            ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            ctx = None
+        if isinstance(ctx, dict):
+            v = ctx.get("state_file_sha256")
+            if isinstance(v, str) and v:
+                prior_sha = v
+    if prior_sha is None:
+        # Kept deliberately (codex 2026-08-31 Q9 proposed cutting it): once
+        # STALE exists, SILENCE starts to mean "unchanged", so an unsealed
+        # prior run would newly mislead — a hazard this feature creates.
+        print(f"\n  state: prior run carries no authoring seal — cannot tell "
+              f"whether {sp.as_posix()} changed since it.")
+    elif prior_sha != cur_sha:
+        print(f"\n  STALE: {sp.as_posix()} changed since the prior run "
+              f"({prior_sha[:8]}… -> {cur_sha[:8]}…)")
+
+    # str-only on BOTH sides: YAML 1.1 coerces the real ticker `ON` (ON
+    # Semiconductor) to the boolean True, and sorting/joining a mixed
+    # str+bool set raises TypeError — at Step 0, before any analysis.
+    holdings = state.get("holdings") or {}
+    expected = {t for t in holdings if isinstance(t, str)} if isinstance(
+        holdings, dict) else set()
+    watchlist = state.get("watchlist") or []
+    if isinstance(watchlist, list):
+        expected |= {t for t in watchlist if isinstance(t, str)}
+    covered = {
+        d.get("ticker") for d in (log.get("decisions") or [])
+        if isinstance(d, dict) and d.get("ticker")
+    }
+    uncovered = sorted(expected - covered)
+    if uncovered:
+        print(f"  UNCOVERED: {', '.join(uncovered)} — the prior decision set "
+              f"does not cover these")
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from scripts.delta.calendar import today_et
     # Use ET trading day to match run-dir naming + delta-layer semantics
@@ -2670,6 +2734,11 @@ def cmd_review(args: argparse.Namespace) -> int:
     else:
         print("\n  No follow-ups due.")
 
+    try:
+        _review_state_freshness(prior, log, getattr(args, "state", None))
+    except Exception as exc:  # fail-open-ok: an ADVISORY may never take Step 0 (and with it the whole run) down; every loud refusal on these same inputs is cmd_write's
+        print(f"  state: advisory unavailable ({type(exc).__name__})")
+
     # unfilled execution outcomes flag
     outcomes = log.get("execution_outcomes") or {}
     if outcomes.get("reflection") is None and confirm in ("accepted", "modified"):
@@ -2702,6 +2771,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     r = sub.add_parser("review", help="Review prior run's follow-ups")
     r.add_argument("--reports-dir", default="reports/portfolio")
     r.add_argument("--today", default=None, help="YYYY-MM-DD (default: today)")
+    r.add_argument(
+        "--state",
+        default="portfolio-state.yaml",
+        help=(
+            "portfolio-state.yaml path — compared against the prior run's "
+            "authoring seal to report state drift + uncovered tickers "
+            "(advisory; never changes the exit code)."
+        ),
+    )
     r.set_defaults(func=cmd_review)
 
     args = parser.parse_args(argv)

@@ -55,6 +55,10 @@ htmlcov/
 strategy.yaml.bak*
 portfolio-state.yaml.bak*
 
+# codex/superpowers review logs — session scratch, not product
+# (docs/superpowers/ is the TRACKED plan+spec tree; this is a different path)
+.superpowers/
+
 # Your own track-record data — never commit these.
 reports/track-record/
 /trade-journal.jsonl

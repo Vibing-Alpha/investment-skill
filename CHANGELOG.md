@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.19.1 — 2026-08-31
+
+- Portfolio log staleness advisory + atomic-write orphan fix
+
 ## v1.19.0 — 2026-08-31
 
 - market-cap split-basis guard, SBC period-basis probe, and the statement-integrity coverage checks

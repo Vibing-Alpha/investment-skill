@@ -135,12 +135,31 @@ def write_pair_atomic(json_data, json_path, text, text_path):
             f.write(text)
         t_fd = None
         # Snapshot the current canonical JSON so a failed text commit can
-        # roll it back.
+        # roll it back, then PARK it at a deterministic dot-file sibling
+        # (feedback 2026-08-30(b) ①). The cleanup unlink below is
+        # best-effort, and on the Cowork FUSE mount — which refuses unlink
+        # of an existing file while still allowing writes and renames — a
+        # mkstemp random name meant every same-day rerun accumulated
+        # another ~100KB `tmpXXXXXX.bak` nobody could remove, visible to
+        # every `*` glob of the run dir. A fixed name is overwritten by the
+        # next run instead, so at most one hidden snapshot remains. Parked
+        # by rename, not by an in-place open(): that mount truncates an
+        # overwrite to the OLD length, which would hand the rollback path a
+        # CORRUPT snapshot to restore over the canonical JSON. Parking is
+        # housekeeping only — a refusal here (a rename-over-existing lock,
+        # which the old unique name could not hit) degrades to the old
+        # behaviour rather than costing the caller its commit.
         if os.path.exists(json_path):
-            b_fd, j_backup = tempfile.mkstemp(dir=str(json_dir), suffix=".bak")
+            b_fd, j_backup = tempfile.mkstemp(dir=str(json_dir), suffix=".tmp")
             with os.fdopen(b_fd, "wb") as bf:
                 with open(json_path, "rb") as cf:
                     bf.write(cf.read())
+            j_parked = str(json_dir / ("." + Path(json_path).name + ".rollback"))
+            try:
+                os.replace(j_backup, j_parked)
+                j_backup = j_parked
+            except OSError:
+                pass
         # Both tmps are on disk; commit in canonical-first order.
         os.replace(j_tmp, json_path)
         j_tmp = None

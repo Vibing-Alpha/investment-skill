@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.19.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.19.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -122,6 +122,20 @@ along with:
 - Follow-up events whose date has arrived (`date <= today`)
 - A warning if no reflection is recorded — but ONLY when confirmation is
   `accepted` or `modified`, so silence here does not mean "nothing pending"
+- `STALE:` when `portfolio-state.yaml` has changed since the prior run
+  authored its decisions, and `UNCOVERED:` listing current holdings/watchlist
+  tickers that prior decision set does not cover. Both are ADVISORY (the exit
+  code never moves) and together they are the EVIDENCE for the same-day-rerun
+  question — whether the prior log still stands or a state edit has superseded
+  it. They do not settle it, and neither line means the prior run may be
+  skipped: the gate below still binds.
+  `STALE` is a BYTE comparison against the prior run's Step-5 authoring seal,
+  so read it as "the file moved", not "the decisions are void": it also fires
+  on an edit that supersedes nothing (the sanctioned post-log `nav_peak`
+  ratchet), and the seal is per-DIRECTORY, not per-run — a rerun that authored
+  a seal and then failed before logging leaves a NEWER seal beside the older
+  `decisions.json`, which can mask a real drift. `UNCOVERED` is the
+  decision-relevant half and is derived from the prior `decisions[]` itself.
 
 **Gate — open the prior `decisions.json` before Step 1.** When `review` exits 0 and prints a prior-run path, you MUST read the file at
 the path it printed. Any NON-ZERO exit means STOP: the review gate did not complete (its schema-validation path returns 1 and prints a
