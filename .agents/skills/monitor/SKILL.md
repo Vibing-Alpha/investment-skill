@@ -299,3 +299,16 @@ simply wasted.
 Invoke one, let it complete (it owns its own cascades), then the next. Do NOT trigger
 anything the user did not select. `/monitor` itself decides nothing about the trades —
 the target skill does.
+
+**`/portfolio` goes LAST, after every per-ticker item, whatever order the plan
+lists them in.** It is the only route that READS what the others WRITE, and the
+dependency is invisible at the moment it matters: `find_latest_prior` skips a run
+whose `run_meta` is not yet `completed`, so a `/portfolio` invoked first falls
+back to YESTERDAY's `bq_analysis.json` / `investment_thesis.json` — for exactly
+the tickers this run flagged as needing a refresh — and `/portfolio` Step 3's
+`stale_thesis` threshold is >7 ET days, so a one-day-old artifact classifies
+`fresh` and nothing warns. Priority does not decide this: `/portfolio` is emitted
+at `critical` when a holding needs a position decision, so the plan will often
+list it above the refreshes it depends on. Run it last anyway, and if a
+per-ticker item FAILED, say so to the user before invoking it — its decisions
+will rest on that ticker's prior artifact.

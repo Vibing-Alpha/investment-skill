@@ -3,6 +3,17 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.20.0 — 2026-09-01
+
+- A daily bar missing from the MIDDLE of a price window is now DETECTED and named. A data source can return a session with every field intact except the close; the bar is then dropped and the gap is invisible — every watchdog until now looked at the ENDS of the series. Measured on one real day: a single-session move read as a two-session move on 9 of 19 symbols, every moving average was computed over a window short one session, and one volume signal came out backwards. The numbers are still computed on the short window — what changes is that /monitor's digest now says which session is missing, and /portfolio names it too.
+- /portfolio Step 4 now flags an ANCHORED BUT HOLLOW ticker. Coverage of the anchor session is a floor, not a proof: a gap right before it leaves the ticker with one usable bar and every closing-basis fact unknown, while the old gate read green. It is a NOTE, not a stop — the run can still conclude from the indicator layer and the thesis levels.
+- /portfolio Step 0's STALE line now names WHICH top-level key of portfolio-state.yaml moved. Two hash prefixes could not tell 'you executed the recommendation' (a new open order) from 'the thesis was overturned' (holdings edited) — opposite directions, identical line. A comment or a re-indent now names nothing rather than everything.
+- A thesis's invalidation conditions may no longer freeze a rolling number as a fixed price level. A volatility stop recomputed from each day's price and ATR was being written down as a structural level and then checked against daily as if it were a fact about the chart — one was 3.1% away from the real structure and appeared in no price bar. Write the rule ('MA50 minus 1x ATR'), not today's answer.
+- An ETF's staleness row now shows the FUND's own thesis age. It previously showed two stock ages a fund has no artifacts for, which could read 'refreshed yesterday' beside a state of 'stale' on the same line.
+- Three cleanup steps that failed on a delete-restricted mount (Cowork) no longer turn a fully successful run into a failed-looking one: /score-business and /investment-thesis changelog closers, and /portfolio Step 8.
+- A ticker with no 10-K on file (a recent listing) is analysable again: /score-business Step 3 carries one narrow, explicitly-bounded exemption to its stop-on-non-zero rule, with a real outage still stopping the run.
+- /monitor runs /portfolio LAST of the items it triggers. It is the only route that reads what the others write, and nothing said so — an agent following the plan's own priority order could run it against yesterday's artifacts.
+
 ## v1.19.1 — 2026-08-31
 
 - Portfolio log staleness advisory + atomic-write orphan fix

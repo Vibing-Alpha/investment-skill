@@ -247,6 +247,25 @@ thesis falsifiable and prevents anchoring bias.
 Each invalidation condition should be tied to a data point the user can
 actually monitor.
 
+**A FIXED price level in an invalidation condition must be a STRUCTURAL
+level, never a rolling one.** Take it from `technical.json`
+`structure.support_levels[].price` / `structure.resistance_levels[].price`,
+or from a valuation scenario target — prices the market actually traded, or
+a value that does not move on its own. Do NOT copy a number out of `atr.*`
+(`stop_1x` / `stop_1_5x` / `stop_2x`) or `bollinger.*`: those are recomputed
+from THAT DAY's price and volatility every run, so freezing one turns a
+moving number into a defence line nobody knows has drifted. Measured on BE:
+a prior thesis carried 180.10 as a "structural failure level"; it was in fact
+an earlier run's `atr.stop_1_5x`, anchored to that run's 210.77 close and
+20.44 ATR. Three sessions later the same rule computed 175.46, 180.10
+appeared in no daily or weekly OHLC bar, and the real structure sat at
+185.93 — 3.1% away — while `/monitor` checked the price against 180.10 every
+day as if it were a fact about the chart.
+
+A volatility-based invalidation is legitimate — write it as the RULE, so it
+re-evaluates: "closes below MA50 − 1×ATR(14)", "two consecutive closes below
+the lower Bollinger band". Never as that day's arithmetic result.
+
 ## Output — investment_thesis.json
 
 ```json
@@ -387,4 +406,7 @@ but do not need full source tags — those are in the JSON.
 - The user mandate is a LENS, not a FILTER — adjust weighting, never suppress evidence
 - All scenario targets and probabilities must come from valuation.json, not invented
 - thesis_invalid_if conditions must be specific and measurable — no "if things get worse"
+- a FIXED price level in thesis_invalid_if comes from `structure.support_levels` /
+  `resistance_levels` or a valuation target — never a frozen `atr.*` / `bollinger.*`
+  value, which is recomputed daily; write a volatility stop as a rule, not as a number
 - Do not duplicate upstream analysis — synthesize, don't summarize

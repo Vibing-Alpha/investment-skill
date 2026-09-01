@@ -91,13 +91,23 @@ def copy_dimension_scores(
     `source_date` (the prior dir's date). Chained no_ops therefore no
     longer launder provenance newer with every hop.
 
-    Returns {"copied": [...], "skipped_fresh": [...]} (dimension names).
+    `source_date` is therefore a FALLBACK, consulted only when the source
+    carries none — NOT a setter. A caller that echoed its own argument into
+    `.tier_context.json`'s `component_provenance` wrote a provenance the
+    files on disk contradict (feedback 2026-08-31 ⑥: BE's prior dir is
+    `20260828`, its scores carry `2026-08-27`). So the return names the
+    `_source_date` this call actually WROTE, per dimension; read provenance
+    from there rather than from the argument. A dimension skipped by the 4B
+    guard is absent from the map — nothing was written for it.
+
+    Returns {"copied": [...], "skipped_fresh": [...], "source_dates": {...}}.
     """
     import sys
 
     dst_dir.mkdir(parents=True, exist_ok=True)
     copied: List[str] = []
     skipped_fresh: List[str] = []
+    source_dates: dict = {}
     for dim in dimensions:
         src_file = src_dir / f"{dim}.json"
         if not src_file.exists():
@@ -128,11 +138,13 @@ def copy_dimension_scores(
         if "_source_date" not in data:
             data["_source_date"] = source_date
         data["_reason"] = "copied from prior run"
+        source_dates[dim] = data["_source_date"]
         # Atomic write (project convention — matches write_output in
         # every other CLI script).
         write_output(data, str(dst_file))
         copied.append(dim)
-    return {"copied": copied, "skipped_fresh": skipped_fresh}
+    return {"copied": copied, "skipped_fresh": skipped_fresh,
+            "source_dates": source_dates}
 
 
 import re

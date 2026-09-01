@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.19.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.20.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -507,6 +507,18 @@ def bar(t):
     return (tp.get(t) or {}).get("last_bar_session")
 stop_t = sorted(t for t in held if bad(t))
 warn_t = sorted(t for t in tp if t not in held and bad(t))
+# THIRD criterion. `anchor_session_covered` is a FLOOR: an interior gap right
+# before the anchor answers it `true` with `bars_available: 1` and EVERY
+# closing-basis fact still `unknown` (2026-08-31: all 19 symbols at once, a
+# vendor `close: null` on 08-28). The prose below foresaw exactly that shape
+# and nothing checked it, so the run passed the gate on the authoring agent
+# remembering to read `closing_high_status` by hand.
+tps = doc.get("ticker_price_structure") or {}
+def hollow(t):
+    b = tps.get(t) or {}
+    return (b.get("anchor_session_covered") is True
+            and b.get("closing_high_status") in (None, "unknown"))
+hollow_t = sorted(t for t in set(held) | set(tp) if hollow(t))
 # The three legs the regime classifier reads, REQUIRED by name. Scanning
 # only the entries that happen to be present is a fail-open: an absent
 # `regime_inputs`, or one index simply missing, yielded an empty list and
@@ -519,6 +531,15 @@ legs = [i for i in ("SPY", "QQQ", "^DJI")
 for t in warn_t:
     print("NOTE unanchored watchlist ticker " + t + " (last bar " + str(bar(t))
           + ") - it cannot carry a buy/add this run")
+for t in hollow_t:
+    b = tps.get(t) or {}
+    ms = b.get("missing_sessions") or []
+    print("NOTE hollow structure " + t + " - anchored, but closing_high_status"
+          " is unknown on " + str(b.get("bars_available")) + " bar(s)"
+          + (" (no daily bar for " + ", ".join(str(x) for x in ms) + ")" if ms else "")
+          + " - no closing-basis evidence exists for it: a BREAKOUT-path entry"
+          " on this ticker is refused by portfolio_log at Step 8, and it must"
+          " not be reported as neutral")
 for t in stop_t:
     print("STOP unanchored HOLDING " + t + " (last bar " + str(bar(t))
           + ") - every closing-basis fact behind it is unknown", file=sys.stderr)
@@ -757,6 +778,7 @@ ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et
 import hashlib, json, pathlib
 import yaml
 from scripts.delta.resolver import find_latest_prior
+from scripts.portfolio_log import state_key_hashes
 state_bytes = pathlib.Path('portfolio-state.yaml').read_bytes()
 state = yaml.safe_load(state_bytes.decode('utf-8')) or {}
 tickers = sorted(set(list((state.get('holdings') or {}).keys())
@@ -784,6 +806,13 @@ if compiled_p.exists():
     strategy_sha = (yaml.safe_load(compiled_p.read_text(encoding='utf-8')) or {}).get('source_hash')
 tmp.write_text(json.dumps({
     'state_file_sha256': hashlib.sha256(state_bytes).hexdigest(),
+    # WHICH top-level key moved, so the next run's Step 0 `review` can tell
+    # "the recommendation was EXECUTED" (an `open_orders` row appeared) from
+    # "the thesis was OVERTURNED" (holdings edited) — opposite directions
+    # that a whole-file hash pair reports identically (feedback 2026-08-31
+    # portfolio (3)). Hashed by the SAME function review compares with, over
+    # the PARSED value, so a re-indent or a comment names nothing.
+    'state_key_sha256': state_key_hashes(state),
     'thesis_generated_at': thesis_ga,
     # Which STRATEGY authored these decisions. Without it a mid-run
     # principle edit + legitimate recompile let a superseded decision be
@@ -1255,9 +1284,13 @@ ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et
 # survive into this later call). BEST-EFFORT (`|| true`): the log is already
 # written by this point, and on a delete-restricted mount an unguarded `rm`
 # returns 1 and makes a SUCCEEDED Step 8 read as a failed one (feedback
-# 2026-08-29). A leftover here is harmless — Step 6 clears or neutralizes it
-# before the next validate.
-rm -f "reports/portfolio/$ETDAY/.validator_output.json" || true
+# 2026-08-29). `clear_stale`, not `rm -f`: on that mount `rm -f` still prints
+# `Operation not permitted` every single run — a red line under a SUCCEEDED
+# step, which an unattended run reads as a failure (feedback 2026-08-31
+# portfolio (4)) — and it never actually cleared anything, so the artifact
+# survived into a later same-day run. clear_stale deletes where it can and
+# empties where it cannot, and says which it did.
+"$PYBIN" -m scripts.clear_stale "reports/portfolio/$ETDAY/.validator_output.json" || true
 ```
 
 The script REFUSES (exit 2) when proposed orders or open broker orders

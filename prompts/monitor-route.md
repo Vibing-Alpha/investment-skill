@@ -13,7 +13,13 @@ This is your SOLE input (no other files, no WebSearch). It contains, per the
 - `per_ticker[]`: `price`, `indicators` (may be null), `price_status`, `indicators_available`
   (+ `indicator_unavailable_reason`), `anchor_session_covered` (+ `last_bar_session`),
   `news_status (ok|failed)`, `holding {shares,cost_basis}` /
-  `market_value` (held only), `staleness {state, days_since_full_bq, days_since_thesis}`,
+  `market_value` (held only), `staleness {state, days_since_full_bq, days_since_thesis}` — plus
+  `days_since_etf_thesis` on a FUND, where it is the only age that means
+  anything — the other two are INAPPLICABLE to a fund rather than necessarily
+  absent (a ticker scored as a stock before the forwarding detector existed
+  still has a `bq_analysis.json` beside its fund artifact, so they can be
+  non-null and still describe nothing about the fund); the staleness evidence
+  text renders the fund's own age instead,
   `thesis_conditions {invalid_if[], entry_attractive_if[]}` (prose), and `evidence[]` — objects
   `{evidence_id, kind(condition|news|catalyst|staleness), text, meta}`. The `evidence_id`s
   are the ONLY handles you use to reference evidence.

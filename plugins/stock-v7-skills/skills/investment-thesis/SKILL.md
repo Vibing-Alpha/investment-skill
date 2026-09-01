@@ -81,7 +81,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.19.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.20.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -1212,6 +1212,15 @@ PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
   --ticker "$TICKER" --skill investment-thesis)
 TODAY_ET=$("$PYBIN" -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
 DELTA_FILE="$REPORT_DIR/.delta_section.md"
+# clear_stale FIRST, then write. A FAILED append deliberately leaves this
+# staging file in place, so a retry finds it NON-EMPTY — and the
+# delete-restricted mount is documented to leave the TAIL of an over-written
+# file behind, so `>` alone can leave yesterday's leftover prose hanging off
+# today's delta section. This does not cost the operator the failed note:
+# `> "$DELTA_FILE"` already rewrote the file from its first line on every
+# re-run, so the recovery window was always "before you re-run this block",
+# and the guard below says so.
+"$PYBIN" -m scripts.clear_stale "$DELTA_FILE" || { echo "FATAL: could not clear the delta staging file $DELTA_FILE — a leftover tail would be appended to this run's changelog section." >&2; exit 1; }
 printf '## Update %s (thesis)\n\n' "$TODAY_ET" > "$DELTA_FILE"
 cat >> "$DELTA_FILE" <<'THESIS_DELTA_SECTION_EOF'
 <substitute the one-paragraph delta_note the synthesis agent returned in
@@ -1226,13 +1235,18 @@ THESIS_DELTA_SECTION_EOF
   --current "$REPORT_DIR/thesis_summary.changelog.md" \
   --ticker "$TICKER" \
   --delta-section "$DELTA_FILE" \
-  || { echo "FATAL: append_changelog failed — thesis_summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }
+  || { echo "FATAL: append_changelog failed — thesis_summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the clear below is skipped) — READ IT NOW if you need the delta note back: the re-run rewrites it from its first line, exactly as it always did. Fix what the error above names and re-run this block." >&2; exit 1; }
 
 # Only past the gate: the changelog now holds this run's section, so the
-# staging file is redundant. An unconditional rm here would delete the only
-# copy of a delta note the agent would otherwise have to reconstruct from
-# memory, and leave the block exiting 0 over a failed append.
-rm "$DELTA_FILE"
+# staging file is redundant. An unconditional clear here would destroy the
+# only copy of a delta note the agent would otherwise have to reconstruct
+# from memory, and leave the block exiting 0 over a failed append.
+# `clear_stale`, not a bare `rm`: the Cowork FUSE mount refuses to delete an
+# existing file, so the bare `rm` turned a SUCCEEDED append into a non-zero
+# block (feedback 2026-08-31 monitor (5)). clear_stale empties what it cannot
+# delete and still fails when it can do neither — which is why this line
+# deliberately carries no `|| true`.
+"$PYBIN" -m scripts.clear_stale "$DELTA_FILE" || { echo "FATAL: append_changelog SUCCEEDED but the staging file $DELTA_FILE could neither be deleted nor emptied — the changelog is correct; clean this path up by hand before the next run." >&2; exit 1; }
 ```
 
 ### Step 8: Report to user

@@ -1143,6 +1143,58 @@ def _main():
         )
         sys.exit(1)
 
+    # Interior gaps in the window the indicators ACTUALLY use. Every other
+    # completeness field reads an END of the series — `daily_tail_status`
+    # classifies the newest bar, `sessions_behind_last_close` measures that
+    # same edge against the calendar — so a session missing from the MIDDLE
+    # passed all of them (feedback 2026-08-31 monitor ①: Yahoo served
+    # `close: null` for 2026-08-28 and yahoo_finance.py drops such a row
+    # whole; `daily_count` was merely one lower and the status PASSED). The
+    # measured cost was NOT cosmetic: NOW's `volume_ratio_5d_20d` read 0.821
+    # `bearish_divergence` where the restored bar gives 1.064 `neutral`, and
+    # every MA was computed over a window short one session.
+    #
+    # DIAGNOSTIC ONLY — no number moves and nothing fails closed. Computed
+    # AFTER the partial-tail trim so it describes the series that was used,
+    # not the file that was read. A market closure the static holiday table
+    # does not know (an unscheduled closure) reads as a gap here; that is the
+    # same table `sessions_behind_last_close` already trusts, and a false
+    # warning is the safe direction for a field that changes nothing.
+    #
+    # Bounded to the table's COVERED years (`holiday_calendar_covers`).
+    # OUTSIDE them every weekday holiday reads as an open session, so the
+    # scan invents gaps rather than finding them — measured on the stored MU
+    # golden, whose window reaches back into 2025, it named Thanksgiving and
+    # Christmas as dropped bars. Where we cannot tell a closure from a drop,
+    # we must not claim one.
+    completeness["missing_interior_sessions"] = []
+    try:
+        import datetime as _dt
+        from scripts.delta.calendar import holiday_calendar_covers as _covers
+        from scripts.delta.calendar import is_trading_day as _is_td
+        # `isinstance(b, dict)` FIRST: a non-dict bar reaching `b.get` raised
+        # AttributeError, which the except below does not catch — so a line
+        # that changes no number took the whole run down, out of a comment
+        # promising it could not (cold review). The producer downstream still
+        # refuses such input; the diagnostic must not pre-empt it.
+        _dates = [d for d in (_parse_bar_date(b.get("time")) for b in daily
+                              if isinstance(b, dict)
+                              and isinstance(b.get("time"), str))
+                  if d is not None]
+        if len(_dates) >= 2:
+            _have = set(_dates)
+            _cur, _end = min(_dates), max(_dates)
+            _gaps = []
+            while _cur < _end:
+                _cur += _dt.timedelta(days=1)
+                if (_cur < _end and _cur not in _have and _covers(_cur)
+                        and _is_td(_cur)):
+                    _gaps.append(_cur.isoformat())
+            completeness["missing_interior_sessions"] = _gaps
+    except (ImportError, TypeError, ValueError):
+        # A diagnostic must never be able to take the run down with it.
+        pass
+
     try:
         # Prefer split/dividend-adjusted close; fall back to raw close for
         # bars emitted by legacy producers that don't carry adjclose.

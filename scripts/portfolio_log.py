@@ -2588,6 +2588,35 @@ def cmd_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def state_key_hashes(state: Dict[str, Any]) -> Dict[str, str]:
+    """Per-top-level-key digest of a loaded `portfolio-state.yaml`.
+
+    Hashed over the PARSED value, canonicalised, not over the YAML bytes: a
+    re-indent, a comment or a reordered mapping must not read as a change,
+    or the line that names what moved becomes noise. `default=str` folds a
+    quoted and an unquoted YAML date onto the same digest. `allow_nan` is
+    left at its permissive default deliberately — this is a fingerprint, not
+    a wire format, and refusing NaN here would turn one odd value in a
+    personal config file into a crash in the seal writer.
+
+    ONE implementation, two callers (`.claude/rules/producer-consumer.md`
+    §3): `/portfolio` Step 5 seals the map with it and `review` compares
+    against it. Two spellings of a hash diverge silently and the diff then
+    names every key.
+    """
+    out: Dict[str, str] = {}
+    for k, v in (state or {}).items():
+        if not isinstance(k, str):
+            continue
+        try:
+            blob = json.dumps(v, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            blob = repr(v)
+        out[k] = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return out
+
+
 def _review_state_freshness(prior: pathlib.Path,
                             log: Dict[str, Any],
                             state_path: Optional[str]) -> None:
@@ -2613,6 +2642,7 @@ def _review_state_freshness(prior: pathlib.Path,
     cur_sha = hashlib.sha256(state_bytes).hexdigest()
 
     prior_sha = None
+    prior_keys = None
     ctx_path = prior.parent / ".decision_ctx.json"
     if ctx_path.exists():
         try:
@@ -2623,6 +2653,10 @@ def _review_state_freshness(prior: pathlib.Path,
             v = ctx.get("state_file_sha256")
             if isinstance(v, str) and v:
                 prior_sha = v
+            km = ctx.get("state_key_sha256")
+            if isinstance(km, dict):
+                prior_keys = {k: v2 for k, v2 in km.items()
+                              if isinstance(k, str) and isinstance(v2, str)}
     if prior_sha is None:
         # Kept deliberately (codex 2026-08-31 Q9 proposed cutting it): once
         # STALE exists, SILENCE starts to mean "unchanged", so an unsealed
@@ -2630,8 +2664,24 @@ def _review_state_freshness(prior: pathlib.Path,
         print(f"\n  state: prior run carries no authoring seal — cannot tell "
               f"whether {sp.as_posix()} changed since it.")
     elif prior_sha != cur_sha:
+        # Two hash prefixes cannot tell "the decision was EXECUTED" from "the
+        # decision was OVERTURNED" — opposite directions with the same line
+        # (feedback 2026-08-31 portfolio ③: the user placed the prior run's
+        # RKLB reduce at the broker, so `open_orders` gained a row, and only
+        # a hand diff of two state files could say so). Name the top-level
+        # keys instead. Zero named keys is a real answer, not a fallback:
+        # the file's bytes moved but nothing the run reads did — a comment
+        # or a re-indent.
+        detail = ""
+        if prior_keys is not None:
+            cur_keys = state_key_hashes(state)
+            moved = sorted(k for k in set(prior_keys) | set(cur_keys)
+                           if prior_keys.get(k) != cur_keys.get(k))
+            detail = (f" (changed: {', '.join(moved)})" if moved
+                      else " (no top-level key changed — a comment or"
+                           " formatting edit)")
         print(f"\n  STALE: {sp.as_posix()} changed since the prior run "
-              f"({prior_sha[:8]}… -> {cur_sha[:8]}…)")
+              f"({prior_sha[:8]}… -> {cur_sha[:8]}…){detail}")
 
     # str-only on BOTH sides: YAML 1.1 coerces the real ticker `ON` (ON
     # Semiconductor) to the boolean True, and sorting/joining a mixed

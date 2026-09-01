@@ -345,10 +345,30 @@ def staleness_evidence(ticker, staleness):
     # malformed numeric duration.
     def _age(v):
         return f"{v}d" if v is not None else "unknown"
+    # A FUND is rendered from its own age. `days_since_etf_thesis` had zero
+    # readers — not this text, not the digest, not the router prompt's field
+    # inventory — while the text a fund carried was built from the two STOCK
+    # ages, which describe artifacts a fund does not have (and which a
+    # pre-forwarding-detector `bq_analysis.json` can still make non-null).
+    # Measured on a 31-day-old ETF thesis: text "BQ 1d / thesis 1d (fresh)"
+    # beside meta `days_since_etf_thesis: 31`. That is misattribution, not an
+    # omission — the router reads `text`, and in production `state` comes
+    # from `_classify_etf`, which at 31 days answers `stale_thesis`, so the
+    # two halves of one evidence row contradicted each other.
+    #
+    # Keyed on the KEY's presence, not its value: the ETF arm sets it
+    # unconditionally, and `None` legitimately means "this fund has no thesis
+    # yet" — which must read as unknown, never as a stock age.
+    if "days_since_etf_thesis" in staleness:
+        text = (f"ETF thesis {_age(staleness.get('days_since_etf_thesis'))} "
+                f"({staleness.get('state')})")
+    else:
+        text = (f"BQ {_age(staleness.get('days_since_full_bq'))} / thesis "
+                f"{_age(staleness.get('days_since_thesis'))} "
+                f"({staleness.get('state')})")
     return {"evidence_id": evidence_id("staleness", ticker, staleness.get("state") or "unknown"),
             "kind": "staleness",
-            "text": f"BQ {_age(staleness.get('days_since_full_bq'))} / thesis "
-                    f"{_age(staleness.get('days_since_thesis'))} ({staleness.get('state')})",
+            "text": text,
             "meta": dict(staleness)}
 
 
@@ -396,8 +416,22 @@ def _load_etf_conditions(ticker, reports_root=None):
     as_of = doc.get("as_of")
     if isinstance(as_of, str):
         try:
-            age = (datetime.date.today()
-                   - datetime.date.fromisoformat(as_of)).days
+            # `today_et()`, not `datetime.date.today()`: the two SIBLING
+            # ages in the very same staleness dict are on the ET basis
+            # (`_days_since_full_bq` / `_days_since_thesis` above), and so is
+            # `_classify_etf`, which produces the `state` printed beside this
+            # number. Local wall-clock here put them a day apart in any
+            # non-ET timezone. It does not GUARANTEE agreement with `state`:
+            # that is a second, independent `today_et()` read, so a run
+            # straddling ET midnight can still split them — a pre-existing
+            # module-wide property of every age here, not something this line
+            # introduces or can fix alone.
+            #
+            # NOT the probe's `run_date`: that would put three fields of ONE
+            # dict on two different clocks. `run_date` is the basis for
+            # CATALOGUE dates (`catalyst_evidence(today=...)`), the ET clock
+            # for staleness ages; keep each field with its siblings.
+            age = (today_et() - datetime.date.fromisoformat(as_of)).days
         except ValueError:
             age = None
     return conditions, age
@@ -784,6 +818,18 @@ def price_provenance(snapshot) -> dict:
     One row per SYMBOL: a symbol fetched twice is reported once, back-filled if
     either reading was, which is the conservative direction for a provenance
     note. `session` is None when the producer recorded no session for it.
+
+    `dropped_sessions` is the OTHER half of the same question, and the half
+    that was missing: which interior market sessions the series carries no
+    usable close for. An empty `meta_backfilled` reads exactly like health,
+    and on 2026-08-31 it WAS empty while the 2026-08-28 bar had already been
+    deleted upstream — nothing needed back-filling because the row was gone
+    (feedback 2026-08-31 monitor ②). Read off
+    `ticker_price_structure[T].missing_sessions`, which is computed against
+    the >=2-of-3 SPY/QQQ/^DJI consensus calendar the structure block already
+    proves; there is no second calendar and no new dependency. Unlike a
+    back-filled close this is a FAULT — `build_probe` also raises it as a
+    warning, so it lands in the digest's Data warnings section.
     """
     pairs: dict = {}
     for section in (snapshot.get("chart_statuses") or {}).values():
@@ -798,8 +844,18 @@ def price_provenance(snapshot) -> dict:
             sess = sess if isinstance(sess, str) and sess.strip() else None
             if pairs.get(symbol) is None:
                 pairs[symbol] = sess
+    dropped: dict = {}
+    for symbol, block in (snapshot.get("ticker_price_structure") or {}).items():
+        if not isinstance(block, dict):
+            continue
+        sessions = [d for d in (block.get("missing_sessions") or [])
+                    if isinstance(d, str) and d.strip()]
+        if sessions:
+            dropped[symbol] = sorted(set(sessions))
     return {"meta_backfilled": [{"symbol": sym, "session": pairs[sym]}
-                                for sym in sorted(pairs)]}
+                                for sym in sorted(pairs)],
+            "dropped_sessions": [{"symbol": sym, "sessions": dropped[sym]}
+                                 for sym in sorted(dropped)]}
 
 
 def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports_root=None, output_language="zh-CN", vendor_aliases=None, identity_map=None):
@@ -881,6 +937,21 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
             "UNANCHORED even where the price reads PASSED: "
             + ", ".join(f"{t} (last bar {lb or 'unknown'})"
                         for t, lb in unanchored))
+    provenance = price_provenance(snap)
+    _dropped = provenance.get("dropped_sessions") or []
+    if _dropped:
+        # A WARNING, not a provenance note: a deleted session changes the
+        # numbers built on it. Measured 2026-08-31 — one missing bar turned
+        # NOW's single-session +2.27% into a two-session +6.91% and inverted
+        # its volume verdict (0.821 `bearish_divergence` -> 1.064 `neutral`).
+        # ONE line for the whole cross-section: the outage is universal far
+        # more often than not, and 19 near-identical lines bury the distinct
+        # faults beside them.
+        warnings.insert(0,
+            "daily bar MISSING for interior market session(s) — the moves and "
+            "moving averages built on these series skip a session: "
+            + "; ".join(f"{r['symbol']} ({', '.join(r['sessions'])})"
+                        for r in _dropped))
     return {
         "run_date": run_date,
         "output_language": output_language,                  # spec §8; default zh-CN (MVP)
@@ -890,7 +961,7 @@ def build_probe(universe, cash, monitor_root, current_dirname, run_date, reports
         "prior_evidence_ids": sorted(load_prior_evidence_ids(monitor_root, current_dirname)),
         "per_ticker": per_ticker,
         "warnings": warnings,
-        "price_provenance": price_provenance(snap),
+        "price_provenance": provenance,
     }
 
 

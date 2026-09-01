@@ -62,13 +62,14 @@ def _unknown_cluster_hold() -> Dict[str, Any]:
 
 def _unknown(anchor_session, bars, *, covered=False, anchor_close=None,
              last_close=None, last_session=None, lag=None, off_cal=0,
-             trimmed=False, suffix_start=None, first_trade=None):
+             trimmed=False, suffix_start=None, first_trade=None, missing=()):
     return {
         "anchor_session": anchor_session, "anchor_close": anchor_close,
         "last_close": last_close, "last_close_session": last_session,
         "anchor_session_covered": covered, "session_lag": lag,
         "bars_available": bars, "off_calendar_bars": off_cal,
         "interior_gap_trimmed": trimmed, "suffix_start_session": suffix_start,
+        "missing_sessions": list(missing),
         "lookback_sessions": HIGH_LOOKBACK_SESSIONS, "lookback_complete": False,
         "inception_proven": False, "first_trade_session": first_trade,
         "prior_high_close": None, "prior_high_date": None,
@@ -88,7 +89,18 @@ def _unknown(anchor_session, bars, *, covered=False, anchor_close=None,
 
 def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
                                    volumes=None, first_trade_session=None):
-    """Intrinsic closing-basis facts for one ticker, on the gap-free suffix."""
+    """Intrinsic closing-basis facts for one ticker, on the gap-free suffix.
+
+    `missing_sessions` names the interior market sessions the series has no
+    usable close for — the CAUSE of a suffix trim, not just its fact. Yahoo
+    served `close: null` for one interior session on 9/19 symbols
+    (2026-08-31) and the trim then correctly reduced every one of them to
+    `bars_available: 1` with every closing-basis fact `unknown`; with only
+    the boolean `interior_gap_trimmed` emitted, no consumer could say WHICH
+    session had gone, and a whole-cross-section outage read as unexplained.
+    Empty on the two early returns that precede the gap scan: nothing there
+    has proven a gap, and naming one would be a fabricated fact.
+    """
     cal = list(market_sessions)
     cal_set = set(cal)
     raw = _normalise(pairs)
@@ -124,7 +136,7 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
                         anchor_close=last_close, last_close=last_close,
                         last_session=last_session, lag=lag, off_cal=off_cal,
                         trimmed=trimmed, suffix_start=suffix_start,
-                        first_trade=first_trade_session)
+                        first_trade=first_trade_session, missing=missing)
 
     # Provider-chart-series inception: first bar must equal the first market
     # session on/after firstTradeDate, with no interior trim.
@@ -202,6 +214,7 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
         "anchor_session_covered": True, "session_lag": lag,
         "bars_available": len(suffix), "off_calendar_bars": off_cal,
         "interior_gap_trimmed": trimmed, "suffix_start_session": suffix_start,
+        "missing_sessions": list(missing),
         "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
         "lookback_complete": len(suffix) >= HIGH_LOOKBACK_SESSIONS + 1,
         "inception_proven": inception, "first_trade_session": first_trade_session,

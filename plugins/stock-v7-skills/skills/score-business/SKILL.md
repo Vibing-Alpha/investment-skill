@@ -76,7 +76,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.19.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.20.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -296,6 +296,34 @@ printf 'TIER=%s\n' "$TIER"
 > merge (`FATAL: validation merge failed`) — show its stderr to the user and
 > **STOP**: proceeding past a failed merge would let later steps consume a
 > phase-2 file whose SKIPPED stubs erased the phase-1 degradation record.
+>
+> **ONE named exemption, and it is narrow: a ticker that simply has no 10-K.**
+> `scripts.fetch` maps a top-level `INCOMPLETE` to exit 1, and a company with
+> no 10-K on file (a recent listing — SPCX) is INCOMPLETE on every run
+> forever. Read literally, the rule above makes such a ticker permanently
+> unanalysable; in practice every past run ignored the rule here, which is
+> worse than not having it. So proceed — and say so to the user — **only when
+> all four hold**, checked against `$REPORT_DIR/data/00_validation.json`:
+> 1. the fetch's OWN stderr, which you have above, ends in its
+>    `VALIDATION COMPLETE` / `Final Status: INCOMPLETE` summary — the fetch
+>    prints that only after writing `00_validation.json`, so it is the one
+>    proof available that the file on disk is THIS invocation's. Do not
+>    substitute the artifact's `validated_at`: it is a bare wall-clock stamp
+>    with no run id, so "recent" and "this run" are different claims and a
+>    fetch that died earlier leaves a PRIOR file that reads just as fresh;
+> 2. its top-level `status` is `INCOMPLETE` — never `FAILED` and never
+>    `CIRCUIT_BREAKER`. Both of those are written to disk too and exit
+>    non-zero, so file existence alone would wave a real outage through: a
+>    `CIRCUIT_BREAKER` is stale price data, and `FAILED` means a CRITICAL
+>    category (price / metrics / financials / filing) genuinely failed;
+> 3. the ONLY non-`PASSED`, non-`SKIPPED` category is `filing`; and
+> 4. that category carries `error_code: "not_found"` — the filing does not
+>    exist, as opposed to the fetch for it having broken.
+>
+> Anything else: **STOP**. Report which category and which `error_code`.
+> (The underlying exit-code semantics — benign absence vs real fault — are
+> not split in `scripts.fetch` yet; `historical_multiples` / `extract_fcf`
+> already do it and are the model when they are.)
 
 **If `no_op`:** copy remaining categories + prior scores + prior dimensions from the prior run. Skip dim agents.
 
@@ -315,12 +343,18 @@ copy_data_categories(
     src_dir=Path('$PRIOR_DIR/data'), dst_dir=Path('$REPORT_DIR/data'),
     categories=['05_filing_*', '08_institutional', 'adr_profile'],
 )
-# Copy all three dim scores with provenance stamp
-copy_dimension_scores(
+# Copy all three dim scores with provenance stamp. `source_date` is a
+# FALLBACK, used only when the source score carries none of its own — a
+# chained no_op keeps the ORIGINAL vintage, so it is NOT what lands on disk.
+# Print what was actually written and use THAT in Step 5's
+# component_provenance (feedback 2026-08-31 monitor 6: BE's prior dir is
+# 20260828 while its scores carry 2026-08-27).
+import json as _json
+print('SOURCE_DATES=' + _json.dumps(copy_dimension_scores(
     src_dir=Path('$PRIOR_DIR/scores'), dst_dir=Path('$REPORT_DIR/scores'),
     dimensions=['fundamental', 'forward', 'industry'],
     source_date='<prior ET date>',
-)
+)['source_dates'], default=str))
 "
 ```
 
@@ -364,10 +398,13 @@ rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-re
 "$PYBIN" -c "
 from scripts.delta.copy_data import copy_dimension_scores
 from pathlib import Path
-copy_dimension_scores(
+# `source_date` is a FALLBACK, not a setter — print what was written and use
+# THAT in Step 5's component_provenance (feedback 2026-08-31 monitor 6).
+import json as _json
+print('SOURCE_DATES=' + _json.dumps(copy_dimension_scores(
     src_dir=Path('$PRIOR_DIR/scores'), dst_dir=Path('$REPORT_DIR/scores'),
     dimensions=['fundamental'], source_date='<prior ET date>',
-)
+)['source_dates'], default=str))
 "
 
 # Spawn forward + industry agents (see below)
@@ -665,6 +702,13 @@ cat > "$TIER_CONTEXT_JSON" <<TIER_CONTEXT_JSON_EOF
     "dimensions.fundamental": {"source_date": "...", "reason": "fresh|copied from prior run"},
     "dimensions.forward":     {"source_date": "...", "reason": "..."},
     "dimensions.industry":    {"source_date": "...", "reason": "..."}
+    <-- a COPIED dimension's "source_date" is the value Step 3 printed as
+        SOURCE_DATES for it (equivalently: the `_source_date` inside
+        $REPORT_DIR/scores/<dim>.json). It is NOT the prior run's directory
+        date and NOT the argument passed to copy_dimension_scores — on a
+        chained no_op those differ, and writing the argument attests a
+        vintage the scores contradict. A FRESH dimension's is today's ET
+        date with reason "fresh".
   }
 }
 TIER_CONTEXT_JSON_EOF
@@ -830,6 +874,15 @@ PRIOR_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
 TIER=$("$PYBIN" -c "import json; print(json.load(open('$REPORT_DIR/.run_state.json', encoding='utf-8'))['tier'])")
 TODAY_ET=$("$PYBIN" -c "from scripts.delta.calendar import session_et; print(session_et().isoformat())")
 DELTA_FILE="$REPORT_DIR/.delta_section.md"
+# clear_stale FIRST, then write. A FAILED append deliberately leaves this
+# staging file in place, so a retry finds it NON-EMPTY — and the
+# delete-restricted mount is documented to leave the TAIL of an over-written
+# file behind, so `>` alone can leave yesterday's leftover prose hanging off
+# today's delta section. This does not cost the operator the failed note:
+# `> "$DELTA_FILE"` already rewrote the file from its first line on every
+# re-run, so the recovery window was always "before you re-run this block",
+# and the guard below says so.
+"$PYBIN" -m scripts.clear_stale "$DELTA_FILE" || { echo "FATAL: could not clear the delta staging file $DELTA_FILE — a leftover tail would be appended to this run's changelog section." >&2; exit 1; }
 printf '## Update %s (tier: %s)\n\n' "$TODAY_ET" "$TIER" > "$DELTA_FILE"
 cat >> "$DELTA_FILE" <<'DELTA_SECTION_EOF'
 <one or two sentences from synthesis.delta_note>
@@ -840,11 +893,17 @@ DELTA_SECTION_EOF
   --current "$REPORT_DIR/summary.changelog.md" \
   --ticker "$TICKER" \
   --delta-section "$DELTA_FILE" \
-  || { echo "FATAL: append_changelog failed — summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the rm below is skipped); fix what the error above names and re-run this block." >&2; exit 1; }
+  || { echo "FATAL: append_changelog failed — summary.changelog.md was NOT updated. The staging file at $DELTA_FILE is left in place (the clear below is skipped) — READ IT NOW if you need the delta note back: the re-run rewrites it from its first line, exactly as it always did. Fix what the error above names and re-run this block." >&2; exit 1; }
 
-# Gated for the same reason as the rm above: past this point the append
+# Gated for the same reason as the clear above: past this point the append
 # succeeded, so the staging file is redundant rather than the only copy.
-rm "$DELTA_FILE"
+# `clear_stale`, not a bare `rm`: the Cowork FUSE mount refuses to delete an
+# existing file, so the bare `rm` turned a SUCCEEDED append into a non-zero
+# block on 6/6 runs (feedback 2026-08-31 monitor (5)) — a cleanup step failing
+# a run that did all its real work. clear_stale empties what it cannot delete
+# and still exits non-zero when it can do neither, which is the reason this
+# line deliberately carries no `|| true`.
+"$PYBIN" -m scripts.clear_stale "$DELTA_FILE" || { echo "FATAL: append_changelog SUCCEEDED but the staging file $DELTA_FILE could neither be deleted nor emptied — the changelog is correct; clean this path up by hand before the next run." >&2; exit 1; }
 ```
 
 ### Step 7: Validation (soft-fail word budget)

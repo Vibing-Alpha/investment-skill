@@ -79,6 +79,14 @@ _FIXED_HOLIDAYS = {
 # returning True for holidays that land on weekdays. Callers can check
 # this value to warn / fail instead of producing wrong output.
 _HOLIDAY_COVERAGE_LAST_YEAR = 2030
+# The table's FIRST year, derived rather than restated so it cannot drift
+# from the data. A date below it is as uncovered as one above it: every
+# weekday holiday there reads as an open session. `is_trading_day` does not
+# refuse such a date — staleness math on a past date is still wanted — but a
+# caller that INFERS a missing session from the calendar must not claim one
+# outside the covered span (`scripts.indicators`' `missing_interior_sessions`
+# named Thanksgiving and Christmas 2025 as dropped bars before this bound
+# existed).
 
 # Probe 4G: NYSE half-days close 13:00 ET, not 16:00 — without this table
 # a 14:00 invocation on Black Friday anchored to the PRECEDING session and
@@ -108,6 +116,15 @@ _EARLY_CLOSES = {
     datetime.date(2030, 11, 29): 13,
     datetime.date(2030, 12, 24): 13,
 }
+
+
+HOLIDAY_COVERAGE_FIRST_YEAR = min(d.year for d in _FIXED_HOLIDAYS)
+HOLIDAY_COVERAGE_LAST_YEAR = _HOLIDAY_COVERAGE_LAST_YEAR
+
+
+def holiday_calendar_covers(d: datetime.date) -> bool:
+    """Whether the maintained holiday table can speak about this date."""
+    return HOLIDAY_COVERAGE_FIRST_YEAR <= d.year <= HOLIDAY_COVERAGE_LAST_YEAR
 
 
 def _close_hour_et(d: datetime.date) -> int:
