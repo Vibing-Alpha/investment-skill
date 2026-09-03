@@ -62,15 +62,19 @@ def _unknown_cluster_hold() -> Dict[str, Any]:
 
 def _unknown(anchor_session, bars, *, covered=False, anchor_close=None,
              last_close=None, last_session=None, lag=None, off_cal=0,
-             trimmed=False, suffix_start=None, first_trade=None, missing=()):
+             trimmed=False, suffix_start=None, first_trade=None, missing=(),
+             bars_total=0):
     return {
         "anchor_session": anchor_session, "anchor_close": anchor_close,
         "last_close": last_close, "last_close_session": last_session,
         "anchor_session_covered": covered, "session_lag": lag,
-        "bars_available": bars, "off_calendar_bars": off_cal,
+        "bars_available": bars, "bars_total": bars_total,
+        "off_calendar_bars": off_cal,
         "interior_gap_trimmed": trimmed, "suffix_start_session": suffix_start,
         "missing_sessions": list(missing),
-        "lookback_sessions": HIGH_LOOKBACK_SESSIONS, "lookback_complete": False,
+        "lookback_missing_sessions": [],
+        "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
+        "lookback_span_covered": False, "lookback_complete": False,
         "inception_proven": False, "first_trade_session": first_trade,
         "prior_high_close": None, "prior_high_date": None,
         "pct_vs_prior_high_close": None, "closing_high_status": "unknown",
@@ -108,7 +112,7 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
     clean = [(d, c) for d, c in raw if d in cal_set]
     if not clean:
         return _unknown(anchor_session, 0, off_cal=off_cal,
-                        first_trade=first_trade_session)
+                        first_trade=first_trade_session, bars_total=0)
 
     last_session, last_close = clean[-1]
     covered = last_session == anchor_session
@@ -117,9 +121,25 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
     if not covered:
         return _unknown(anchor_session, len(clean), last_close=last_close,
                         last_session=last_session, lag=lag, off_cal=off_cal,
-                        first_trade=first_trade_session)
+                        first_trade=first_trade_session, bars_total=len(clean))
 
-    # Gap-free suffix after the last interior gap.
+    # ------------------------------------------------------------------
+    # TWO windows, because two kinds of fact live in this block.
+    #
+    # CONTIGUITY facts (moving averages, the three hold detectors) need
+    # consecutive sessions: a 20-bar mean spanning 21 calendar sessions is a
+    # wrong number. They read the gap-free SUFFIX.
+    #
+    # EXTREMUM facts (prior high, closing-high status, high-water drawdown)
+    # need the window's closes, not their contiguity. They read the LOOKBACK
+    # WINDOW over the whole clean series.
+    #
+    # Both used to read the suffix, and it cost a 30.6%-NLV holding its
+    # analysis for days: Yahoo served `close: null` for 2026-08-28 on 8 of 20
+    # symbols, `lookback_complete` was `len(suffix) >= 253`, and the suffix
+    # grows one bar per day — so one vendor null priced a 252-session recovery
+    # through `scripts/etf/readiness.py`.
+    # ------------------------------------------------------------------
     first_session = clean[0][0]
     span = cal[cal.index(first_session):cal.index(anchor_session) + 1]
     have = {d for d, _ in clean}
@@ -131,12 +151,25 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
     else:
         suffix, trimmed = clean, False
     suffix_start = suffix[0][0] if suffix else None
-    if len(suffix) < 2:
-        return _unknown(anchor_session, len(suffix), covered=True,
-                        anchor_close=last_close, last_close=last_close,
-                        last_session=last_session, lag=lag, off_cal=off_cal,
-                        trimmed=trimmed, suffix_start=suffix_start,
-                        first_trade=first_trade_session, missing=missing)
+
+    # The lookback window, on the CALENDAR — 252 prior sessions plus the anchor.
+    _end = cal.index(anchor_session)
+    window_sessions = cal[max(0, _end - HIGH_LOOKBACK_SESSIONS):_end + 1]
+    # `lookback_span_covered`: the fetch REACHES BACK across the whole window.
+    # `window_missing`: its INTERIOR holes only — sessions at or after the first
+    # observed bar. Sessions before the listing (or before a truncated fetch)
+    # are not holes: nothing traded there to hide, and counting them would
+    # suppress an inception-proven fund's exact since-inception high and make
+    # every young ticker look punctured to the macro warning.
+    # It must be derived from the window and NOT from `missing` above: that scan
+    # starts at `clean[0]`, so a series that merely BEGINS inside the window
+    # reports no gaps at all (executed: a 100-bar series inside a 400-session
+    # calendar -> `missing_sessions: []`).
+    lookback_span_covered = (len(window_sessions) == HIGH_LOOKBACK_SESSIONS + 1
+                             and first_session <= window_sessions[0])
+    window_missing = [d for d in window_sessions
+                      if d >= first_session and d not in have]
+    lookback_complete = lookback_span_covered and not window_missing
 
     # Provider-chart-series inception: first bar must equal the first market
     # session on/after firstTradeDate, with no interior trim.
@@ -149,29 +182,41 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
 
     dates = [d for d, _ in suffix]
     closes = [c for _, c in suffix]
-    window = suffix[-(HIGH_LOOKBACK_SESSIONS + 1):]
+    _wset = set(window_sessions)
+    window = [(d, c) for d, c in clean if d in _wset]
     wd = [d for d, _ in window]
     wc = [c for _, c in window]
-    anchor_close = wc[-1]
+    anchor_close = last_close          # anchor is covered; clean[-1] IS the anchor
 
     prior = wc[:-1]
-    prior_high = max(prior)
-    if len(suffix) >= HIGH_LOOKBACK_SESSIONS + 1 or inception:   # == _proven below
+    prior_high = max(prior) if prior else None
+
+    # Two gates, both named. `proven_exact` — the window is fully observed, so
+    # every extremum is exact. `proven_span` — the window is REACHED but holed,
+    # so the observed max is only a LOWER BOUND of the true prior high (the same
+    # argument `_breakout_hold` makes for its provable "none").
+    proven_exact = lookback_complete or inception
+    proven_span = lookback_span_covered or inception
+
+    if prior and proven_exact:
         status = ("breakout" if anchor_close > prior_high
                   else "at_prior_high" if anchor_close == prior_high
                   else "below_prior_high")
+    elif prior and proven_span and anchor_close < prior_high:
+        # One-sided and provable: anchor < observed max <= true max, whatever
+        # the hole hid. `breakout` / `at_prior_high` are NOT — a hidden bar
+        # could have beaten the anchor.
+        status = "below_prior_high"
     else:
-        # Truncated available-history prefix: a concrete status here would
-        # masquerade as a proven 1-year (or since-inception) high. The
-        # numeric fields below stay populated as available-history
-        # DIAGNOSTICS; the status is the gate, and it is unknown.
         status = "unknown"
 
-    _proven = len(suffix) >= HIGH_LOOKBACK_SESSIONS + 1 or inception
-    if not _proven:
-        # Truncated unproven history: the true peak may predate the fetch —
-        # a concrete measurement (or a FALSE no_active_drawdown) would
-        # masquerade as proven. Fail closed, same rule as closing_high_status.
+    if not proven_exact:
+        # Truncated or holed history: the true peak may predate the fetch or
+        # sit in a hole — a concrete measurement (or a FALSE no_active_drawdown)
+        # would masquerade as proven. Observed peak <= true peak and observed
+        # trough >= true trough, so a measured depth here is SHALLOWER than the
+        # truth, which is the permissive direction. Fail closed, same rule as
+        # closing_high_status.
         hwd = {"status": "unknown",
                "peak_basis": "last_occurrence_of_lookback_max",
                "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
@@ -184,23 +229,40 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
         tail = wc[pi:]
         trough = min(tail)
         li = pi + tail.index(trough)
-    if _proven and trough < peak:
-        hwd = {"status": "active_drawdown",
-               "peak_basis": "last_occurrence_of_lookback_max",
-               "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
-               "peak_close": peak, "peak_date": wd[pi],
-               "trough_close": trough, "trough_date": wd[li],
-               "sessions_since_trough": len(wc) - 1 - li,
-               "depth_pct": round((trough / peak - 1) * 100, 4),
-               "pct_off_trough": round((anchor_close / trough - 1) * 100, 4),
-               "pct_retraced": round((anchor_close - trough) / (peak - trough) * 100, 4)}
-    elif _proven:
-        hwd = {"status": "no_active_drawdown",
-               "peak_basis": "last_occurrence_of_lookback_max",
-               "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
-               "peak_close": None, "peak_date": None, "trough_close": None,
-               "trough_date": None, "sessions_since_trough": None,
-               "depth_pct": None, "pct_off_trough": None, "pct_retraced": None}
+        if trough < peak:
+            hwd = {"status": "active_drawdown",
+                   "peak_basis": "last_occurrence_of_lookback_max",
+                   "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
+                   "peak_close": peak, "peak_date": wd[pi],
+                   "trough_close": trough, "trough_date": wd[li],
+                   "sessions_since_trough": len(wc) - 1 - li,
+                   "depth_pct": round((trough / peak - 1) * 100, 4),
+                   "pct_off_trough": round((anchor_close / trough - 1) * 100, 4),
+                   "pct_retraced": round((anchor_close - trough) / (peak - trough) * 100, 4)}
+        else:
+            hwd = {"status": "no_active_drawdown",
+                   "peak_basis": "last_occurrence_of_lookback_max",
+                   "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
+                   "peak_close": None, "peak_date": None, "trough_close": None,
+                   "trough_date": None, "sessions_since_trough": None,
+                   "depth_pct": None, "pct_off_trough": None, "pct_retraced": None}
+
+    # The three EXACT prior-high fields follow `proven_exact` too — the same
+    # gate as the status and the drawdown, so one predicate governs every
+    # extremum output. They used to survive as "available-history diagnostics"
+    # with the status as the only gate, and the field refuted that on
+    # 2026-09-02: TSEM published `pct_vs_prior_high_close: +0.8583` — read
+    # literally, 0.86% ABOVE the prior high — computed over a three-bar
+    # degenerate window, and the only thing standing between that and a
+    # new-high misread was an agent remembering to check a different key.
+    if prior and proven_exact:
+        exact_high = prior_high
+        # Latest resistance touch: LAST occurrence on repeated equal highs
+        # (drawdown already uses last-occurrence; keep the two consistent).
+        exact_high_date = wd[len(prior) - 1 - prior[::-1].index(prior_high)]
+        exact_pct = round((anchor_close / prior_high - 1) * 100, 4)
+    else:
+        exact_high = exact_high_date = exact_pct = None
 
     # Volumes: non-negative is legitimate (calc_volume accepts zero-volume
     # sessions); _fin_pos would silently drop them. Zero DENOMINATORS are
@@ -212,17 +274,21 @@ def compute_ticker_price_structure(pairs, *, anchor_session, market_sessions,
         "anchor_session": anchor_session, "anchor_close": anchor_close,
         "last_close": last_close, "last_close_session": last_session,
         "anchor_session_covered": True, "session_lag": lag,
-        "bars_available": len(suffix), "off_calendar_bars": off_cal,
+        "bars_available": len(suffix), "bars_total": len(clean),
+        "off_calendar_bars": off_cal,
         "interior_gap_trimmed": trimmed, "suffix_start_session": suffix_start,
         "missing_sessions": list(missing),
+        # The WINDOW subset. `missing_sessions` spans the whole fetched series,
+        # so a gap 300 sessions back is listed there forever while costing
+        # nothing — an operator warning keyed on it would be permanent noise.
+        "lookback_missing_sessions": list(window_missing),
         "lookback_sessions": HIGH_LOOKBACK_SESSIONS,
-        "lookback_complete": len(suffix) >= HIGH_LOOKBACK_SESSIONS + 1,
+        "lookback_span_covered": lookback_span_covered,
+        "lookback_complete": lookback_complete,
         "inception_proven": inception, "first_trade_session": first_trade_session,
-        "prior_high_close": prior_high,
-        # Latest resistance touch: LAST occurrence on repeated equal highs
-        # (drawdown already uses last-occurrence; keep the two consistent).
-        "prior_high_date": wd[len(prior) - 1 - prior[::-1].index(prior_high)],
-        "pct_vs_prior_high_close": round((anchor_close / prior_high - 1) * 100, 4),
+        "prior_high_close": exact_high,
+        "prior_high_date": exact_high_date,
+        "pct_vs_prior_high_close": exact_pct,
         "closing_high_status": status,
         "high_water_drawdown": hwd,
         "moving_averages": {f"ma{w}": _sma(closes, w) for w in MA_WINDOWS},

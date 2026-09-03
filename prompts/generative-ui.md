@@ -133,6 +133,11 @@ The portfolio view-model has `totals`, `cash`, `price_basis`, `holdings[]` and `
    badge, expected return %, max downside %, BQ overall, valuation stance, as-of. A row with
    `analyzed: false` shows "not analyzed" across the analysis columns; a holding with
    `market_value: null` shows "—" for value/weight/price (NEVER 0 — it is genuinely unpriced).
+   Use `price_as_of` for the price column's date, NOT the row's `as_of`: a price can come from a
+   day the analysis did not (an older thesis, or a fund's own profile), and the two dates differ
+   exactly when it matters. A row with `instrument: "etf"` is a POSITION, priced and weighted like
+   any other, with "not analyzed" in the analysis columns — a fund has no business-quality score
+   and that absence is not a finding.
 3. **Watchlist table** — one row per `watchlist[]` entry (no position columns): ticker, conviction,
    expected return %, BQ overall, valuation stance. `analyzed: false` → "not analyzed".
 

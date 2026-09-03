@@ -95,7 +95,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -170,6 +170,13 @@ If any block in this step exits non-zero, **STOP** and surface the error. A fail
 cd "<captured-abs-ROOT>"
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.compile_strategy --strategy strategy.yaml --output strategy.compiled.yaml
+# Clear any same-day model artifact HERE, before the eligibility branch below —
+# that branch skips Step 4 entirely, so clearing at the top of Step 4 would
+# leave a stale `etf_model.json` for Step 5 to pass to the stamp and for Step
+# 5.5 to record as an agent that never ran this run. `clear_stale` empties the
+# file when a delete-restricted mount refuses the unlink, which is why every
+# later test of it is `-s` (non-empty) and never `-f` (exists).
+"$PYBIN" -m scripts.clear_stale "<captured-REPORT_DIR>/data/etf_model.json"
 "$PYBIN" -m scripts.etf.profile --ticker "<TICKER>" \
   --identity-registry "$PWD/reports/<TICKER>/instrument_type.json" \
   --market-snapshot "<captured-REPORT_DIR>/data/etf_market_snapshot.json" \
@@ -252,7 +259,10 @@ print(p.as_posix() if p and p.is_file() else 'none')
 # have analysed before is the visible symptom of a lost comparison.
 printf 'prior thesis: %s\n' "$PRIOR"
 MODEL_ARG=""
-[ -f "<captured-REPORT_DIR>/data/etf_model.json" ] && MODEL_ARG="--model-json <captured-REPORT_DIR>/data/etf_model.json"
+# `-s`, not `-f`: on a delete-restricted mount `clear_stale` leaves a ZERO-BYTE
+# file, and passing that to the stamp makes it die parsing an empty model
+# instead of writing the valid refusal.
+[ -s "<captured-REPORT_DIR>/data/etf_model.json" ] && MODEL_ARG="--model-json <captured-REPORT_DIR>/data/etf_model.json"
 "$PYBIN" -m scripts.etf.stamp --ticker "<TICKER>" \
   --profile "<captured-REPORT_DIR>/data/etf_profile.json" \
   --market-snapshot "<captured-REPORT_DIR>/data/etf_market_snapshot.json" \
@@ -289,7 +299,16 @@ import hashlib
 with open(r'<captured-REPORT_DIR>/etf_thesis.json', 'rb') as fh:
     print(hashlib.sha256(fh.read()).hexdigest())
 ")
-"$PYBIN" -m scripts.delta.run_meta write   --run-dir "<captured-REPORT_DIR>" --ticker "<TICKER>" --skill etf-thesis   --artifact-sha256 "$SHA" --agents-run "evaluate-etf"
+# `agents_run` records what RAN, so it is keyed on the artifact the agent
+# itself writes — not on a constant. Step 4 is skipped on BOTH an
+# `entry_eligibility` of `block`/`unknown` (Step 3) and an `analysis_readiness`
+# other than `ready` (Step 4), and the constant logged `evaluate-etf` on every
+# one of those refusals (feedback 2026-09-01 ④, still open on 09-02). A field
+# only ever written and never read is the one that most needs to be right:
+# nothing downstream will ever notice it is wrong.
+AGENTS=""
+[ -s "<captured-REPORT_DIR>/data/etf_model.json" ] && AGENTS="evaluate-etf"
+"$PYBIN" -m scripts.delta.run_meta write   --run-dir "<captured-REPORT_DIR>" --ticker "<TICKER>" --skill etf-thesis   --artifact-sha256 "$SHA" --agents-run "$AGENTS"
 ```
 
 ## Step 6 — Report

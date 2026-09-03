@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.20.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, while a guessed one prints a real-looking skew WARNING built from nothing
+"$PYBIN" -m scripts.version_skew --expected-min "1.21.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -136,6 +136,53 @@ along with:
   a seal and then failed before logging leaves a NEWER seal beside the older
   `decisions.json`, which can mask a real drift. `UNCOVERED` is the
   decision-relevant half and is derived from the prior `decisions[]` itself.
+
+Then check whether anything else is still writing today's evidence. Nothing
+enforces run ORDER across sessions, and `find_latest_prior` silently SKIPS a
+directory whose section is not `completed` — falling back to yesterday's
+artifact, which Step 3's `stale_thesis` threshold (>7 days) reads as `fresh`.
+On 2026-09-01 that put ADBE's 08-28 thesis beside its 09-01 BQ in one decision
+set, with no warning anywhere; on 09-02 the only safe response available was to
+run fewer tickers, which costs 2-4 refreshes a day.
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+"$PYBIN" -c "
+import json, sys
+from pathlib import Path
+sys.stdout.reconfigure(encoding='utf-8')
+from scripts.delta.calendar import today_et
+day = today_et().strftime('%Y%m%d')
+rows = []
+for d in sorted(Path('reports').glob('*/' + day)):
+    if d.parent.name == 'portfolio':
+        continue
+    mp = d / 'run_meta.json'
+    if not mp.is_file():
+        rows.append((d.parent.name, 'no run_meta.json yet'))
+        continue
+    try:
+        meta = json.loads(mp.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as ex:
+        rows.append((d.parent.name, 'unreadable run_meta.json (%s)' % type(ex).__name__))
+        continue
+    for sec in ('bq', 'thesis', 'etf'):
+        body = meta.get(sec)
+        if isinstance(body, dict) and body.get('completed') is not True:
+            rows.append((d.parent.name, sec + ' section not completed'))
+for t, why in rows:
+    print('NOTE in-flight ' + str(t) + ' - ' + why
+          + ' - this run reads that ticker EARLIER evidence; say so in decisions.md')
+print('IN_FLIGHT_CHECKED ' + day + ' (' + str(len(rows)) + ')')
+"
+```
+
+NOT a stop — the run is still correct, it is just building on yesterday's
+evidence for those names, and Step 3's freshness threshold will not say so.
+`RunMeta` has no root `completed` flag, which is why the check is per-section;
+and a dated directory that `allocate-bq-run` created before any `run_meta.json`
+exists is the commoner half-written shape, which is why absence counts too.
 
 **Gate — open the prior `decisions.json` before Step 1.** When `review` exits 0 and prints a prior-run path, you MUST read the file at
 the path it printed. Any NON-ZERO exit means STOP: the review gate did not complete (its schema-validation path returns 1 and prints a
@@ -513,11 +560,18 @@ warn_t = sorted(t for t in tp if t not in held and bad(t))
 # vendor `close: null` on 08-28). The prose below foresaw exactly that shape
 # and nothing checked it, so the run passed the gate on the authoring agent
 # remembering to read `closing_high_status` by hand.
+#
+# TWO triggers, because since 2026-09-03 a holed window can publish a PROVABLE
+# `below_prior_high` (the anchor sits under a close that was actually observed)
+# while its three moving averages are still null and its drawdown still
+# `unknown`. Keyed on the status alone this gate would have gone silent on
+# exactly the shape it was added for.
 tps = doc.get("ticker_price_structure") or {}
 def hollow(t):
     b = tps.get(t) or {}
     return (b.get("anchor_session_covered") is True
-            and b.get("closing_high_status") in (None, "unknown"))
+            and (b.get("closing_high_status") in (None, "unknown")
+                 or b.get("interior_gap_trimmed") is True))
 hollow_t = sorted(t for t in set(held) | set(tp) if hollow(t))
 # The three legs the regime classifier reads, REQUIRED by name. Scanning
 # only the entries that happen to be present is a fail-open: an absent
@@ -535,11 +589,13 @@ for t in hollow_t:
     b = tps.get(t) or {}
     ms = b.get("missing_sessions") or []
     print("NOTE hollow structure " + t + " - anchored, but closing_high_status"
-          " is unknown on " + str(b.get("bars_available")) + " bar(s)"
+          " is " + str(b.get("closing_high_status")) + " on "
+          + str(b.get("bars_available")) + " gap-free bar(s) of "
+          + str(b.get("bars_total"))
           + (" (no daily bar for " + ", ".join(str(x) for x in ms) + ")" if ms else "")
-          + " - no closing-basis evidence exists for it: a BREAKOUT-path entry"
-          " on this ticker is refused by portfolio_log at Step 8, and it must"
-          " not be reported as neutral")
+          + " - the moving averages and the drawdown behind it are unavailable:"
+          " a BREAKOUT-path entry on this ticker is refused by portfolio_log at"
+          " Step 8, and it must not be reported as neutral")
 for t in stop_t:
     print("STOP unanchored HOLDING " + t + " (last bar " + str(bar(t))
           + ") - every closing-basis fact behind it is unknown", file=sys.stderr)
@@ -601,6 +657,15 @@ proceeding**:
   usable daily close on or before the anchor at all — which can happen with a
   PASSED meta quote (bars present, every close null/non-positive), so do not
   read it as "the fetch failed". Relay which one it is — the remedy differs.
+  **Read `last_bar_session` from `chart_statuses.ticker_prices[TICKER]`, which
+  is the ONLY block that has it.** `ticker_price_structure[TICKER]` carries a
+  near-synonym, `last_close_session`, and no `last_bar_session` at all — so
+  looking for it there returns `null` on a perfectly healthy ticker. That cost
+  a real reader a P1 report on 2026-09-02: SOXQ's status block read
+  `2026-09-02` while the structure block, queried for a key it does not
+  define, answered `null` beside `bars_available: 3`, and the two were read as
+  one shape. The two fields agree by construction — both are computed on the
+  adjusted-merged series this ticker's structure was built from.
   **`anchor_session_covered: true` is a FLOOR, not a sufficiency proof, and
   this is the one place the cheap read is not enough.** A gap-free suffix of a
   single bar — an interior gap right before the anchor, or a listing too fresh
@@ -611,6 +676,16 @@ proceeding**:
   entry evidence #2/#3/#4 need does not exist, whatever the coverage flag says.
   Unknown is never neutral — it cannot support an entry, and it cannot be
   reported as one.
+  **`bars_available` and `usable_finite_closes` measure different things and
+  are not a contradiction.** `ticker_price_structure[T].bars_available` is the
+  GAP-FREE SUFFIX — the run of consecutive sessions the moving averages and the
+  hold detectors could be computed over, which one missing bar truncates to a
+  handful. `ticker_indicator_status[T].usable_finite_closes` is the count of
+  finite closes in the separately sliced indicator window, which a hole merely
+  decrements. Seeing "3" beside "125" for the same ticker is the expected shape
+  after a vendor drops a session; `bars_total` in the same block is the whole
+  usable series the extremum facts read. Two readers re-derived this from
+  scratch on consecutive days before it was written down.
 - **A `null` close on ANY `regime_inputs.indices.*` leg your principles
   actually read ⇒ STOP** — check all three (`SPY` / `QQQ` / `^DJI`), not just
   the one your framework happens to name today, and `regime_inputs.vix.close`

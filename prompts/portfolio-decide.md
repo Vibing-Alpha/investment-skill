@@ -120,7 +120,12 @@ You will receive:
      `anchor_session` / `anchor_close` / `anchor_session_covered`,
      `closing_high_status` (`breakout` | `at_prior_high` | `below_prior_high`
      | `unknown`), `prior_high_close` / `prior_high_date` /
-     `pct_vs_prior_high_close`, `lookback_complete` / `inception_proven`,
+     `pct_vs_prior_high_close` (all three null unless `lookback_complete` or
+     `inception_proven` — on a holed or truncated window the observed maximum
+     is only a lower bound, so no exact prior-high number is published),
+     `bars_total` (the whole usable series) vs `bars_available` (only the
+     gap-free tail the moving averages could use), `missing_sessions`,
+     `lookback_span_covered` / `lookback_complete` / `inception_proven`,
      `high_water_drawdown`, `moving_averages` (`ma20`/`ma50`/`ma200`),
      `breakout_hold`, `ma_hold`, `cluster_hold`. The whole block is `null`
      when that ticker's fetch failed; inside a present block an unproven fact
@@ -267,9 +272,13 @@ axis a name can qualify through EITHER:
 
 - **Path A — breakout / new-high confirmation.** A closing-basis new high
   (`closing_high_status: "breakout"` — the anchor close above every close in
-  the producer's completed-session lookback; the producer emits a concrete
-  status only when `lookback_complete` or `inception_proven` is true, else
-  `unknown`) CONFIRMED by volume on the breakout session itself. Volume
+  the producer's completed-session lookback; the producer emits `breakout` or
+  `at_prior_high` only when `lookback_complete` or `inception_proven` is true,
+  and on a window with an interior hole — `lookback_span_covered: true` with
+  `lookback_complete: false` — the strongest verdict available is
+  `below_prior_high`, because a session the vendor did not serve could have
+  beaten the anchor. So a holed ticker can never qualify on path A) CONFIRMED
+  by volume on the breakout session itself. Volume
   confirmation is `volume_ratio_vs_ma20 >= 1.5` **on the breakout session
   itself**, and it confirms a closing breakout — **never as a standalone
   trigger**: a 1.5x session without a closing-basis new high is not path A.
@@ -307,6 +316,27 @@ OR-branch collapse the reasoning moves below forbid (move 2).
   is NOT a failed leg — the ticker is simply too young for one of the
   `[20, 50, 200]` windows. Record the leg unavailable; never score it against
   the ticker. The same holds for an `unavailable` `ma_hold` leg.
+- `ticker_indicator_status[T].compacted_interior_bars > 0` means the run-day
+  indicator block for that ticker was computed over a series with a dropped
+  bar. The block COMPACTS the hole rather than spanning it, so a rolling window
+  that reaches back across the hole covers one extra calendar session: the
+  values are SHIFTED, not absent, and the status still reads `PASSED`. Not
+  every leg is affected — a window that does not reach the hole is untouched —
+  and there is no field saying which, so treat the whole block as suspect for
+  that ticker rather than guessing. The same hole makes
+  `ticker_price_structure` null its moving averages outright; that asymmetry is
+  why the two blocks can disagree about the same ticker on the same day.
+  Measured over ~2,500 random price paths with one interior CLOSE nulled (the
+  real incident's shape — the provider kept high/low/volume) and the hole placed
+  anywhere in the series: the numeric error is small, but every CATEGORICAL leg
+  flips at a similar rate once its value sits near its boundary —
+  `volume_ratio_vs_ma20` crossing 1.5 at 1.2%, `macd.zero_side` 2.3%,
+  `bollinger.position` 2.1%, the RSI 70/30 band 3.0%. **Proximity is the
+  discriminator, not which leg it is.** So for that ticker, treat any
+  categorical reading whose underlying value sits close to its boundary as
+  INDETERMINATE and say so; a reading far from its boundary still carries. Do
+  not treat any leg as exempt — an earlier version of this paragraph named two
+  as safe on a measurement that had barely exercised them.
 - `breakout_hold` is a SEPARATE fact from `closing_high_status`: the latter
   says the anchor session printed a new closing high, the former says an
   EARLIER breakout is still surviving above its frozen level today. A ticker

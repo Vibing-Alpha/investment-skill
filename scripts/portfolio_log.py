@@ -669,6 +669,77 @@ def _enrich_decisions(
 # Blob validation (pre-persist, fail-closed)
 # ---------------------------------------------------------------------------
 
+def _emit_blob_advisories(blob: Dict[str, Any]) -> None:
+    """Print the blob's ADVISORY lines — findings that inform but never refuse.
+
+    Separate from `_validate_blob_shape` because that function is a pure error
+    COLLECTOR and `cmd_write` calls it twice: once up front on shape, once more
+    on principle-index range after strategy.compiled.yaml is loaded. With the
+    prints inside it, every advisory doubled — the field caught the
+    `[context-only]` INFO twice and went looking for a second ADBE decision
+    (feedback 2026-09-02 portfolio (3)); the zero-order `candidate_scan` WARN
+    doubled with it. De-duplicating one message would have left the next call
+    site free to reintroduce the whole class, so the emission moved out instead.
+
+    Call ONCE per run, after the shape pass has already refused a malformed
+    blob — these read fields a shape error would have flagged.
+    """
+    decisions = blob.get("decisions")
+    for d in decisions if isinstance(decisions, list) else []:
+        if not isinstance(d, dict):
+            continue
+        rationale_text = d.get("rationale") if isinstance(d.get("rationale"), str) else ""
+        if d.get("action") in ("skip", "buy") and _VALUATION_GATE_RE.search(rationale_text):
+            if "[context-only]" in rationale_text.lower():
+                # Feedback 2026-06-11 #7: author-declared context citation
+                # (decide.md documents the marker). Keep it VISIBLE but stop
+                # crying wolf — the marker sits in the logged rationale, so
+                # every suppression is auditable. NOT a regex clause-
+                # discriminator (tried and removed as unsound).
+                print(
+                    f"[INFO] portfolio_log: {d.get('ticker', '?')} {d.get('action')} "
+                    f"rationale carries a valuation/ER term marked [context-only] — "
+                    f"lint suppressed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[WARN] portfolio_log: {d.get('ticker', '?')} {d.get('action')} rationale "
+                    f"carries a valuation/ER term — per portfolio-decide.md the entry gate is "
+                    f"technical/principle, not valuation. Confirm the disqualifier is a run-day "
+                    f"technical condition (RSI/pct_b/volume), not richness; if the ER mention "
+                    f"is background context only, append [context-only] to that clause.",
+                    file=sys.stderr,
+                )
+
+    # Zero-order discipline. Raw orders check (NOT _as_list): a malformed
+    # non-list orders_proposed is a shape ERROR and must NOT also be read here
+    # as "zero orders". Shape check is intentionally shallow (dict + non-empty
+    # summary + near_misses-is-list): a deeper validator would re-create the
+    # over-gating this guard avoids.
+    raw_orders = blob.get("orders_proposed")
+    zero_orders = raw_orders is None or (isinstance(raw_orders, list) and not raw_orders)
+    if zero_orders:
+        scan = blob.get("candidate_scan")
+        nm = scan.get("near_misses") if isinstance(scan, dict) else None
+        scan_ok = (
+            isinstance(scan, dict)
+            and isinstance(scan.get("summary"), str)
+            and scan.get("summary").strip()
+            and (nm is None or isinstance(nm, list))
+        )
+        if not scan_ok:
+            print(
+                "[WARN] portfolio_log: no orders proposed AND candidate_scan is "
+                "missing/malformed — per portfolio-decide.md zero-order "
+                "discipline, an all-hold/all-skip run must record candidate_scan "
+                "as an object with a non-empty 'summary' (and, if present, a list "
+                "'near_misses'). Report the rotation/opportunity scan result so a "
+                "silently-defaulted hold-all is visible.",
+                file=sys.stderr,
+            )
+
+
 def _validate_blob_shape(
     blob: Dict[str, Any],
     soft_principles: Optional[List[str]] = None,
@@ -737,29 +808,6 @@ def _validate_blob_shape(
                 errors.append(
                     f"decisions[{i}] ({d.get('ticker', '?')}): {key!r} must be a "
                     f"string, got {type(v).__name__}"
-                )
-        rationale_text = d.get("rationale") if isinstance(d.get("rationale"), str) else ""
-        if d.get("action") in ("skip", "buy") and _VALUATION_GATE_RE.search(rationale_text):
-            if "[context-only]" in rationale_text.lower():
-                # Feedback 2026-06-11 #7: author-declared context citation
-                # (decide.md documents the marker). Keep it VISIBLE but stop
-                # crying wolf — the marker sits in the logged rationale, so
-                # every suppression is auditable. NOT a regex clause-
-                # discriminator (tried and removed as unsound — see above).
-                print(
-                    f"[INFO] portfolio_log: {d.get('ticker', '?')} {d['action']} "
-                    f"rationale carries a valuation/ER term marked [context-only] — "
-                    f"lint suppressed.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[WARN] portfolio_log: {d.get('ticker', '?')} {d['action']} rationale "
-                    f"carries a valuation/ER term — per portfolio-decide.md the entry gate is "
-                    f"technical/principle, not valuation. Confirm the disqualifier is a run-day "
-                    f"technical condition (RSI/pct_b/volume), not richness; if the ER mention "
-                    f"is background context only, append [context-only] to that clause.",
-                    file=sys.stderr,
                 )
     # Probe-2 review round-9a: ONE decision per ticker. The decide.md
     # contract is one entry per ticker; conflicting duplicates (exit AND
@@ -923,28 +971,6 @@ def _validate_blob_shape(
     # Raw orders check (NOT _as_list): a malformed non-list orders_proposed is
     # already flagged above as a shape error and must NOT also be read as
     # "zero orders" here.
-    raw_orders = blob.get("orders_proposed")
-    zero_orders = raw_orders is None or (isinstance(raw_orders, list) and not raw_orders)
-    if zero_orders:
-        scan = blob.get("candidate_scan")
-        nm = scan.get("near_misses") if isinstance(scan, dict) else None
-        scan_ok = (
-            isinstance(scan, dict)
-            and isinstance(scan.get("summary"), str)
-            and scan.get("summary").strip()
-            and (nm is None or isinstance(nm, list))
-        )
-        if not scan_ok:
-            print(
-                "[WARN] portfolio_log: no orders proposed AND candidate_scan is "
-                "missing/malformed — per portfolio-decide.md zero-order "
-                "discipline, an all-hold/all-skip run must record candidate_scan "
-                "as an object with a non-empty 'summary' (and, if present, a list "
-                "'near_misses'). Report the rotation/opportunity scan result so a "
-                "silently-defaulted hold-all is visible.",
-                file=sys.stderr,
-            )
-
     # Closing round-38: principle-index range check (second pass — needs the
     # compiled principle list, which cmd_write loads AFTER the up-front shape
     # call). Tags are extracted by the SAME clause-leading parser the audit
@@ -1864,6 +1890,13 @@ def cmd_write(args: argparse.Namespace) -> int:
     # Shape-validate the blob before any enrichment — replaces the old
     # `d["ticker"]` KeyError path with a structured diagnostic + exit 2.
     shape_errors = _validate_blob_shape(blob)
+    # BEFORE the refusal, not after: the prints used to live inside the
+    # validator, so a malformed blob emitted them and then got refused. Moving
+    # them after the `return 2` would have silently dropped both advisories on
+    # that path (cold review 2026-09-03 reproduced it). ONCE — the blob is
+    # validated a second time below (principle-index range, which needs the
+    # compiled list). See `_emit_blob_advisories`.
+    _emit_blob_advisories(blob)
     if shape_errors:
         print("portfolio_log: decisions blob schema errors:", file=sys.stderr)
         for e in shape_errors:
@@ -2672,14 +2705,28 @@ def _review_state_freshness(prior: pathlib.Path,
         # keys instead. Zero named keys is a real answer, not a fallback:
         # the file's bytes moved but nothing the run reads did — a comment
         # or a re-indent.
-        detail = ""
         if prior_keys is not None:
             cur_keys = state_key_hashes(state)
             moved = sorted(k for k in set(prior_keys) | set(cur_keys)
                            if prior_keys.get(k) != cur_keys.get(k))
+            # "no TRACKED key": `state_key_hashes` skips a non-string
+            # top-level key and deliberately folds a quoted and an unquoted
+            # YAML date onto one digest, so zero moved keys does not prove the
+            # edit was cosmetic — only that nothing the digest tracks moved.
+            # (A numeric change DOES move its key; codex's claim otherwise was
+            # reproduced and refuted, 2026-09-03.)
             detail = (f" (changed: {', '.join(moved)})" if moved
-                      else " (no top-level key changed — a comment or"
-                           " formatting edit)")
+                      else " (no tracked top-level key changed — a comment, a"
+                           " re-indent, or an edit the canonical digest folds)")
+        else:
+            # A seal older than per-key hashing. Falling back SILENTLY put this
+            # line byte-for-byte alongside the zero-keys-moved answer above,
+            # which is a REAL finding — so a run whose watchlist had gained a
+            # ticker read as "only a comment moved" (feedback 2026-09-01
+            # portfolio ③). One-shot per schema bump, and it recurs on every
+            # future one, so it says which of the two it is.
+            detail = (" (key-level attribution unavailable — the prior run's"
+                      " seal carries no per-key hashes)")
         print(f"\n  STALE: {sp.as_posix()} changed since the prior run "
               f"({prior_sha[:8]}… -> {cur_sha[:8]}…){detail}")
 

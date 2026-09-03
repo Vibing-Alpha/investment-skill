@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import sys as _sys
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -141,6 +142,25 @@ def _load_classifier(classifier_path: Optional[Path]):
         return CLASSIFIER_FAILOPEN_MATERIAL_COUNT, False, []
     if not cls.input_healthy:
         return CLASSIFIER_FAILOPEN_MATERIAL_COUNT, False, cls.material_list
+    # `material_count: 0` beside `sources_with_content: 0` is NOT "a quiet
+    # week": every article in the batch arrived with an empty body, so nothing
+    # COULD have been judged material and the file's evidence contribution to
+    # every downstream agent is zero. The field has been carried "for
+    # visibility" since health stopped gating on it, and nothing rendered it —
+    # so the two states were indistinguishable downstream (feedback 2026-09-01
+    # monitor ③: ADBE, 8/8 aggregator articles, all summaries empty).
+    #
+    # Health is deliberately NOT re-gated on it. Empty summaries are normal for
+    # one feed and gating there forced every BQ probe to `partial` forever
+    # (#6, 2026-04-19 MU smoke). Only the silence is fixed.
+    if cls.health.total_articles > 0 and cls.health.sources_with_content == 0:
+        print(
+            f"[WARN] delta.probe: news batch has sources_with_content 0 of "
+            f"{cls.health.total_articles} — every article arrived with an empty "
+            f"body, so material_count {cls.material_count} means 'nothing could "
+            f"be judged', NOT 'nothing happened'.",
+            file=_sys.stderr,
+        )
     return cls.material_count, True, cls.material_list
 
 

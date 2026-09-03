@@ -112,16 +112,41 @@ def ticker_indicator_status(*, price_status, ohlcv, fetched: bool) -> dict:
     TOO_YOUNG:   fetched and PASSED, but under `_MIN_INDICATOR_BARS` finite
                  closes remain after anchoring.
     PASSED:      the block was produced.
+
+    `compacted_interior_bars` — how many bars inside the window the indicator
+    series DROPPED rather than spanned. The block compacts an unusable close
+    and keeps computing, so each dropped bar shifts every rolling window one
+    calendar session wider: measured 2026-09-03 on 126 sessions with one null
+    at position 110, RSI / MACD histogram / Bollinger width / ATR all moved
+    while the status read `PASSED` with 125 usable closes and nothing else to
+    read. A cold review reproduced a MACD zero-side FLIP and a Bollinger width
+    collapse on a different price path — the magnitude is a property of the
+    path, so nothing bounds it.
+
+    The same hole makes `ticker_price_structure` fail its moving averages
+    CLOSED. Two producers, one hole, opposite policies, and the ETF prompt
+    tells the agent that `bollinger.middle` is numerically ma20. Detect and
+    surface, do not repair (the v1.20.0 decision): inventing a close is worse,
+    and refusing the block outright would remove the primary entry evidence for
+    every affected name — 8 of 20 symbols in one real run.
+
+    Present on EVERY branch (None where no series was read), so a consumer
+    never has to tell "no gap" from "key absent" with `.get()`.
     """
-    unavailable = {"status": "UNAVAILABLE", "usable_finite_closes": None}
+    unavailable = {"status": "UNAVAILABLE", "usable_finite_closes": None,
+                   "compacted_interior_bars": None}
     if not fetched or not isinstance(ohlcv, dict):
         return unavailable
     if not isinstance(price_status, dict) or price_status.get("status") != "PASSED":
         return unavailable
-    _, clean = indicator_close_series(ohlcv)
+    merged, clean = indicator_close_series(ohlcv)
     n = len(clean)
     return {"status": "PASSED" if n >= _MIN_INDICATOR_BARS else "TOO_YOUNG",
-            "usable_finite_closes": n}
+            "usable_finite_closes": n,
+            # `merged` is position-preserving (one entry per bar); `clean` is
+            # what the indicator maths actually runs on. The difference IS the
+            # compaction, counted at the same boundary the status is read from.
+            "compacted_interior_bars": max(0, len(merged) - n)}
 
 
 def _compute_ticker_indicators(ohlcv, current_price, bench_returns=None):
@@ -211,26 +236,40 @@ def _sma_rounded(closes, period):
 
 
 def _pct_return(closes, days: int = 63):
-    """Percent return over `days` trading bars, computed on the
-    finite-POSITIVE close series only (None/NaN/Inf/0/negative dropped —
-    closes are prices).
+    """Percent return over `days` SESSIONS, read from the two endpoints of a
+    position-preserving close series.
 
-    Returns None when fewer than days+1 usable closes exist — never raises.
+    Returns None when the series is shorter than days+1, or when either
+    endpoint is not finite-positive — never raises.
     [Calc: (c[-1] / c[-1-days] - 1) * 100]
+
+    Endpoints, not a filtered bar count (fix 2026-09-03). The series used to
+    be compacted to its finite-POSITIVE values and THEN indexed by position,
+    so a dropped interior bar did not shorten the window — it slid the
+    denominator one session further back. A ticker missing one close measured
+    a 64-session return against a gap-free benchmark's 63, and `rs_vs_*_3m`
+    is the difference of the two: measured 5.1670% -> 5.2512% on a smooth
+    synthetic, and the error is one session's return, so it is unbounded.
+    Yahoo served `close: null` on 2026-08-28 for 8 of the 20 symbols in a
+    single /portfolio run, so this was live on real decision numbers.
+
+    A corrupt bar in the MIDDLE now correctly changes nothing (only the
+    endpoints are read); a corrupt ENDPOINT fails closed instead of silently
+    substituting its neighbour. Finite-positive is still the gate — closes
+    are prices, and one 0/negative endpoint previously emitted an extreme
+    numeric return (e.g. -17500%). Same contract as
+    indicators._sanitize_closes, applied per endpoint.
     """
-    # Finite POSITIVE only (fourth cold round): closes are prices — one
-    # corrupt 0/negative bar previously emitted an extreme numeric return
-    # (e.g. -17500%) instead of dropping the bar. Same contract as
-    # indicators._sanitize_closes.
-    finite = [
-        c for c in closes
-        if isinstance(c, (int, float)) and not isinstance(c, bool)
-        and math.isfinite(c) and c > 0
-    ]
-    if len(finite) <= days:
+    def _usable(c):
+        return (isinstance(c, (int, float)) and not isinstance(c, bool)
+                and math.isfinite(c) and c > 0)
+
+    if len(closes) <= days:
         return None
-    prior = finite[-1 - days]
-    return (finite[-1] / prior - 1) * 100.0
+    last, prior = closes[-1], closes[-1 - days]
+    if not (_usable(last) and _usable(prior)):
+        return None
+    return (last / prior - 1) * 100.0
 
 
 def _bench_3m(raw, idx, anchor_iso):
@@ -257,8 +296,12 @@ def _bench_3m(raw, idx, anchor_iso):
     # 0-value benchmark bar previously produced a -100% benchmark return →
     # a fabricated +100% rs_vs_* fact. Unusable bars are dropped, matching
     # the ticker path's treatment.
-    closes = [c for c in merge_adjusted_closes(raw_close, adj) if _fin_pos(c)]
-    return _pct_return(closes, 63)
+    # NOT pre-filtered: `_pct_return` reads the two ENDPOINTS of a
+    # position-preserving series, so compacting here would reintroduce on the
+    # benchmark leg exactly the span drift that function was fixed to remove
+    # (2026-09-03) — and the drift matters most when the INDEX is the series
+    # with the hole, because then every ticker's rs_vs_*_3m moves at once.
+    return _pct_return(merge_adjusted_closes(raw_close, adj), 63)
 
 
 def _anchored_series(ohlcv, anchor_iso):
@@ -1271,6 +1314,48 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
             f"session {anchor} for {len(_u)} symbol(s): {', '.join(_u)} — "
             f"their structure / regime / volume facts are UNANCHORED even "
             f"where the meta quote reads PASSED.",
+            file=sys.stderr,
+        )
+
+    # A SECOND warning, for the shape the first one cannot see. An interior gap
+    # leaves `anchor_session_covered: true`, so on 2026-09-01 this process
+    # exited 0 with EMPTY stdout AND stderr while eight tickers' closing-basis
+    # facts were all unknown — and the RUNBOOK tells the operator to read stderr
+    # for exactly this class of outage.
+    #
+    # `lookback_missing_sessions`, NOT `missing_sessions`: the latter spans the
+    # whole fetched series, so a gap 300 sessions back — which impairs nothing —
+    # would print every run until the fetch window rolled past it, and a warning
+    # that is always on is a warning nobody reads.
+    _gapped = {t: list(blk.get("lookback_missing_sessions") or [])
+               for t, blk in ticker_price_structure.items()
+               if isinstance(blk, dict) and blk.get("lookback_missing_sessions")}
+    if _gapped:
+        _sessions = sorted({d for v in _gapped.values() for d in v})
+        print(
+            f"[WARN] fetch_macro_snapshot: lookback gap for "
+            f"{len(_gapped)} symbol(s): {', '.join(sorted(_gapped))} — the "
+            f"provider served no daily bar for {', '.join(_sessions)}. Their "
+            f"exact prior-high numbers and high-water drawdown fail closed, and "
+            f"a recent gap also nulls every moving average.",
+            file=sys.stderr,
+        )
+    # The indicator half of the same hole, and it does NOT fail closed: the
+    # block compacts the missing bar and keeps computing, so every rolling
+    # window spans one extra calendar session. Named separately because the
+    # two sets need not coincide — the indicator window is its own 126-session
+    # slice, so a gap can impair one layer and not the other.
+    _compacted = sorted(
+        t for t, st in ticker_indicator_statuses.items()
+        if isinstance(st, dict) and (st.get("compacted_interior_bars") or 0) > 0)
+    if _compacted:
+        print(
+            f"[WARN] fetch_macro_snapshot: indicator series COMPACTED for "
+            f"{len(_compacted)} symbol(s): {', '.join(_compacted)} — RSI / MACD "
+            f"/ Bollinger / ATR / volume for these were computed over a series "
+            f"with a dropped bar, so every rolling window spans one extra "
+            f"session per `compacted_interior_bars`. The values are shifted, "
+            f"not absent, and the status still reads PASSED.",
             file=sys.stderr,
         )
 

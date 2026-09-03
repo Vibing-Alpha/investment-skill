@@ -132,7 +132,25 @@ def analysis_readiness(snapshot: Mapping[str, Any], *, ticker: str,
         return refuse("D.READINESS.STRUCTURE", "structure_unavailable")
     if structure.get("anchor_session_covered") is not True:
         return refuse("D.READINESS.STRUCTURE", "structure_unavailable")
-    if not (structure.get("lookback_complete") is True
+    # `lookback_span_covered` OR the stricter `lookback_complete`: this leg
+    # asks whether a one-year lookback is REACHABLE, and a single missing
+    # interior session does not refute that. Keyed on `lookback_complete`, one
+    # vendor `close: null` on 2026-08-28 refused a 30.6%-NLV holding for days —
+    # the structure block computed every fact on the gap-free suffix, which
+    # grows one bar per day, so recovery was priced at 252 sessions. What a hole
+    # actually costs is carried by the facts themselves: the drawdown and the
+    # exact prior-high numbers fail closed, and only the one-sided
+    # `below_prior_high` verdict survives (scripts/price_structure.py).
+    #
+    # `lookback_complete` stays in the disjunction and is NOT redundant
+    # bookkeeping: `etf_thesis.json` RECOMPUTES this predicate from its bound
+    # snapshot at load time, and every snapshot written before 2026-09-03 has no
+    # `lookback_span_covered` key at all. Dropping it would make every stored
+    # ETF thesis recompute to `unavailable` and fail to load — `/portfolio`'s
+    # whole ETF manifest with it. A complete window implies a covered span, so
+    # the disjunction is exact rather than lenient.
+    if not (structure.get("lookback_span_covered") is True
+            or structure.get("lookback_complete") is True
             or structure.get("inception_proven") is True):
         return refuse("D.READINESS.STRUCTURE", "structure_unavailable")
 

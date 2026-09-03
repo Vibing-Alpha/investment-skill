@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+from pathlib import Path as _P
 import os
 import re
 import sys
@@ -147,12 +149,33 @@ def assemble_portfolio_view_model(positions, cash, run_date) -> dict:
         shares, cost_basis = p.get("shares"), p.get("cost_basis")
         card = {"ticker": p["ticker"], "source": p["source"], "analyzed": analyzed,
                 "shares": shares, "cost_basis": cost_basis}
+        if p.get("instrument"):
+            card["instrument"] = p["instrument"]
+        # A price the resolver found somewhere OTHER than this card's own
+        # analysis directory. Two field cases, one 38.5% equity understatement
+        # (feedback 2026-09-01 viz-pricing):
+        #   - a day that ran /score-business alone leaves the newest BQ dir with
+        #     no investment_thesis.json, so `current_price` is None while an
+        #     older dir still holds a real price;
+        #   - a fund has NO score-business artifact at all, so it resolved to no
+        #     directory and left the total entirely — while its own
+        #     `data/etf_profile.json` carried a same-day price.
+        # It carries its OWN date. Stamping an 08-28 price as 09-01 would be
+        # worse than the null it replaces.
+        override = p.get("price_override") or {}
+        ov_price = override.get("price")
+        ov_price = ov_price if isinstance(ov_price, (int, float)) and not isinstance(
+            ov_price, bool) and ov_price > 0 else None
         if analyzed:
             h = vm["header"]
             price = h.get("current_price")
+            price_as_of = vm.get("as_of")
+            if not isinstance(price, (int, float)) and ov_price is not None:
+                price, price_as_of = ov_price, override.get("price_as_of")
             card.update({
                 "as_of": vm.get("as_of"),
                 "current_price": price,
+                "price_as_of": price_as_of if isinstance(price, (int, float)) else None,
                 "conviction": h.get("conviction"),
                 "expected_return_pct": h.get("expected_return_pct"),
                 "max_downside_pct": h.get("max_downside_pct"),
@@ -160,14 +183,27 @@ def assemble_portfolio_view_model(positions, cash, run_date) -> dict:
                 "valuation_stance": vm["valuation"].get("stance"),
                 "src": f"{p['ticker']} {vm.get('as_of')}",
             })
-            mv = None
-            if isinstance(shares, (int, float)) and isinstance(price, (int, float)):
-                mv = round(shares * price, 2)
-                if isinstance(cost_basis, (int, float)) and cost_basis:
-                    card["unrealized_pl_pct"] = round((price / cost_basis - 1) * 100, 2)
-            card["market_value"] = mv
         else:
-            card["market_value"] = None
+            # Priced but unscored. `analyzed: false` keeps its exact meaning —
+            # there is no BQ analysis — and the analysis columns render "not
+            # analyzed" (prompts/generative-ui.md). What changes is that the
+            # market-value arithmetic no longer depends on that flag: a holding
+            # missing from the equity total reads as a holding that does not
+            # exist, which is the failure being fixed.
+            price = ov_price
+            card.update({
+                "as_of": None,
+                "current_price": price,
+                "price_as_of": override.get("price_as_of") if price is not None else None,
+                "src": (f"{p['ticker']} {override.get('source')} "
+                        f"{override.get('price_as_of')}") if price is not None else None,
+            })
+        mv = None
+        if isinstance(shares, (int, float)) and isinstance(price, (int, float)):
+            mv = round(shares * price, 2)
+            if isinstance(cost_basis, (int, float)) and cost_basis:
+                card["unrealized_pl_pct"] = round((price / cost_basis - 1) * 100, 2)
+        card["market_value"] = mv
         (holdings if p["source"] == "holding" else watchlist).append(card)
 
     priced = [h["market_value"] for h in holdings if h.get("market_value") is not None]
@@ -318,6 +354,94 @@ def _cmd_build(args):
     return 0
 
 
+def _dir_session(report_dir):
+    """`reports/T/20260828` -> `2026-08-28`, the run's ET trading day.
+
+    The directory name is the trading day by construction (`allocate-bq-run`),
+    and it is the only date on a run that describes when the PRICE traded
+    rather than when the write-up was finished.
+    """
+    name = _P(report_dir).name
+    if len(name) != 8 or not name.isdigit():
+        return None
+    return f"{name[:4]}-{name[4:6]}-{name[6:]}"
+
+
+def _priced(price, as_of, source):
+    """A price is usable only WITH its own date, and only when it is a finite
+    positive number.
+
+    `price > 0` alone lets `inf` through (cold review 2026-09-03 returned an
+    `inf` priced 2010), and a price with no date would render on the card
+    beside no vintage at all — worse than the null it replaces, because these
+    totals deliberately mix dates and `price_as_of` is the only thing that says
+    which one this row is.
+    """
+    if (not isinstance(price, (int, float)) or isinstance(price, bool)
+            or not math.isfinite(price) or price <= 0):
+        return None
+    if not isinstance(as_of, str) or not as_of.strip():
+        return None
+    return {"price": float(price), "price_as_of": as_of, "source": source}
+
+
+def _resolve_price_elsewhere(ticker, *, have_bq):
+    """A price for a holding whose newest score-business dir has none.
+
+    Two field cases, one 38.5% equity understatement (feedback 2026-09-01
+    viz-pricing): a day that ran /score-business alone leaves the newest BQ dir
+    with no `investment_thesis.json` while an older dir still holds a real
+    price, and an ETF has no score-business artifact at all so it resolves to no
+    directory and leaves the total entirely.
+
+    Returns `{"price", "price_as_of", "source"}` or None. NEVER a zero: an
+    unreadable artifact or an absent price stays unpriced (producer-consumer #4).
+
+    The resolver's guarantee is narrower than it looks — it proves the SKILL's
+    own artifact exists and parses and that its run_meta section is completed,
+    not that it passes the typed loader or carries a usable price. And for
+    `etf-thesis` the artifact it proves is `etf_thesis.json`, which says nothing
+    about the profile beside it. So both branches read defensively.
+    """
+    from scripts.delta.resolver import find_latest_prior
+
+    if have_bq:
+        d = find_latest_prior(ticker, "investment-thesis", include_today=True)
+        if d is None:
+            return None
+        try:
+            th = load_investment_thesis(_P(d) / "investment_thesis.json")
+        except (OSError, ValueError):
+            return None
+        # Same guard `_assemble_from_report_dir` applies to the thesis it loads
+        # (viz.py:_thesis_matches): a directory is named for a ticker, it does
+        # not PROVE one, and a wrong-ticker artifact must never populate this
+        # position's price. Cold review 2026-09-03 planted one and it priced.
+        if th.meta.ticker != ticker:
+            return None
+        # The price's own date is the run's ET TRADING DAY — the directory name
+        # — not `meta.analysis_date`, which is when the agent finished WRITING.
+        # Real corpus 2026-09-03: `reports/SPCX/20260828/` carries
+        # `et_trading_day: 2026-08-28` and `thesis.completed_at:
+        # 2026-08-29T09:06:01Z`, and its thesis stamped `analysis_date:
+        # 2026-08-29`. Dating that 141.50 as 08-29 overstates its vintage by a
+        # full session, which is the exact error `price_as_of` exists to
+        # prevent. The resolver only ever returns a YYYYMMDD run dir.
+        return _priced(th.meta.current_price, _dir_session(d),
+                       "investment_thesis")
+
+    d = find_latest_prior(ticker, "etf-thesis", include_today=True)
+    if d is None:
+        return None
+    prof = _load_optional_json(_P(d) / "data" / "etf_profile.json")
+    if not isinstance(prof, dict) or prof.get("ticker") != ticker:
+        return None
+    # A `price_unavailable` refusal legitimately carries a null price here — the
+    # profile copies it only behind `price_status == PASSED`
+    # (scripts/etf/profile.py). Unpriced, never zero.
+    return _priced(prof.get("price_usd"), prof.get("price_as_of"), "etf_profile")
+
+
 def _cmd_build_portfolio(args):
     """Aggregate the whole portfolio-state universe (holdings + watchlist) into one portfolio
     view-model. A ticker with no analysis is included as analyzed:false (fail-closed, not dropped)."""
@@ -331,7 +455,14 @@ def _cmd_build_portfolio(args):
     for r in rows:
         d = find_latest_prior(r["ticker"], "score-business", include_today=True)
         vm = _assemble_from_report_dir(d, r["ticker"])[0] if d is not None else None
-        positions.append({**r, "vm": vm})
+        entry = {**r, "vm": vm}
+        if vm is None or not isinstance(vm["header"].get("current_price"), (int, float)):
+            ov = _resolve_price_elsewhere(r["ticker"], have_bq=vm is not None)
+            if ov is not None:
+                entry["price_override"] = ov
+                if ov.get("source") == "etf_profile":
+                    entry["instrument"] = "etf"
+        positions.append(entry)
     pvm = assemble_portfolio_view_model(positions, cash, args.run_date)
     _atomic_write(Path(args.output), json.dumps(pvm, indent=2, ensure_ascii=False))
     return 0

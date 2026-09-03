@@ -109,8 +109,9 @@ direct evidence there is for a timing call, so prefer them over an indirect
 proxy (`bollinger.middle` is numerically ma20, but a reader cannot tell that
 you meant the moving average):
 
-`anchor_session`, `anchor_close`, `bars_available`, `lookback_sessions`,
-`lookback_complete`, `prior_high_close`, `prior_high_date`,
+`anchor_session`, `anchor_close`, `bars_available`, `bars_total`,
+`lookback_sessions`, `lookback_span_covered`, `lookback_complete`,
+`missing_sessions`, `prior_high_close`, `prior_high_date`,
 `pct_vs_prior_high_close`, `closing_high_status`,
 `high_water_drawdown.status`, `high_water_drawdown.peak_close`,
 `high_water_drawdown.peak_date`, `high_water_drawdown.trough_close`,
@@ -123,13 +124,63 @@ Plus one indicator leaf outside the guaranteed list above:
 `volume.price_volume_relationship`, which classifies whether a move carried
 volume with it.
 
-**Every key is always present, but some hold `null`.** You are only asked to
-write when readiness already proved the block — it covers the anchor session
-and the one-year lookback (or the fund's whole life) — so there are exactly
-two CLASSES of null to expect: every `high_water_drawdown` measurement when
-its `status` reads `no_active_drawdown` (the fund is at its own high; that
-status IS the finding), and `moving_averages.ma200` on a fund younger than 200
-sessions. `volume.price_volume_relationship` degrades on its own and reads
+**Every key is always present, but some hold `null`.** Readiness proved the
+block covers the anchor session and REACHES BACK across the one-year lookback
+(or the fund's whole life). It did NOT prove the window is hole-free, so expect
+these classes of null:
+
+1. Every `high_water_drawdown` measurement when its `status` reads
+   `no_active_drawdown` — the fund is at its own high, and that status IS the
+   finding.
+2. `moving_averages.ma200` on a fund younger than 200 sessions.
+3. **A window with an interior hole** (`missing_sessions` non-empty,
+   `lookback_complete: false` while `lookback_span_covered: true`) — the vendor
+   served no close for one or more sessions inside the year. There, `bars_total`
+   is the history that exists and `bars_available` is only the gap-free tail the
+   rolling windows could use, so:
+   - `prior_high_close` / `prior_high_date` / `pct_vs_prior_high_close` are
+     **null** — the observed maximum is only a LOWER BOUND of the true prior
+     high, and a lower bound must not be published under an exact name;
+   - `high_water_drawdown` reads `unknown` with every measurement null — a depth
+     measured across a hole is SHALLOWER than the truth, the permissive
+     direction;
+   - `closing_high_status` can still read `below_prior_high`, which IS provable
+     (the anchor is under a close that was actually observed), but it can never
+     read `breakout` or `at_prior_high` — a hidden bar could have beaten the
+     anchor;
+   - all three `moving_averages` can be null when the hole is recent, because a
+     20-bar mean spanning 21 calendar sessions is a wrong number.
+
+   Say so in the timing section when this happens. "The one-year high basis is
+   unavailable for N missing session(s)" is a finding; silence reads as a fund
+   with no history.
+
+**One more thing the indicator block does NOT do.** Where the structure block
+fails closed on a hole, the indicator block COMPACTS it and keeps computing, so
+a rolling window that reaches back across the hole covers one extra calendar
+session. `ticker_indicator_status.<TICKER>.compacted_interior_bars > 0` says
+this happened; the values are SHIFTED, not absent, and the status still reads
+`PASSED`. Not every leg is affected — a window that does not reach the hole is
+untouched — and nothing records which, so treat the whole block as suspect for
+that fund. This is also why `bollinger.middle` is not a safe stand-in for
+`moving_averages.ma20` on such a run: the two are computed over different
+series.
+
+`compacted_interior_bars` is a HEALTH flag, not a technical field: report it in
+your prose when it is non-zero, and do not cite it as evidence for a timing
+call — the citable list above is unchanged.
+
+Measured over ~2,500 random price paths with one interior CLOSE nulled (the
+real incident's shape — the provider kept high/low/volume) and the hole placed
+anywhere in the series: the numeric error is small, but every CATEGORICAL leg
+flips at a similar rate once its value sits near its boundary —
+`volume_ratio_vs_ma20` crossing 1.5 at 1.2%, `macd.zero_side` 2.3%,
+`bollinger.position` 2.1%, the RSI 70/30 band 3.0%. **Proximity is the
+discriminator, not which leg it is.** Treat a categorical reading whose value
+sits close to its boundary as indeterminate and say so; one far from its
+boundary still carries. No leg is exempt.
+
+`volume.price_volume_relationship` degrades on its own and reads
 `insufficient_data` on a fund with many zero-volume sessions. Cite a field
 only where it holds an actual value: a null cited as a number fails the run,
 and an absence is not evidence of anything.
