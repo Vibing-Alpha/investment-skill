@@ -143,22 +143,47 @@ def _load_classifier(classifier_path: Optional[Path]):
     if not cls.input_healthy:
         return CLASSIFIER_FAILOPEN_MATERIAL_COUNT, False, cls.material_list
     # `material_count: 0` beside `sources_with_content: 0` is NOT "a quiet
-    # week": every article in the batch arrived with an empty body, so nothing
-    # COULD have been judged material and the file's evidence contribution to
-    # every downstream agent is zero. The field has been carried "for
-    # visibility" since health stopped gating on it, and nothing rendered it —
-    # so the two states were indistinguishable downstream (feedback 2026-09-01
-    # monitor ③: ADBE, 8/8 aggregator articles, all summaries empty).
+    # week": every article in the batch arrived with an empty body, so the
+    # file's evidence contribution to every downstream agent is zero. The field
+    # has been carried "for visibility" since health stopped gating on it, and
+    # nothing rendered it — so the two states were indistinguishable downstream
+    # (feedback 2026-09-01 monitor ③: ADBE, 8/8 aggregator articles, all
+    # summaries empty).
+    #
+    # The line says TITLES ALONE, not "nothing could be judged". The earlier
+    # wording contradicted the classifier's own contract, and an operator who
+    # believed it re-ran a sound no_op by hand (feedback 2026-09-03 monitor ③).
+    # It does NOT swing to "headlines are enough" either: `source` is its own
+    # input field, so the whitelist test never depended on the body, while the
+    # category test and the exclusions (marketing, syndication, peer-only) DO
+    # read it — which is why the line names BOTH error directions. A warning
+    # that misstates its own severity, in either direction, gets the decision
+    # re-litigated every run.
     #
     # Health is deliberately NOT re-gated on it. Empty summaries are normal for
     # one feed and gating there forced every BQ probe to `partial` forever
     # (#6, 2026-04-19 MU smoke). Only the silence is fixed.
+    #
+    # If that is ever revisited, MACHINE-DERIVE THIS FIELD FIRST. Both counts
+    # are the classifier's own report: `validate_classifier_output` checks only
+    # that they reconcile against each other
+    # (material + low_signal + excluded == total), never against the article
+    # list, so a self-consistent mis-report is accepted. That is tolerable
+    # TODAY because neither is decision-bearing — `total_articles` gates only
+    # `input_healthy > 0`, whose harmful direction (under-report) fails OPEN to
+    # a rerun, and `sources_with_content` gates nothing. Gate on it and a
+    # number nothing verifies starts deciding whether a quarter's scores get
+    # recomputed.
     if cls.health.total_articles > 0 and cls.health.sources_with_content == 0:
         print(
             f"[WARN] delta.probe: news batch has sources_with_content 0 of "
             f"{cls.health.total_articles} — every article arrived with an empty "
-            f"body, so material_count {cls.material_count} means 'nothing could "
-            f"be judged', NOT 'nothing happened'.",
+            f"body, so material_count {cls.material_count} was judged on TITLES "
+            f"ALONE. The source whitelist is unaffected (`source` is its own "
+            f"input field), but the category test and the exclusions "
+            f"(marketing release, syndicated repost, peer-only mention) had "
+            f"only the title to read: this batch can BOTH miss a material item "
+            f"and keep one the body would have excluded.",
             file=_sys.stderr,
         )
     return cls.material_count, True, cls.material_list

@@ -24,6 +24,11 @@ This is your SOLE input (no other files, no WebSearch). It contains, per the
   `{evidence_id, kind(condition|news|catalyst|staleness), text, meta}`. The `evidence_id`s
   are the ONLY handles you use to reference evidence.
 - `prior_evidence_ids` and `warnings` — context only.
+- `price_provenance.dropped_sessions`: `[{symbol, sessions}]` — the market sessions this
+  run's daily series carries NO usable close for. A FAULT, not a provenance note: the moves
+  and moving averages built on that series skip a session. It is top-level and per-SYMBOL,
+  not a `per_ticker` field, and it is the only place an INTERIOR gap appears — the two
+  per-ticker health flags both read the series' ends and stay `true` through one.
 
 ## Step 1 — Classify news materiality
 
@@ -65,6 +70,19 @@ due catalysts. Cite the matched fact in your reason.
   (prior high, moving-average and breakout holds, drawdown, the volume ratio) is `unknown`.
   Say which session the series actually reaches (`last_bar_session`) in `reason` — the remedy
   differs by whether it is this ticker's own series or the whole run that lagged.
+- **A deferral comes from the probe's machine facts, never from a condition's own prose.**
+  A thesis written on a day with a data gap says so in the clause text ("RE-EVALUATE ON A
+  REPAIRED SERIES … spans the missing {YYYY-MM-DD} bar", "GAP-SHIFTED"). That sentence is
+  frozen at authoring time and CANNOT expire: the provider can backfill the bar and the
+  clause still asserts the gap. So judge the gap on THIS run's facts, never on what the
+  clause claims about itself. The three that answer it, and they are not interchangeable:
+  `indicators_available` and `anchor_session_covered` are per-ticker but both read the ENDS
+  of the series, so an INTERIOR hole leaves both `true`; the interior hole is reported ONLY
+  at top level, as a `price_provenance.dropped_sessions` entry `{symbol, sessions}`. A
+  ticker absent from that list has no missing interior session this run, whatever its
+  clauses say. When a clause asserts a gap the probe no longer shows, do not defer — say in
+  `reason` that the clause's stated data caveat is stale in this run's series and route the
+  ticker to `/investment-thesis` so the text gets rewritten against a whole series.
 
 ## Step 3 — Group into items + route
 
@@ -182,3 +200,10 @@ outside `reason`/`summary`.
 `route` ∈ {`/investment-thesis`, `/portfolio`, `/score-business`, `/screen-stocks`, `/etf-thesis`}; `priority`
 ∈ {`critical`, `watch`, `info`}; `evidence_refs` are `evidence_id` strings that MUST exist in
 the probe. If nothing is worth attention, emit `{"summary": "...", "items": []}`.
+
+If `summary` counts the items, count the per-ticker ones and the one
+portfolio-level (`ticker: null`) entry SEPARATELY — "5 per-ticker + 1
+portfolio-level", not "6 items". They are not the same kind of thing: a
+per-ticker entry names work on one instrument, while the portfolio-level entry
+is the whole book, and a single total makes the reader open the list to find
+out which. (A daily operator reconciled that mismatch by hand every run.)

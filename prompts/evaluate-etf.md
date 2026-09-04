@@ -263,12 +263,20 @@ One JSON object, nothing else:
   "merit_recommendation": "add",
   "merit_evidence": [ { "source_kind": "API", "artifact": "etf_profile", "field_path": "...", "value": 0, "as_of": null, "formula": null } ],
   "kind": "sector",
-  "technical_timing": { "assessment": "favorable", "evidence": [ "..." ] },
-  "environment": { "assessment": "...", "evidence": [ "..." ] },
+  "technical_timing": { "assessment": "favorable|neutral|unfavorable|unknown", "evidence": [ { "source_kind": "API", "artifact": "etf_market_snapshot", "field_path": "...", "value": 0, "as_of": null, "formula": null } ] },
+  "environment": { "assessment": "<short prose — this is the only assessment that takes prose>", "evidence": [ { "source_kind": "API", "artifact": "etf_market_snapshot", "field_path": "...", "value": 0, "as_of": null, "formula": null } ] },
   "entry_conditions": [ { "id": "E1", "statement": "...", "artifact": "etf_market_snapshot", "watch_field_path": "...", "operator": "ge", "threshold": 0 } ],
   "invalidation_conditions": [ { "id": "I1", "statement": "...", "artifact": "etf_profile", "watch_field_path": "...", "operator": "gt", "threshold": 0 } ]
 }
 ```
+
+All THREE evidence lists — `merit_evidence`, `technical_timing.evidence`,
+`environment.evidence` — are lists of the `observed_evidence_ref` object shown
+at the top of this prompt. Never a bare string: prose there is refused, and it
+is refused for the whole document, so one sentence in the wrong slot costs the
+run its thesis. `technical_timing.assessment` is the four-value enum and
+nothing else; the narrative that wants to sit beside it goes in
+`environment.assessment`, the one assessment written in prose.
 
 Do not write `entry_eligibility`, `entry_reasons`, `analysis_readiness`,
 `analysis_reasons`, `profile_sha256`, or `market_snapshot_sha256`. They are

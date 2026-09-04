@@ -302,18 +302,28 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
 [ -n "$REPORT_DIR" ] || { echo "FATAL: could not resolve REPORT_DIR — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
-"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.classifier_output.json" || exit 1
+"$PYBIN" -m scripts.clear_stale "$REPORT_DIR/.classifier_output.thesis.json" || exit 1
 ```
 
 (cold-round 7: a reused
 session dir + a missed classifier write would silently drive the reuse
 gates with the EARLIER invocation's counts; cleared, a missed write reads
-as classifier-absent → fail-open to rerun). Then spawn a subagent with
+as classifier-absent → fail-open to rerun).
+
+**`.classifier_output.thesis.json`, not `.classifier_output.json`** — this leg
+classifies a DIFFERENT window from the `/score-business` leg (the events
+anchor, not the prior BQ run day) over the same `03_company_news.json`. Under
+one name a cascade run had the thesis leg clear and overwrite the BQ leg's
+product, so `run_meta.bq.agents_run` recorded a `classifier` whose output no
+longer existed and an auditor read the wrong window's classification back as
+the basis for the BQ tier (feedback 2026-09-03 monitor-b ③). Two windows are
+two artifacts. The second call is not waste and cannot be saved: this leg runs
+after that one and needs the wider window. Then spawn a subagent with
 `<captured-abs-ROOT>/prompts/delta/classify-news.md` as its instructions,
 passing articles from `<captured-abs-ROOT>/<REPORT_DIR>/data/03_company_news.json`
 with `since_date = <the printed CANONICAL_ANCHOR>` and `session_date = <the run's session_et date as ISO `YYYY-MM-DD` — the run DIRECTORY spells that same session without separators, so a directory `<YYYYMMDD>` becomes `<YYYY>-<MM>-<DD>`; NOT the calendar date>` and `fetch_timestamp = <the `validated_at` string from `<REPORT_DIR>/data/00_validation.json` — the classifier cannot see the fetch time, the news file carries only `{company, news}`>`. `session_date` is what `fetch_timestamp_today` is judged against: a calendar comparison is false on every non-trading day and fail-opened the gate for a batch with no new article in it (2026-08-29). The rubric is at
 `<captured-abs-ROOT>/.claude/rules/delta-materiality.md`. Instruct it to WRITE
-its output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.json` —
+its output to `<captured-abs-ROOT>/<REPORT_DIR>/.classifier_output.thesis.json` —
 substitute the concrete absolute path into the dispatch prompt (the subagent
 inherits neither this shell's variables nor its cwd; `.json` writes are
 allowed for subagents).
@@ -351,7 +361,7 @@ PRIOR_THESIS_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
 DECISION=$("$PYBIN" -m scripts.delta.probe decide-events-reuse \
     --report-dir "$REPORT_DIR" \
     --prior-thesis-dir "$PRIOR_THESIS_DIR" \
-    --classifier-output "$REPORT_DIR/.classifier_output.json")
+    --classifier-output "$REPORT_DIR/.classifier_output.thesis.json")
 
 DECISION_KIND=$(echo "$DECISION" | cut -d'|' -f1)
 GATES_PASSED=$(echo "$DECISION" | cut -d'|' -f2)
@@ -1139,7 +1149,7 @@ decision kind alone:
   it on a first run / empty anchor / pre-delta artifact — so it must NOT be
   hardcoded into the list. Prepend it only when `canonical_anchor` (re-read
   from `.run_state.json`) is non-empty. Gate on the anchor (not the
-  `.classifier_output.json` file) so a classifier that was invoked but
+  `.classifier_output.thesis.json` file) so a classifier that was invoked but
   failed to write valid output (Step 2's fail-open path) is still
   recorded — it ran and incurred cost, and agents_run is a write-only
   cost/audit trail.

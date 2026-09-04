@@ -125,6 +125,10 @@ events rerun (thesis).
 
 `sources_with_content` is a third field you report but it NO LONGER
 gates health. Many real feeds emit valid headlines with empty summary
-bodies, yet the classification is still reliable on headlines alone.
+bodies, and gating there forced every probe to re-analyse forever. Note
+what an empty body does and does not cost you: `source` is given to you as
+its own field, so test 1 is unaffected; tests 2 and 3 and the exclusions
+(marketing release, syndicated repost, peer-only mention) then have only
+the title to read. Judge on the title in that case.
 Keep populating it accurately (count of articles whose `summary` is
 non-empty) — it is surfaced in run_meta for visibility only.

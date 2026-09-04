@@ -73,7 +73,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.21.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
+"$PYBIN" -m scripts.version_skew --expected-min "1.21.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** all same-day
@@ -1331,6 +1331,32 @@ an ENTRY — a `decisions` list one ticker short parses and carries all six
 keys. The counts are the only thing that catches that, and they are yours to
 check: nothing downstream can. If either is not what you wrote, re-emit with a
 different delimiter, and do not proceed to the logger on a mismatch.
+
+**Then dry-run the citation split BEFORE the logger writes anything.** The
+`cited_this_run` / `not_cited_this_run` audit is computed by the logger from
+each decision's clause-leading `#N` — NOT from the sentence you wrote in
+`principle_audit_interpretation`. Author that sentence blind and it can
+contradict the machine's answer inside the same file, at exit 0 with no
+warning, and the contradiction is only visible after the log is on disk, where
+the NEXT run's Step 0 reads it (feedback 2026-09-03 portfolio ①). This block
+writes nothing:
+
+```bash
+cd "<captured-abs-ROOT>"
+PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
+ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
+[ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
+"$PYBIN" -m scripts.portfolio_log audit \
+  --decisions-blob "reports/portfolio/$ETDAY/.decisions_blob.json" \
+  --constraints strategy.compiled.yaml \
+  || { echo "REFUSED: portfolio_log audit — the blob would not write either. Fix what it names and re-emit the blob; do NOT call write." >&2; exit 1; }
+```
+
+**Read the printed `not_cited` against your `principle_audit_interpretation`.**
+If the sentence names a principle the split records as CITED (or the reverse),
+the sentence is wrong, not the split — re-emit the blob with it corrected and
+run this block again. Correcting it after `write` costs the whole step: the log
+has to be re-written and the superseded one archived.
 
 Then call the logger. If the write command fails (the `|| { …; exit 1; }`
 guard fires), STOP — the refusal reason is on stderr, the validator

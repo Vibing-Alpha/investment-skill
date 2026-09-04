@@ -789,6 +789,22 @@ def _fetch_rates_live():
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _compaction_warn_scope(compacted, gapped) -> str:
+    """How the compaction warning names its cohort.
+
+    One dropped bar fires both warnings, and both spelled the same list — two
+    lists read as two outages (feedback 2026-09-03 v1.21.0 §3). Only a list
+    EXACTLY equal to the one already printed becomes a pointer at it; the sets
+    are still computed independently because they need not coincide, and a
+    pointer at a cohort the symbol is not in is worse than the repetition.
+    A function, not an inline conditional, because the unequal branch cannot
+    be reached end-to-end from one dropped bar.
+    """
+    if gapped and set(compacted) == set(gapped):
+        return f"the SAME {len(compacted)} symbol(s) as the lookback gap above"
+    return f"{len(compacted)} symbol(s): {', '.join(compacted)}"
+
+
 def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports",
                          vendor_aliases=None):
     """Fetch macro market snapshot.
@@ -1320,8 +1336,15 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     # A SECOND warning, for the shape the first one cannot see. An interior gap
     # leaves `anchor_session_covered: true`, so on 2026-09-01 this process
     # exited 0 with EMPTY stdout AND stderr while eight tickers' closing-basis
-    # facts were all unknown — and the RUNBOOK tells the operator to read stderr
-    # for exactly this class of outage.
+    # facts were all unknown — a silent success is the one outcome a data-layer
+    # fault must never produce.
+    #
+    # The stderr line is a COURTESY, not the contract. Everything it says is
+    # already in the returned document (`ticker_price_structure[T]
+    # .lookback_missing_sessions`, `ticker_indicator_status[T]
+    # .compacted_interior_bars`), and every consumer must read it there.
+    # Prose can be reworded — this very line was, in v1.21.1 — so an operator
+    # procedure that parses it is coupled to wording no test pins.
     #
     # `lookback_missing_sessions`, NOT `missing_sessions`: the latter spans the
     # whole fetched series, so a gap 300 sessions back — which impairs nothing —
@@ -1351,7 +1374,7 @@ def fetch_macro_snapshot(tickers=None, rates_fallback=None, reports_dir="reports
     if _compacted:
         print(
             f"[WARN] fetch_macro_snapshot: indicator series COMPACTED for "
-            f"{len(_compacted)} symbol(s): {', '.join(_compacted)} — RSI / MACD "
+            f"{_compaction_warn_scope(_compacted, _gapped)} — RSI / MACD "
             f"/ Bollinger / ATR / volume for these were computed over a series "
             f"with a dropped bar, so every rolling window spans one extra "
             f"session per `compacted_interior_bars`. The values are shifted, "

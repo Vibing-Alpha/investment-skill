@@ -44,19 +44,23 @@ class ClassifierOutput:
         `sources_with_content > 0` requirement. Financial Datasets'
         news API routinely returns valid headlines with empty summary
         bodies, which previously forced every BQ probe to fail-open to
-        `partial` forever. The classifier prompt judges materiality on
-        headlines alone, so empty summaries do not invalidate its
-        output. `sources_with_content` remains in the health dataclass
-        for visibility, just not as a gating condition.
+        `partial` forever. An empty body degrades the classification, it
+        does not void it — `source` is a separate input field, so the
+        whitelist test is untouched, and the category test falls back to
+        the title. `sources_with_content` remains in the health dataclass
+        for visibility, just not as a gating condition; `probe_inputs`
+        warns on an all-empty batch and names what that can cost.
         """
         return (
             self.health.fetch_timestamp_today
             and self.health.total_articles > 0
             # An output with no `excluded_count` is one whose count partition
             # could not be checked at all. There is no legacy to excuse it —
-            # `.classifier_output.json` is a same-day transient both skills
-            # CLEAR before every dispatch, so absence means a FRESH classifier
-            # ignored its contract. Reading that as healthy let its
+            # The classifier output is a same-day transient each skill CLEARS
+            # before its own dispatch (`.classifier_output.json` for
+            # score-business, `.classifier_output.thesis.json` for
+            # investment-thesis — two windows, two artifacts), so absence
+            # means a FRESH classifier ignored its contract. Reading that as healthy let its
             # `material_count: 0` drive a `no_op` and reuse yesterday's
             # events with the window unverifiable (codex review 2026-08-29).
             # Unhealthy here fails OPEN to a rerun, which is the safe

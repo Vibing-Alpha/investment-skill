@@ -567,6 +567,23 @@ def _compact_macro(macro: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _principle_audit_split(decisions, all_principles) -> tuple:
+    """The `(cited, not_cited)` split the decision log persists.
+
+    ONE implementation, per `.claude/rules/producer-consumer.md` #3: `cmd_write`
+    persists this and `cmd_audit` previews it, and a preview that can drift
+    from the write it previews is worse than no preview — the author would
+    read the green as clearance. Callers pass whichever decision list they
+    hold; `_enrich_decisions` copies `principle_cited` verbatim and preserves
+    order, so the enriched and raw lists give the same answer.
+    """
+    cited = _principle_tags(
+        [d.get("principle_cited") for d in decisions
+         if isinstance(d, dict) and d.get("principle_cited")])
+    all_tags = [f"#{i + 1}" for i in range(len(all_principles))]
+    return cited, [t for t in all_tags if t not in cited]
+
+
 def _principle_tags(cited_strings: List[str]) -> List[str]:
     """Extract the structured '#N' principle tags from each principle_cited string.
 
@@ -2433,13 +2450,11 @@ def cmd_write(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # principle audit
-    cited_strings = [d.get("principle_cited") for d in decisions if d.get("principle_cited")]
-    cited_tags = _principle_tags(cited_strings)
-    all_principles = all_principles_from_doc
-    # map '#1', '#2' … to principle strings by order
-    all_tags = [f"#{i+1}" for i in range(len(all_principles))]
-    not_cited = [t for t in all_tags if t not in cited_tags]
+    # principle audit — shared with `cmd_audit`, which previews this exact
+    # split before the write so the author's `principle_audit_interpretation`
+    # cannot contradict it inside the file the next run reads.
+    cited_tags, not_cited = _principle_audit_split(
+        decisions, all_principles_from_doc)
     principle_audit = {
         "cited_this_run": cited_tags,
         "not_cited_this_run": not_cited,
@@ -2749,6 +2764,61 @@ def _review_state_freshness(prior: pathlib.Path,
               f"does not cover these")
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Print the principle-citation split the logger WOULD persist. No writes.
+
+    `cited_this_run` / `not_cited_this_run` are derived by the logger from each
+    `principle_cited`'s clause-leading `#N`, while the author writes
+    `principle_audit_interpretation` — a sentence ABOUT that split — before
+    ever seeing it. When the two disagree the log contradicts itself, exits 0,
+    and the contradiction surfaces only after the artifact is on disk, where
+    the next run's Step 0 reads it (feedback 2026-09-03 portfolio ①).
+
+    This is the SAME computation, callable before the write: both commands go
+    through `_principle_audit_split` and the same range-aware
+    `_validate_blob_shape`, so a dry run that passes cannot differ from the
+    write that follows. Deliberately not a gate and not a new rule. It needs
+    neither macro nor stress test, because the author runs it while the blob
+    is still the only thing that exists.
+    """
+    from scripts.schemas import SchemaError
+    try:
+        blob = json.loads(
+            pathlib.Path(args.decisions_blob).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"portfolio_log: cannot read --decisions-blob "
+              f"{args.decisions_blob}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(blob, dict):
+        print(f"portfolio_log: --decisions-blob is a "
+              f"{type(blob).__name__}, not an object", file=sys.stderr)
+        return 2
+    try:
+        _doc, _hard, _src, all_principles = \
+            _prepare_compiled_context(args.constraints)
+    except (SchemaError, yaml.YAMLError, OSError) as exc:
+        print(f"portfolio_log: strategy.compiled.yaml invalid: "
+              f"{type(exc).__name__}: {exc}. Recompile via /portfolio skill.",
+              file=sys.stderr)
+        return 2
+
+    errors = _validate_blob_shape(blob, soft_principles=all_principles)
+    if errors:
+        print("portfolio_log: REFUSED — the blob would not write:",
+              file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        return 2
+
+    cited, not_cited = _principle_audit_split(
+        blob.get("decisions") or [], all_principles)
+    print(f"cited: {cited}   not_cited: {not_cited}")
+    print("Read your principle_audit_interpretation against THIS split before "
+          "calling `write`: the logger persists the line above, not the "
+          "sentence.")
+    return 0
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from scripts.delta.calendar import today_et
     # Use ET trading day to match run-dir naming + delta-layer semantics
@@ -2864,6 +2934,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     w.set_defaults(func=cmd_write)
+
+    a = sub.add_parser(
+        "audit",
+        help="Dry-run the principle-citation split the write WOULD persist")
+    a.add_argument("--decisions-blob", required=True,
+                   help="LLM-authored blob JSON path")
+    a.add_argument("--constraints", default="strategy.compiled.yaml")
+    a.set_defaults(func=cmd_audit)
 
     r = sub.add_parser("review", help="Review prior run's follow-ups")
     r.add_argument("--reports-dir", default="reports/portfolio")

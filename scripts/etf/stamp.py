@@ -14,9 +14,11 @@ Three outcomes, and the model is only invoked for one of them:
 never by the model. A model that could write its own readiness could write
 itself past the gate that exists to stop it.
 
-Write order matters and is not decorative: stage both files, validate the
-STAGED bundle, then promote. A validation failure after promotion would
-leave an invalid artifact where consumers look. Promotion is per-file atomic
+Write order matters and is not decorative: stage the JSON, validate the
+STAGED bundle, render and stage the markdown, then promote. A validation
+failure after promotion would leave an invalid artifact where consumers look;
+a render before validation reports shape drift as a renderer traceback
+instead of as the schema's named field. Promotion is per-file atomic
 via `cli_utils`; it is NOT transactional across the pair, and this module
 does not claim otherwise.
 
@@ -49,9 +51,16 @@ _PREFIX = "etf.stamp"
 
 # Fields the model owns. Anything else it sends is dropped rather than merged
 # — a model cannot widen its own writable surface by inventing a key.
+#
+# `narrative` is deliberately NOT here. It sat on this list with no validator
+# and no renderer behind it, so a model that filled it wrote a paragraph into
+# a document nobody reads it out of — worse than refusing the field, because
+# it looks accepted (feedback 2026-09-03 monitor 5). The schema still names it
+# in `MODEL_AUTHORED_FIELDS`, which is a FORBID list for the refusal variant
+# and covers documents this producer did not write; a name is free there.
 _MODEL_FIELDS = ("merit_recommendation", "merit_evidence", "kind",
                  "technical_timing", "environment", "entry_conditions",
-                 "invalidation_conditions", "narrative")
+                 "invalidation_conditions")
 
 
 def _held(state: Mapping[str, Any], ticker: str) -> bool:
@@ -364,14 +373,24 @@ def main(argv=None) -> int:
 
     # Stage, validate the STAGED bundle, then promote. Validating after
     # promotion would leave an invalid artifact where consumers look.
+    #
+    # The RENDER goes after the validation, not before it. `render_markdown`
+    # indexes the evidence lists as bound reference objects, so a model that
+    # sent prose there used to die inside `_evidence_lines` with a bare
+    # `TypeError: string indices must be integers` — while the schema, one
+    # line later, already knew how to say `technical_timing.evidence[0]:
+    # expected an object, got str`. Three lists share that renderer, so the
+    # traceback did not even say which one (feedback 2026-09-03 monitor 1/4).
+    # Validating first makes the named error the one the operator sees, and
+    # leaves the renderer facing only documents the schema has accepted.
     staged_json = Path(args.output_json).with_suffix(".staging.json")
     staged_md = Path(args.output_markdown).with_suffix(".staging.md")
-    markdown = render_markdown(doc)
     try:
         write_output(doc, str(staged_json))
-        write_text_atomic(markdown, str(staged_md))
         load_etf_bundle(staged_json, args.profile, args.market_snapshot,
                         expected_ticker=ticker)
+        markdown = render_markdown(doc)
+        write_text_atomic(markdown, str(staged_md))
     except (OSError, ValueError) as exc:
         print(f"{_PREFIX}: staged artifact failed validation, nothing "
               f"promoted: {exc}", file=sys.stderr)
