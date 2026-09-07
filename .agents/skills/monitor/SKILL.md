@@ -92,7 +92,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check --portfolio
 ```
@@ -108,7 +108,7 @@ so each later block **re-derives it in-block** (a fresh shell loses these variab
 re-deriving returns the same dir all day).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
 [ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
@@ -132,7 +132,7 @@ COPIES, never moves: the rerun's own new/seen baseline is today's existing
 `action_plan.json`, read under its canonical name.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
 [ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE" >&2; exit 1; }
@@ -170,7 +170,7 @@ the pre-validation draft of the plan that IS archived.
 
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
 [ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
@@ -225,7 +225,7 @@ run's `action_plan.raw.json`, and the pipeline would go on to validate/render st
 output. Removing it first makes the gate prove THIS run produced a fresh plan:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")"
 "$PYBIN" -m scripts.clear_stale "$REPORT_DIR/action_plan.raw.json" || exit 1
@@ -248,7 +248,7 @@ non-zero the router produced nothing: re-dispatch ONCE with the same inputs; if 
 fails a second time, surface the error and STOP:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")"
 [ -s "$REPORT_DIR/action_plan.raw.json" ] || { echo "FATAL: router produced no action_plan.raw.json" >&2; exit 1; }
@@ -257,7 +257,7 @@ REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import to
 ## Step 3: Validate + stamp (HARD gate)
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")"
 "$PYBIN" -m scripts.monitor validate \
@@ -275,8 +275,13 @@ escalate to the user). This bounds the loop and never renders an unvalidated pla
 
 ## Step 4: Render the digest (deterministic)
 
+> If any Bash block in this section exits non-zero, **STOP** and show its stderr to the
+> user. That now includes a failed `cd` to the repo root: the root has moved or vanished,
+> and continuing from whatever directory the shell is left in can write this run into a
+> different clone.
+
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 REPORT_DIR="reports/monitor/$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")"
 "$PYBIN" -m scripts.monitor render-digest \

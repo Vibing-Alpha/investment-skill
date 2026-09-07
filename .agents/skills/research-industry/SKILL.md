@@ -102,7 +102,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check
 ```
@@ -146,7 +146,7 @@ If this block exits non-zero, STOP and surface the error (bad input is a
 user-input problem; see the exit-2 note below).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RAW_INDUSTRY="<INDUSTRY>"   # agent-substituted user input (e.g. "AI芯片") — never carried across blocks
 if [ -z "$RAW_INDUSTRY" ]; then
@@ -205,7 +205,7 @@ pre-translate or extend `scripts/industry/normalize_slug.py:_CJK_ALIASES`.
 If this block exits non-zero (invalid tier value), STOP and surface the error.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -241,7 +241,7 @@ printf 'TIER=%s\n' "$TIER"
 ### Step 2: Fetch sector ETF signal
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -265,7 +265,7 @@ If any block in this step exits non-zero, **STOP** and surface the error. A fail
 **If `no_op`**: copy prior JSON, regenerate `summary.md` only (with delta note).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -344,7 +344,7 @@ comes from in-block re-derivation (ETF map) or the run-scoped state file —
 nothing user-shaped is interpolated into Python source:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -425,7 +425,7 @@ pre-binding prior stays legacy-lenient; a post-binding prior already
 carries the marker).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -491,7 +491,7 @@ nothing from the last one — substitute the concrete `$REPORT_DIR` you
 resolved earlier):
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.clear_stale "<resolved-REPORT_DIR>/summary.md" || exit 1
 ```
@@ -519,7 +519,7 @@ changelog + user output). If the gate exits non-zero, re-dispatch ONCE; if it
 fails a second time, STOP and surface the failure:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")
@@ -534,7 +534,7 @@ If this block exits non-zero (corrupt run-state tier, mktemp failure), STOP
 and surface the error.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SLUG="<SLUG>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-industry-run --slug "$SLUG")

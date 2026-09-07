@@ -50,12 +50,21 @@ named, but the batch gives no way to settle whether the reports are independent
 (most stored batches carry no summary bodies at all — and it comes a whole batch
 at a time, so expect either titles-only or full bodies, not a percentage). Count it as material and record that credibility was unresolved. The
 asymmetry decides it: in the delta layer `material_count: 0` is what authorises
-REUSING the prior events snapshot, so low-signal is the permissive branch — a
-false material costs one re-analysis, a false immaterial ships a pre-event
-snapshot into a trade decision.
+REUSING the prior events snapshot, so low-signal is the permissive branch. A false
+material is not free — a positive count requires at least a `partial` refresh
+(full-tier triggers take precedence when they also fire), which re-fetches
+and reruns the forward and industry scoring plus synthesis, not merely the events
+agent — but a false immaterial ships a pre-event snapshot into a trade decision.
+That is the trade, stated at its real price.
 
 A LONE non-whitelisted report of an uncorroborated story is still low-signal —
-it contributes to `low_signal_headlines`, not to `material_count`. So is an item
+it contributes to `low_signal_headlines`, not to `material_count`. That rule is
+SUBSUMED, however, and kept only as a reading aid: it has no scope of its own.
+If the CATEGORY is not material the content test already refuses the item; if the
+category IS material and independence cannot be settled, path (c) takes it. There
+is no third case, on any batch shape — 29 of 42 stored batches are titles-only,
+where every article is at once unsettleable and a lone story nobody else carries.
+Do not use it as a tiebreaker. So is an item
 whose CATEGORY or company you cannot pin down: 1(c) escalates an unresolved
 SOURCE on a clearly material event, never an unidentifiable event.
 
@@ -77,6 +86,33 @@ At least one of these must match:
    full-year guide".
 5. **Major capital events**: large buyback programs, dividend
    initiation / cut / raise, equity raise, notes offering.
+
+### Three boundaries, so they are not decided by taste
+
+**Size — do not judge magnitude.** The categories say "major customer contract",
+"large acquisition", "large buyback"; treat those words as naming the KIND of event,
+not a bar to clear. You are given `{title, source, published_at, summary, url}` and
+nothing else — no market cap, no revenue — so the only defensible threshold, a
+relative one, is not computable from your inputs. (Amounts named across the stored
+corpus span several orders of magnitude — $100M and $500B are examples from it,
+not its bounds — and issuer size spans further, so no absolute number
+works either.) This gate decides whether to RE-RUN an analysis; the events layer
+weighs magnitude afterwards with the data for it. A $2.1B commitment by a $4T
+company is a contract event here even though it is ~0.05% of the issuer.
+
+**Whose event — it must change the SUBJECT company's own state.** Its contracts, its
+management, the regulatory action it faces, its capital structure. A startup it
+invested in raising a round does not qualify; nor does its technology validating
+someone else's product. Being NAMED in the story is not the test — being the party
+whose state changes is.
+
+**Read the event, not the genre.** An article in an excluded class can carry a
+material fact: an opinion column headlined "Google Keeps AdX" asserts a concrete
+regulatory outcome. Test 3 reads the EVENT REFERENCED, not the nature of the piece.
+Refusing it for being an opinion column is the same move as refusing it for its
+carrier — which is exactly what this rubric was rewritten to stop. (The exclusions
+still bite when the article carries no event at all: a rating change, sector
+commentary, a marketing release.)
 
 ### Explicit exclusions
 

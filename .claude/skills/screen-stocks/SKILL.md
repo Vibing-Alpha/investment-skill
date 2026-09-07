@@ -93,7 +93,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check
 ```
@@ -236,7 +236,7 @@ them rather than duplicating here.
 ### Step 3: Invoke + read + present
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 
 

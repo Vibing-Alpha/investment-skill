@@ -103,7 +103,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check
 ```
@@ -119,7 +119,7 @@ business-quality verdict for something with no business — plausible-looking an
 meaningless. So identity is settled BEFORE anything is fetched or allocated.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.etf.detect --ticker "<TICKER>" --root "$PWD"
 ```
@@ -136,13 +136,18 @@ Read `instrument_type` from the printed JSON:
 
 ## Prerequisites
 
+> If any Bash block in this section exits non-zero, **STOP** and show its stderr to the
+> user. That now includes a failed `cd` to the repo root: the root has moved or vanished,
+> and continuing from whatever directory the shell is left in can write this run into a
+> different clone.
+
 A complete BQ analysis must exist. Use the delta-aware resolver — NOT
 raw `ls | sort -r | head -1`. Per CLAUDE.md, raw glob sort returns
 same-day not-yet-assembled dirs and failed-tier runs, silently
 picking broken data.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"   # agent-substituted (e.g. AAPL) — substituted into every block, never exported across them
 # delta-aware: skips corrupt / same-day-not-assembled / failed-tier dirs
@@ -190,7 +195,7 @@ vocabulary (letters + dot, 1-10 chars). If this block exits non-zero
 (invalid ticker), STOP and tell the user.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 echo "$TICKER" | grep -Eq '^[A-Z][A-Z0-9.-]{0,9}$' \
@@ -241,7 +246,7 @@ valid BQ is for this session ⇒ no cascade.
 - User declines: skip the cascade. Run probe-level fetch alone so
   events has fresh data:
   ```bash
-  cd "<captured-abs-ROOT>"
+  cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
   PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
   TICKER="<TICKER>"
   REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -269,7 +274,7 @@ the run's must-not-re-derive state: the block below persists it into
 classifier gate) re-read it from there instead of re-deriving it.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -306,7 +311,7 @@ block — this shell inherits nothing from the last one. If it exits non-zero,
 earlier same-session output could drive the reuse gates.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -358,7 +363,7 @@ into `$REPORT_DIR/.run_state.json`, and Steps 4/7 re-read them from there
 decision kind), STOP and surface the error.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -417,7 +422,7 @@ If `reuse`: copy prior events.json forward with prune + stale-date
 rewrite + reuse_meta stamping via the dedicated CLI:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -446,7 +451,7 @@ audit).
 If `rerun`: FIRST clear the stale destination, in its own block:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -473,7 +478,7 @@ host lacks the tool → the agent reports
 STOP the run — do not synthesize a thesis from memory-era events:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -514,7 +519,7 @@ prior fail-safe value if the stamp fails but the fallback is fine; a clear
 early abort only in the case Step 6.5 would have crashed anyway.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -545,7 +550,7 @@ legacy-lenient). On failure, re-dispatch the events agent ONCE with the
 SchemaError inlined; if it fails again, STOP.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -597,7 +602,7 @@ block exits non-zero, STOP and surface the error (a producer crash, not a
 DL4 fail-close).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -729,7 +734,7 @@ that file). Same rationale for `investment_thesis.json` +
 `thesis_summary.md` cleared here ahead of the Step 6 synthesis gates:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -770,7 +775,7 @@ RE-DISPATCH that agent ONCE; if it fails again, **STOP** and surface the
 failure:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -890,7 +895,7 @@ contracted producer) — do not skip the deliverable; if it fails again,
 STOP and surface the failure:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -922,7 +927,7 @@ and preserves any agent-emitted `meta.current_price` / `current_price_source`.
 If either block below exits non-zero, STOP and surface the error.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -950,7 +955,7 @@ never divides by a zero/garbage `max_downside` (the schema's strict-negative MD
 gate catches that in 6.4). The synthesis agent no longer emits CE.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -970,7 +975,7 @@ artifact can't contaminate downstream steps. If it fails, STOP and
 surface the SchemaError.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -1168,7 +1173,7 @@ decision kind alone:
   (read `$REPORT_DIR/.alpha_status.json` written in Step 6.5 to know).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")
@@ -1222,7 +1227,7 @@ fires, **STOP** — do not continue to Step 8: reporting a completed run whose
 changelog was never written is the failure the gate exists to prevent.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver allocate-bq-run --ticker "$TICKER")

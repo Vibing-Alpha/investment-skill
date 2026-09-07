@@ -49,8 +49,11 @@ credible SOURCE, which can be either:
   material and say in `reason` that credibility was unresolved — an unresolved SOURCE on a clearly
   material event escalates; an unidentifiable event does not.
 
-**Low-signal** (ignore for routing): pure marketing, a lone non-whitelisted repost of an
-uncorroborated story, bare analyst rating changes, generic sector commentary. Only material news
+**Low-signal** (ignore for routing): pure marketing, bare analyst rating changes, generic
+sector commentary. ("A lone non-whitelisted repost of an uncorroborated story" was listed
+here too; it is SUBSUMED — it has no scope of its own — a non-material CATEGORY is already
+refused, and a material one with unsettleable sourcing is taken by the unresolved-credibility
+path. Do not use it as a tiebreaker.) Only material news
 may drive an item.
 
 **`news_status`**: if a ticker's `news_status` is `failed` (common for foreign ADRs the feed

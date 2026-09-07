@@ -104,7 +104,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.22.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
+"$PYBIN" -m scripts.version_skew --expected-min "1.23.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -117,7 +117,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check
 ```
@@ -140,7 +140,7 @@ prerequisite. A misrouted ETF that reaches the stock path produces a
 plausible-looking business-quality score for a fund with no business.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.etf.detect --ticker "<TICKER>" --root "$PWD"
 ```
@@ -158,7 +158,7 @@ Read the printed JSON:
 ## Step 2 — Run-day market snapshot
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
@@ -176,7 +176,7 @@ If any block in this step exits non-zero, **STOP** and surface the error. A fail
 ## Step 3 — Profile and eligibility
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.compile_strategy --strategy strategy.yaml --output strategy.compiled.yaml
 # Clear any same-day model artifact HERE, before the eligibility branch below —
@@ -210,7 +210,7 @@ replaced.
 First check readiness, and skip the model if it is not `ready`:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -c "
 import json, sys
@@ -238,7 +238,7 @@ unbound number fails the run rather than reaching the user.
 ## Step 5 — Stamp
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 # `find_latest_prior` returns the run DIRECTORY. `--prior-thesis` wants the
 # FILE inside it — passing the directory makes the stamp exit 1 with
@@ -301,7 +301,7 @@ that actually landed, so a later run that replaces the file is detectable
 rather than silently inherited.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 SHA=$("$PYBIN" -c "
 import hashlib

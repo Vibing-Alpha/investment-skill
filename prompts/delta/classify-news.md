@@ -28,7 +28,8 @@ A news item is MATERIAL if and only if:
    returns `material_count: 0` on a batch that plainly reports a CEO
    change, and the consumer then reuses a snapshot from before the event.
    A LONE non-whitelisted report of an uncorroborated story stays
-   low-signal.
+   low-signal — but see the note below: that rule is subsumed, not a
+   separate test you can reach for.
    Two things about `source` you cannot work out from the field itself:
    it names the **carrier, not the originator** — `Finnhub:Yahoo` on a body
    that opens "CNBC reported…" is Yahoo carrying CNBC, so the label alone
@@ -128,6 +129,34 @@ list does not name (conference, rumor, analyst action), and
 is removed while those terms remain there. Do not delete it as an unused value; if
 you ever route such an item here, `other` is where it goes.
 
+**On the "lone uncorroborated report" rule:** it is SUBSUMED and kept only as a reading aid. It has no scope of its own — if the CATEGORY is not material, test 3 already refuses the item; if the category IS material and independence cannot be settled, 1(c) takes it. There is no third case. (Measured: 29 of the 42 stored batches are titles-only, where every article is at once unsettleable and a lone story nobody else carries, so the two rules cover the identical set. The 10 full-body batches collapse the same way one step later.) Do not reach for it as a tiebreaker — it decides nothing the two rules above have not already decided.
+
+### Three boundaries, so they are not decided by taste
+
+**Size — do not judge magnitude.** The categories say "major customer contract",
+"large acquisition", "large buyback"; treat those words as naming the KIND of event,
+not a bar to clear. You are given `{title, source, published_at, summary, url}` and
+nothing else — no market cap, no revenue — so the only defensible threshold, a
+relative one, is not computable from your inputs. (Amounts named across the stored corpus
+span several orders of magnitude — $100M and $500B are examples from it, not its
+bounds — and issuer size spans further, so no absolute number works either.) This gate decides whether to RE-RUN an analysis; the events layer
+weighs magnitude afterwards with the data for it. A $2.1B commitment by a $4T
+company is a contract event here even though it is ~0.05% of the issuer.
+
+**Whose event — it must change the SUBJECT company's own state.** Its contracts, its
+management, the regulatory action it faces, its capital structure. A startup it
+invested in raising a round does not qualify; nor does its technology validating
+someone else's product. Being NAMED in the story is not the test — being the party
+whose state changes is.
+
+**Read the event, not the genre.** An article in an excluded class can carry a
+material fact: an opinion column headlined "Google Keeps AdX" asserts a concrete
+regulatory outcome. Test 3 reads the EVENT REFERENCED, not the nature of the piece.
+Refusing it for being an opinion column is the same move as refusing it for its
+carrier — which is exactly what this rubric was rewritten to stop. (The exclusions
+still bite when the article carries no event at all: a rating change, sector
+commentary, a marketing release.)
+
 ### Count scopes — the three counts are NOT interchangeable
 
 - `material_count` and `low_signal_count` count **only articles you actually
@@ -208,8 +237,9 @@ PERMISSIVE branch here, not the safe one. **When the CATEGORY is material**
 (a C-suite change, M&A, regulatory action, guidance cut, major capital
 event) **and the company is named, but you cannot settle the source question
 either way, count it as MATERIAL** and say in `reason` that credibility was
-unresolved. The asymmetry decides it: a false MATERIAL costs one
-re-analysis, while a false IMMATERIAL ships a snapshot from BEFORE the event
+unresolved. The asymmetry decides it: a false MATERIAL is not free — a positive count requires at
+least a `partial` refresh (a full-tier trigger takes precedence), which re-fetches and reruns forward + industry scoring and
+synthesis — while a false IMMATERIAL ships a snapshot from BEFORE the event
 into a trade decision — which is the exact failure this rubric was rewritten
 to stop. Low-signal is for items whose CATEGORY is not material (marketing,
 bare rating changes, sector commentary, peer-only mentions), and for a lone

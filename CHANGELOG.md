@@ -3,6 +3,13 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.23.0 — 2026-09-07
+
+- A run whose repo folder has disappeared now stops instead of continuing from wherever the shell happened to be. Every command block in every skill opens by changing into your project folder, and that step was the one thing in them whose failure nothing noticed — on a mount that had gone stale, the run carried on in whatever directory was current and, if that was another copy of the project, wrote its results there. All 110 of those steps now halt the run and say so.
+- Three questions the news-materiality rules left to the model are now answered in the rules. Whether a number is big enough to matter: not the classifier to judge — it is given headlines and sources, never a market cap, so it flags the KIND of event and the analysis layer weighs the size afterwards. Whose event it is: the story must change YOUR company, not a startup it invested in. And an opinion column that states a real regulatory outcome is judged on the outcome, not on being an opinion column — refusing it for its genre is the same mistake as refusing it for who published it.
+- One rule was withdrawn rather than reworded: "a lone unwhitelisted report of an uncorroborated story stays low-signal" decides nothing. If the story is not a material kind of event, it is already refused; if it is and the sourcing cannot be settled, the unresolved-credibility path takes it. There is no third case on any batch, and it was stated as a live test in four places across three files.
+- The verification pass that replays stored analyses through the current loaders no longer reports two old files as regressions. They break a rule that shipped after they were written, and re-running those tickers could never have cleared it — a re-run writes a new dated folder and leaves the old ones untouched. Rules now carry the date they started applying, which the pass already did for one earlier rule and not for this one.
+
 ## v1.22.0 — 2026-09-07
 
 - Every skill failed to find the repo for anyone who picked the clone itself as their Cowork folder. The lookup expected the repo one level below the mount, so a folder mounted AS stock-v7 matched nothing and each skill reported that setup had not been run. It now accepts both layouts, and at mount level it no longer requires the folder to be named stock-v7 either, since that name is yours to choose and a clone of the published repo does not carry it.

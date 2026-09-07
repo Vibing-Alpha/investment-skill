@@ -130,7 +130,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 "$PYBIN" -m scripts.version_skew --expected-min "__BAKED_AT_SYNC__" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
-Every Bash block below starts with `cd "<captured-abs-ROOT>"` for the same
+Every Bash block below that touches the repo starts with a gated `cd "<captured-abs-ROOT>" || exit` for the same
 reason: each one may be its own fresh shell.
 
 ## 0. Scope — read this before the freeze file
@@ -418,7 +418,7 @@ Per D1's frozen cadence, one pull session covers:
   > mistake loses the window for good.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.track_record coverage --tool get_account_trades
 ```
@@ -565,7 +565,7 @@ softened:**
 > # directory; `s|/|-|g` alone leaves `2.invest` and finds nothing).
 > PROJ=~/.claude/projects/"$(pwd | sed 's|[/.]|-|g')"
 > [ -d "$PROJ" ] || { echo "FATAL: no transcript dir at $PROJ — either this shell did not start in the session's original directory, or the transcript is not on THIS machine at all (see 'when the transcript and the clone are on different machines' below)" >&2; exit 1; }
-> cd "<captured-abs-ROOT>"
+> cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 > PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 > # what the log holds (id / tool / ARGS / bytes / file). The args column is
 > # the one to read carefully: two get_account_trades rows differing only by
@@ -643,7 +643,7 @@ and a re-pull can close; an over-claim is permanent.
 Only once that file holds the tool's own bytes, archive it:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.track_record pull --tool <tool> \
   --args '<the args JSON, exactly as issued>' \
@@ -729,7 +729,7 @@ On a first-ever run this step finds nothing and falls through immediately.
 what it prints — `due` needs it, and so does the `tag` block at the end:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 date -u +%Y-%m-%dT%H:%M:%SZ          # FIRST — capture this, substitute it below
 ```
 
@@ -737,7 +737,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ          # FIRST — capture this, substitute it bel
    it prints:
 
    ```bash
-   cd "<captured-abs-ROOT>"
+   cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
    PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
    "$PYBIN" -m scripts.track_record due --as-of <captured-NOW>
    ```
@@ -760,7 +760,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ          # FIRST — capture this, substitute it bel
 2. List what is currently open:
 
    ```bash
-   cd "<captured-abs-ROOT>"
+   cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
    PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
    "$PYBIN" -m scripts.track_record open
    ```
@@ -810,7 +810,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ          # FIRST — capture this, substitute it bel
    its own.
 
    ```bash
-   cd "<captured-abs-ROOT>"
+   cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
    PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
    "$PYBIN" -m scripts.track_record tag --at <captured-NOW> < /absolute/path/to/resolved_event.json \
      && "$PYBIN" -m scripts.track_record tag --at <captured-NOW> < /absolute/path/to/retired_event.json
@@ -896,7 +896,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ          # FIRST — capture this, substitute it bel
    wording:
 
    ```bash
-   cd "<captured-abs-ROOT>"
+   cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
    PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
    "$PYBIN" -m scripts.track_record due --as-of <captured-NOW>
    ```
@@ -978,7 +978,7 @@ reading itself cannot wait until then.
 List the fills awaiting a decision:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.track_record unlinked
 ```
@@ -999,7 +999,7 @@ printed 555 rows, and the per-group prediction this step asks for is not
 executable at that size. `--since YYYY-MM-DD` bounds what is LISTED:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.track_record unlinked --since <captured-CUTOFF>
 ```
@@ -1397,7 +1397,7 @@ backlog forever while the journal claimed it was tagged.
 > line the user never agreed to.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 # <captured-NOW> is the stamp taken when the user STATED THIS GROUP — see
 # the per-group rule at the top of this step, not a fresh reading here.
@@ -1682,7 +1682,7 @@ reaches the benchmark step on, once, and a later run does not rewrite
 that pin.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PIN="reports/track-record/<YYYYQn>/SPY.csv"
 # `-e`, not `-s`: `ensure_pinned` treats the file as pinned when it EXISTS,
 # so a zero-byte pin left by an external mishap makes the report refuse to
@@ -1693,7 +1693,7 @@ PIN="reports/track-record/<YYYYQn>/SPY.csv"
 ```
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.track_record report --quarter <YYYYQn>
 ```
@@ -1731,7 +1731,7 @@ writing `summary.md`, so stopping first would leave a new, irreproducible
 file on disk that this session never told the user about.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PIN="reports/track-record/<YYYYQn>/SPY.csv"
 # `-e` here too. The two readings are compared against each other, so a
 # zero-byte pin answering `no` to one and `yes` to the other reports a
@@ -1793,7 +1793,7 @@ it is on this machine and nowhere else — the skill made no copy. List the
 paths, and say which of them cannot be re-created:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 # The FULL listing, not a tail. This is the inventory of what exists ONLY
 # on this machine — truncating it can silently drop the files THIS run
 # just archived, which is exactly the newest, least-backed-up content a

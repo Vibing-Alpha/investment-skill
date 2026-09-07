@@ -99,7 +99,7 @@ PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/pyth
 ## Preflight: Money-path config
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check --portfolio
 ```
@@ -115,7 +115,7 @@ This closes the loop between "what I said I'd watch" and "what I'm
 deciding now".
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.portfolio_log review
 ```
@@ -155,7 +155,7 @@ set, with no warning anywhere; on 09-02 the only safe response available was to
 run fewer tickers, which costs 2-4 refreshes a day.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -c "
 import json, sys
@@ -288,7 +288,7 @@ covered only `principles`, so an edit produced a cache hit and the decision log
 kept attesting the superseded policy.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.compile_strategy \
   --strategy strategy.yaml \
@@ -359,11 +359,16 @@ silently disabled citation-range validation in the decision log.
 
 ## Step 3: Classify each ticker (delta-era staleness)
 
+> If any Bash block in this section exits non-zero, **STOP** and show its stderr to the
+> user. That now includes a failed `cd` to the repo root: the root has moved or vanished,
+> and continuing from whatever directory the shell is left in can write this run into a
+> different clone.
+
 Classify all portfolio tickers in one batch call to amortize Python
 startup across N tickers (avoids ~200ms × N subprocess fork cost):
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKERS="AAPL,MU,NVDA,..."  # comma-separated holdings + watchlist
 "$PYBIN" -m scripts.delta.portfolio_classify --tickers "$TICKERS"
@@ -521,7 +526,7 @@ For tickers with `investment_thesis.json`, read the **full file** (~10KB).
 ## Step 4: Fetch Macro Data
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 # Vendor aliases (symbol_aliases in portfolio-state.yaml): built by the SAME
 # tested helper /monitor uses — no hand-assembled JSON. "{}" is a valid
@@ -546,7 +551,7 @@ and `portfolio-state.yaml`, so it knows which tickers are HELD and applies
 the held / watchlist-only asymmetry the STOPs describe:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY" >&2; exit 1; }
@@ -801,7 +806,7 @@ The prepass covers holdings AND watchlist, because a buy is usually for
 something not yet held.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -854,7 +859,7 @@ be authored against — the log writer refuses/warns when they drift before Step
 undetected; the validation-time hash only covers validate→log).
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -1013,7 +1018,7 @@ at Step 6 and again at Step 8 — so an artifact replaced between authoring and
 logging is caught rather than silently logged against.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -1039,7 +1044,7 @@ reconstructable by the later fresh-shell blocks that re-derive their own
 paths.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -1077,7 +1082,7 @@ silence it. The fixed paths are reconstructable per-call, exactly like
 `macro.json`.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -1296,7 +1301,7 @@ happened to equal the delimiter and so lost a trailing key, fails the block —
 it never half-replaces a blob that was already there.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY" >&2; exit 1; }
@@ -1351,7 +1356,7 @@ the NEXT run's Step 0 reads it (feedback 2026-09-03 portfolio ①). This block
 writes nothing:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }
@@ -1372,7 +1377,7 @@ guard fires), STOP — the refusal reason is on stderr, the validator
 output is preserved for the re-run, and NO decision log exists yet:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 ETDAY=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y%m%d'))")
 [ -n "$ETDAY" ] || { echo "FATAL: could not resolve ETDAY — every path below would be built from an EMPTY variable, and on a root session (Cowork) that writes the run into / with exit 0 instead of failing" >&2; exit 1; }

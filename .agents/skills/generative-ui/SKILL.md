@@ -100,7 +100,7 @@ has none, so an ETF ticker would fail here with a message about a missing
 business-quality artifact rather than about the instrument.
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -c "
 from pathlib import Path
@@ -159,7 +159,7 @@ Portfolio mode reads holdings (`portfolio-state.yaml`), so it is gated like
 `/portfolio`. Run this ONLY in portfolio mode:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 "$PYBIN" -m scripts.config_gate check --portfolio
 ```
@@ -177,7 +177,7 @@ do not carry `$VM`/`$OUT` across blocks).
 **Portfolio mode:**
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 RUN_DATE=$("$PYBIN" -c "from scripts.delta.calendar import today_et; print(today_et().strftime('%Y-%m-%d'))")
 [ -n "$RUN_DATE" ] || { echo "FATAL: could not resolve RUN_DATE — every path below would be built from an EMPTY variable, collapsing the dated run directory the delta resolver keys on (a silently relocated artifact, .claude/rules/skill-architecture.md #9)" >&2; exit 1; }
@@ -194,7 +194,7 @@ fabricated).
 **Single-ticker mode:**
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 TICKER="<TICKER>"   # agent-substituted (e.g. AMD)
 REPORT_DIR=$("$PYBIN" -m scripts.delta.resolver find-latest-prior \
@@ -214,7 +214,7 @@ First clear any stale dashboard so the existence gate proves THIS run produced a
 report dir is reused across runs):
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 OUT="<captured-OUT-path>"   # agent-substituted absolute literal from Step 1
 "$PYBIN" -m scripts.clear_stale "$OUT" || exit 1
@@ -232,7 +232,7 @@ dispatch, HARD existence gate — if it fails, re-dispatch ONCE; on a second fai
 error and STOP:
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 OUT="<captured-OUT-path>"
 [ -s "$OUT" ] || { echo "FATAL: generator produced no dashboard" >&2; exit 1; }
 ```
@@ -240,7 +240,7 @@ OUT="<captured-OUT-path>"
 ## Step 3: Verify data fidelity (HARD gate)
 
 ```bash
-cd "<captured-abs-ROOT>"
+cd "<captured-abs-ROOT>" || { echo "FATAL: cannot cd to the resolved repo root — it has moved or vanished. Do NOT continue from the current directory: if it happens to be another stock-v7 checkout, this run silently writes into the wrong repo." >&2; exit 1; }
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
 VM="<captured-VM-path>"
 OUT="<captured-OUT-path>"
