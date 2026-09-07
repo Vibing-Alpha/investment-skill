@@ -56,7 +56,16 @@ if [ -z "$ROOT" ]; then
   # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
   # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
   # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
-  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+  # TWO layouts, because a mount is whatever HOST FOLDER the user picked: the repo may be the mount
+  # ITSELF (they picked the clone: /sessions/<id>/mnt/stock-v7 — field report 2026-09-07, which the
+  # one-depth glob missed and cost every skill its root) or a child of it (they picked the parent:
+  # /sessions/<id>/mnt/<sel>/stock-v7). At mount depth the NAME is not required — it is the user's
+  # folder name, not ours (a clone of the published `investment-skill` repo is not called stock-v7);
+  # the composite marker is the identity check, and it is what makes dropping the name safe.
+  # Two separate `ls` calls, NOT one two-glob command: under a nomatch shell an unmatched pattern
+  # kills the whole command, so the layout that does not apply would take the one that does with it.
+  HITS=$({ ls -d /sessions/*/mnt/*; ls -d /sessions/*/mnt/*/stock-v7; } 2>/dev/null \
+    | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
     | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
         && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
   if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
@@ -881,8 +890,8 @@ if compiled_p.exists():
     strategy_sha = (yaml.safe_load(compiled_p.read_text(encoding='utf-8')) or {}).get('source_hash')
 tmp.write_text(json.dumps({
     'state_file_sha256': hashlib.sha256(state_bytes).hexdigest(),
-    # WHICH top-level key moved, so the next run's Step 0 `review` can tell
-    # "the recommendation was EXECUTED" (an `open_orders` row appeared) from
+    # WHICH top-level key moved, so the next run's Step 0 review can tell
+    # "the recommendation was EXECUTED" (an open_orders row appeared) from
     # "the thesis was OVERTURNED" (holdings edited) — opposite directions
     # that a whole-file hash pair reports identically (feedback 2026-08-31
     # portfolio (3)). Hashed by the SAME function review compares with, over

@@ -43,7 +43,11 @@ credible SOURCE, which can be either:
   different publishers, not one wire syndicated under several names. Real feeds are dominated by
   aggregators (Benzinga, MarketBeat, GuruFocus, Yahoo, SeekingAlpha, ChartMill …); a concrete
   material event that several independent aggregators each carry is a credible signal even with
-  no whitelisted carrier. One outlet re-posting another's story counts ONCE, not as corroboration.
+  no whitelisted carrier. One outlet re-posting another's story counts ONCE, not as corroboration, OR
+- **unresolved, conservatively**: the CATEGORY is material and the company is named, but the feed
+  gives you no way to settle independence (most articles carry an empty summary). Treat it as
+  material and say in `reason` that credibility was unresolved — an unresolved SOURCE on a clearly
+  material event escalates; an unidentifiable event does not.
 
 **Low-signal** (ignore for routing): pure marketing, a lone non-whitelisted repost of an
 uncorroborated story, bare analyst rating changes, generic sector commentary. Only material news

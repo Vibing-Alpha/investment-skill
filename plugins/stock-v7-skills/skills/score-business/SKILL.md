@@ -59,7 +59,16 @@ if [ -z "$ROOT" ]; then
   # Cowork (ephemeral cwd): glob the clone under USER mounts only (exclude outputs/uploads + dot-folders),
   # verify the composite repo marker (a stray dir merely NAMED stock-v7 must not count — round-11),
   # then realpath-dedup (symlinked mounts → same real dir must NOT count as multiple roots).
-  HITS=$(ls -d /sessions/*/mnt/*/stock-v7 2>/dev/null | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
+  # TWO layouts, because a mount is whatever HOST FOLDER the user picked: the repo may be the mount
+  # ITSELF (they picked the clone: /sessions/<id>/mnt/stock-v7 — field report 2026-09-07, which the
+  # one-depth glob missed and cost every skill its root) or a child of it (they picked the parent:
+  # /sessions/<id>/mnt/<sel>/stock-v7). At mount depth the NAME is not required — it is the user's
+  # folder name, not ours (a clone of the published `investment-skill` repo is not called stock-v7);
+  # the composite marker is the identity check, and it is what makes dropping the name safe.
+  # Two separate `ls` calls, NOT one two-glob command: under a nomatch shell an unmatched pattern
+  # kills the whole command, so the layout that does not apply would take the one that does with it.
+  HITS=$({ ls -d /sessions/*/mnt/*; ls -d /sessions/*/mnt/*/stock-v7; } 2>/dev/null \
+    | grep -vE '/mnt/(outputs|uploads|\.[^/]*)(/|$)' \
     | while IFS= read -r h; do (cd "$h" 2>/dev/null && [ -d scripts ] && [ -d prompts ] \
         && [ -f strategy.example.yaml ] && pwd -P); done | sort -u || true)
   if [ "$(printf '%s\n' "$HITS" | grep -c .)" -gt 1 ]; then
@@ -76,7 +85,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.21.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
+"$PYBIN" -m scripts.version_skew --expected-min "1.22.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -303,7 +312,7 @@ printf 'TIER=%s\n' "$TIER"
 > forever. Read literally, the rule above makes such a ticker permanently
 > unanalysable; in practice every past run ignored the rule here, which is
 > worse than not having it. So proceed — and say so to the user — **only when
-> all four hold**, checked against `$REPORT_DIR/data/00_validation.json`:
+> all five hold**, checked against `$REPORT_DIR/data/00_validation.json`:
 > 1. the fetch's OWN stderr, which you have above, ends in its
 >    `VALIDATION COMPLETE` / `Final Status: INCOMPLETE` summary — the fetch
 >    prints that only after writing `00_validation.json`, so it is the one
@@ -316,9 +325,62 @@ printf 'TIER=%s\n' "$TIER"
 >    non-zero, so file existence alone would wave a real outage through: a
 >    `CIRCUIT_BREAKER` is stale price data, and `FAILED` means a CRITICAL
 >    category (price / metrics / financials / filing) genuinely failed;
-> 3. the ONLY non-`PASSED`, non-`SKIPPED` category is `filing`; and
-> 4. that category carries `error_code: "not_found"` — the filing does not
->    exist, as opposed to the fetch for it having broken.
+> 3. no category is `FAILED`, `INCOMPLETE` or `CIRCUIT_BREAKER` except `filing` and
+>    `segmented_revenues`. `PARTIAL` and `WARNING` do NOT block — `scripts.fetch`
+>    maps neither to a non-zero exit, so neither is what made this run
+>    INCOMPLETE. (Non-blocking is not the same as harmless: MRAAY's
+>    `financials: PARTIAL` carries "rows mix currencies and the repair could
+>    not establish a safe conversion". Let it past this gate, then carry the
+>    degradation into what you report.) An earlier draft demanded `filing` be
+>    the only non-`PASSED` category, which no ticker has ever satisfied —
+>    `earnings` is `PARTIAL` in 41 of the 42 stored runs (it is served by the
+>    FMP fallback) and `eps_validation` is non-`PASSED` in 35 — so the
+>    exemption named a ticker it could never admit and every past run simply
+>    ignored it. `segmented_revenues` is here as a second PERMITTED absence,
+>    NOT as proven collateral: an earlier draft claimed the segment tables
+>    live in the annual report so its absence follows, and the corpus refutes
+>    that both ways — `TSEM/20260807` has a healthy 10-K WITH
+>    `segmented_revenues: FAILED/not_found`, and `COHR/20260813` has no 10-K
+>    with `segmented_revenues: PASSED`. Of the 6 stored no-10-K runs only 3
+>    carry a segment `not_found`. It is permitted because it is a
+>    non-critical category whose absence is benign, not because the filing
+>    caused it; and
+> 4. EACH category named in 3 that is present and blocking carries
+>    `error_code: "not_found"` — the data does not exist, as opposed to the
+>    fetch for it having broken. This is the weight-bearing half: `filing`
+>    also fails `upstream_error` (COHR) and `segmented_revenues` also fails
+>    `http_status`, and both of those are real faults that must STOP; and
+> 5. the evidence is actually THERE AND READABLE: each of the four critical
+>    categories (`price`, `metrics`, `financials`, `filing`) is present in
+>    `categories` as an object carrying a status you recognise (`PASSED`,
+>    `PARTIAL`, `WARNING`, `SKIPPED`, `FAILED`, `INCOMPLETE`, `CIRCUIT_BREAKER` —
+>    the last is set on `price` by the freshness check and means STALE PRICE DATA;
+>    it blocks under 3 exactly as condition 2 bars it at the top level, and it is
+>    listed here so a run carrying one is refused AS a circuit breaker rather than
+>    mislabelled corrupt evidence), and `filing` is
+>    itself `INCOMPLETE`/`not_found`. A record that is `{}`, `null`, not an
+>    object, or carries a status outside that list is UNKNOWN evidence, and
+>    unknown STOPS — conditions 3 and 4 would otherwise wave it through, since
+>    a statusless record is neither `FAILED` nor `INCOMPLETE`. This is not
+>    hypothetical: `validation_merge.is_live_entry` names the statusless `{}`
+>    as corruption ("fetch.py writes a status into every entry ... letting a
+>    corrupt phase-2 stub REPLACE a real phase-1 failure record"), and the merge
+>    can emit that stub into the very file you are reading. The rule this
+>    replaced rejected all of those shapes, so admitting them would make this
+>    exemption strictly more permissive about corrupt data than what it
+>    replaced. Conditions 3 and 4 inspect
+>    only the records that are PRESENT, so on a truncated or empty map they
+>    are vacuously true — and `scripts.fetch` derives top-level `INCOMPLETE`
+>    for exactly that case ("a MISSING critical category must not
+>    vacuous-pass"). Without this clause the exemption re-opens at your layer
+>    the hole the producer closed, and admits a run whose `filing` is
+>    `PASSED` — i.e. one where something else entirely went wrong. Note also
+>    that `not_found` on `filing` does not by itself prove the company has no
+>    10-K: MRAAY (a foreign OTC ADR whose whole feed 400s) records
+>    `filing: FAILED/not_found` while genuinely having filings. Condition 2
+>    catches that one because its top level is `FAILED` — so if the other
+>    categories look like a feed outage rather than one absent document, STOP
+>    regardless.
 >
 > Anything else: **STOP**. Report which category and which `error_code`.
 > (The underlying exit-code semantics — benign absence vs real fault — are
@@ -343,7 +405,7 @@ copy_data_categories(
     src_dir=Path('$PRIOR_DIR/data'), dst_dir=Path('$REPORT_DIR/data'),
     categories=['05_filing_*', '08_institutional', 'adr_profile'],
 )
-# Copy all three dim scores with provenance stamp. `source_date` is a
+# Copy all three dim scores with provenance stamp. source_date is a
 # FALLBACK, used only when the source score carries none of its own — a
 # chained no_op keeps the ORIGINAL vintage, so it is NOT what lands on disk.
 # Print what was actually written and use THAT in Step 5's
@@ -381,6 +443,7 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided partial
+FETCH_RC=$?   # capture IMMEDIATELY: any command below overwrites $?. Gated at the END of this block.
 
 # Merge the two-phase validation IMMEDIATELY (probe-2 C1 — previously this
 # ran as Step 4.5 AFTER the synthesis agent, so synthesis read the
@@ -398,16 +461,40 @@ rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-re
 "$PYBIN" -c "
 from scripts.delta.copy_data import copy_dimension_scores
 from pathlib import Path
-# `source_date` is a FALLBACK, not a setter — print what was written and use
+# source_date is a FALLBACK, not a setter - print what was written and use
 # THAT in Step 5's component_provenance (feedback 2026-08-31 monitor 6).
+# No backticks in ANY inline -c comment: the shell runs them as a command
+# substitution before python sees the script (measured: 'source_date: command
+# not found' on stderr). Pinned by tests/test_skill_inline_python_quoting.py —
+# the first fix corrected this block and missed its sibling above and one in
+# portfolio/SKILL.md, so the rule is a lint, not a note.
 import json as _json
 print('SOURCE_DATES=' + _json.dumps(copy_dimension_scores(
     src_dir=Path('$PRIOR_DIR/scores'), dst_dir=Path('$REPORT_DIR/scores'),
     dimensions=['fundamental'], source_date='<prior ET date>',
 )['source_dates'], default=str))
-"
+" || { echo "FATAL: copy_dimension_scores failed — the fundamental dimension would be missing or stale for a partial run" >&2; exit 1; }
 
 # Spawn forward + industry agents (see below)
+
+# Report the FETCH's exit status as the BLOCK's — LAST, so everything above still ran.
+# `scripts.fetch` maps a top-level FAILED/INCOMPLETE to exit 1 (ISS-119), and Step 3's
+# opening rule keys the STOP on the BLOCK's status. Before this gate the fetch sat
+# mid-block with nothing reading `$?`, so the trailing command's 0 masked it: the STOP
+# never fired and Step 3's named exemption was unreachable no matter how it was worded.
+# Placed at the END, not at the fetch, on purpose — the merge and the work below it
+# must still run, so that if the exemption DOES apply you proceed with a complete run
+# directory instead of re-running the step. `set -e` is INERT in interactive harness
+# shells, which is why this is explicit.
+#
+# BECAUSE it sits last, every command between the fetch and here carries its OWN
+# `|| exit`: this line's 0 is now the block's status, so an ungated failure below the
+# fetch would be masked by it. Measured across bash/sh/dash: the trailing command
+# exiting 7 gave the block 7 before this gate existed and 0 after — trading a swallowed
+# fetch failure for a swallowed indicators failure is not a fix. The exemption applies
+# to the FETCH only; anything else that fails must still STOP.
+[ "$FETCH_RC" -eq 0 ] || { echo "FATAL: scripts.fetch exited $FETCH_RC — read its Final Status summary above, then apply Step 3's named exemption (ALL FIVE conditions, against the MERGED 00_validation.json) before continuing. If any condition fails, STOP." >&2; exit "$FETCH_RC"; }
+
 ```
 
 **If `full`:** fetch all remaining categories; run indicators; spawn fundamental + forward + industry agents.
@@ -430,6 +517,7 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 "$PYBIN" -m scripts.fetch -t "$TICKER" -o "$REPORT_DIR/data/" \
   --categories 05_filing_summary,08_institutional \
   --tier-decided full
+FETCH_RC=$?   # capture IMMEDIATELY: any command below overwrites $?. Gated at the END of this block.
 
 # Merge the two-phase validation IMMEDIATELY (probe-2 C1 — previously this
 # ran as Step 4.5 AFTER the synthesis agent, so synthesis read the
@@ -444,7 +532,27 @@ cp "$REPORT_DIR/data/00_validation.json" "$REPORT_DIR/.validation_phase1.json"
 rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
 
 "$PYBIN" -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
-  --output "$REPORT_DIR/data/indicators.json"
+  --output "$REPORT_DIR/data/indicators.json" \
+  || { echo "FATAL: scripts.indicators failed — indicators.json has no downstream existence gate, and evaluate-technical / portfolio-decide read it for run-day timing" >&2; exit 1; }
+
+
+# Report the FETCH's exit status as the BLOCK's — LAST, so everything above still ran.
+# `scripts.fetch` maps a top-level FAILED/INCOMPLETE to exit 1 (ISS-119), and Step 3's
+# opening rule keys the STOP on the BLOCK's status. Before this gate the fetch sat
+# mid-block with nothing reading `$?`, so the trailing command's 0 masked it: the STOP
+# never fired and Step 3's named exemption was unreachable no matter how it was worded.
+# Placed at the END, not at the fetch, on purpose — the merge and the work below it
+# must still run, so that if the exemption DOES apply you proceed with a complete run
+# directory instead of re-running the step. `set -e` is INERT in interactive harness
+# shells, which is why this is explicit.
+#
+# BECAUSE it sits last, every command between the fetch and here carries its OWN
+# `|| exit`: this line's 0 is now the block's status, so an ungated failure below the
+# fetch would be masked by it. Measured across bash/sh/dash: the trailing command
+# exiting 7 gave the block 7 before this gate existed and 0 after — trading a swallowed
+# fetch failure for a swallowed indicators failure is not a fix. The exemption applies
+# to the FETCH only; anything else that fails must still STOP.
+[ "$FETCH_RC" -eq 0 ] || { echo "FATAL: scripts.fetch exited $FETCH_RC — read its Final Status summary above, then apply Step 3's named exemption (ALL FIVE conditions, against the MERGED 00_validation.json) before continuing. If any condition fails, STOP." >&2; exit "$FETCH_RC"; }
 
 # Spawn all three agents (see below)
 ```
