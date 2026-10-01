@@ -131,7 +131,7 @@ licensed the bad claim. Until it is corrected, an agent hitting
 any load-bearing series against a company-reported period/annual total, and mark it
 `unknown` if no comparable corroboration exists.
 
-**Also stale (documentation drift, harmless but misleading):** CLAUDE.md,
+**Also stale (documentation drift, harmless but misleading):** `.claude/rules/scripts-contracts.md`,
 `rules/units.md` and `scripts/fetch.py` comments describe a "12-field master set";
 `ADR_CORRECT_MONEY_FIELDS` in `scripts/adr/correct.py` actually holds **10** fields
 across 3 statement families (income 4 incl. the `total_revenue` alias, balance 3,

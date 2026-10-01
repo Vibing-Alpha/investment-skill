@@ -646,7 +646,7 @@ Present:
 Per project CLAUDE.md "SKILL.md is orchestration only":
 
 - **Methodology** → `prompts/research-industry.md` (portable, agent reads)
-- **Hard rules** → `rules/research-industry.md` (canonical) + `.claude/rules/research-industry.md` (auto-loaded adapter)
+- **Hard rules** → `rules/research-industry.md` (canonical) + `.claude/rules/research-industry.md` (adapter, auto-loaded on research-industry paths)
 - **Determinism** → `scripts/industry/*.py` + `scripts/sector_signal.py`
 - **Schema** → `scripts/schemas/industry_analysis.py`
 - **Orchestration** → this file (thin shell of CLI calls + tier dispatch)

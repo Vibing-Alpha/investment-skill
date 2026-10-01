@@ -58,6 +58,13 @@ scripts/dev/    export-ignore
 # stripping them would leave dangling citations in the shipped files.
 .claude/rules/development.md  export-ignore
 
+# Path-scoped dev rules carrying prose moved out of the root CLAUDE.md dev-only
+# fence (money-path module contracts, adapter authoring, test gates). Same
+# reasoning as development.md above: dev-authoring guidance, zero runtime reference.
+.claude/rules/scripts-contracts.md  export-ignore
+.claude/rules/adapter-authoring.md  export-ignore
+.claude/rules/test-gates.md         export-ignore
+
 # The operator's own trading record. Trackable in the dev repo so it CAN be
 # backed up by hand — the skill itself runs no git command at all and never
 # commits it (SKILL.md: "It runs no `git` command, ever") — and a commit that

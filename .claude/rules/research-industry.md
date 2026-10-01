@@ -1,11 +1,22 @@
+---
+paths:
+  - "prompts/research-industry.md"
+  - "rules/research-industry.md"
+  - ".claude/skills/research-industry/**"
+  - "scripts/industry/**"
+  - "scripts/schemas/industry_analysis.py"
+  - "tests/test_schemas_industry_analysis.py"
+  - "tests/test_research_industry_orchestration.py"
+---
+
 # research-industry — Hard constraints (adapter)
 
 Canonical source: **`rules/research-industry.md`** — READ before modifying
 `prompts/research-industry.md`, `.claude/skills/research-industry/SKILL.md`,
 or any `scripts/industry/*.py` producer.
 
-This file is the thin auto-loaded adapter so the constraint shape is
-visible from turn 1.
+This file is the thin adapter, auto-loaded (via the `paths:` frontmatter)
+whenever you work with one of the research-industry files listed above.
 
 ## Quick reference
 

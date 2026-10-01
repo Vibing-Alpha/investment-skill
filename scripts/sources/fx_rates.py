@@ -7,7 +7,7 @@ Public surface (spec §3.0.1): ``YFINANCE_FX_POLICY``, ``FxRate``,
 is RE-EXPORTED from ``scripts.fx_constants`` (closed-vocab SoT — do
 NOT redeclare; cycle-18 F-18-2).
 
-Envelope contract (CLAUDE.md adapter authoring §3.0.1): HTTP via
+Envelope contract (.claude/rules/adapter-authoring.md §3.0.1): HTTP via
 ``yfinance_call`` (NOT raw http_get — yfinance has its own requests
 stack); empty rows → PARSE_ERROR; YfCallError → HTTP_TRANSPORT;
 YfRateLimitError → RATE_LIMIT; RetryExhaustedError → routed via

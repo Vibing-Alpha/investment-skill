@@ -1095,7 +1095,7 @@ def _fetch_news_finnhub(ticker: str, limit: int = 10) -> Tuple[list, str]:
             if e.status == 429:
                 return [], "rate_limited"
             return [], "fallback_error"
-        except RetryExhaustedError as e:  # retry-exhausted-classification-ok: legacy string-status contract for fetch_news_data caller; out-of-AdapterResult contract by design (see CLAUDE.md adapter authoring contract §exception)
+        except RetryExhaustedError as e:  # retry-exhausted-classification-ok: legacy string-status contract for fetch_news_data caller; out-of-AdapterResult contract by design (see .claude/rules/adapter-authoring.md §exception)
             # ISS-202 (Loop29 cycle 1 fresh-session-16): FINNHUB_POLICY
             # inherits the default retry_on set including 429, so a
             # sustained 429 wave raises RetryExhaustedError(status=429),

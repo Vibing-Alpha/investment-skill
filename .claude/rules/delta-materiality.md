@@ -1,3 +1,11 @@
+---
+paths:
+  - "prompts/delta/**"
+  - "prompts/monitor-route.md"
+  - "scripts/delta/**"
+  - "tests/test_news_materiality_consistency.py"
+---
+
 ## Delta Materiality Rubric
 
 Used by `prompts/delta/classify-news.md` to classify news articles

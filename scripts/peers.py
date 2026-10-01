@@ -242,7 +242,7 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
     # and no demonstrated failure asks for one).
     #
     # This is ADDITIVE. `medians` stays USD-only: it is the sanctioned DL3b
-    # anchor and CLAUDE.md requires an RFC to change it. The two sets are
+    # anchor and .claude/rules/scripts-contracts.md requires an RFC to change it. The two sets are
     # separately named so the consumer chooses explicitly; the valuation
     # prompt says which is which.
     #

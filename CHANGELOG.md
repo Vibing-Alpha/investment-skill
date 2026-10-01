@@ -3,6 +3,10 @@
 Release notes for the distributed skill system. Newest first. Managed by
 `scripts/release.py`; recipients see the latest entry on update.
 
+## v1.23.1 — 2026-10-01
+
+- Two rule files that only matter for specific tasks - the news-materiality rubric and the research-industry constraints - no longer load into every Claude Code session. They now load when you work on the files they govern; the news classifier still reads the rubric explicitly, so analysis results are unchanged. Each session starts about 2,900 tokens lighter (estimated). Codex / Cursor / OpenCode are unaffected.
+
 ## v1.23.0 — 2026-09-07
 
 - A run whose repo folder has disappeared now stops instead of continuing from wherever the shell happened to be. Every command block in every skill opens by changing into your project folder, and that step was the one thing in them whose failure nothing noticed — on a mount that had gone stale, the run carried on in whatever directory was current and, if that was another copy of the project, wrote its results there. All 110 of those steps now halt the run and say so.

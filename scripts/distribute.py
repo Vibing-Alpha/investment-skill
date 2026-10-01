@@ -290,7 +290,8 @@ SKILL.md bodies are written in Claude Code tool vocabulary. Translate:
 
 ## ALWAYS read these constraint files first
 
-Claude Code auto-loads `.claude/rules/*.md` every session; your agent does not.
+Claude Code auto-loads `.claude/rules/*.md` (every session, or on matching paths
+for files with `paths:` frontmatter); your agent does not.
 Read these before any analysis or money-path work (they encode demonstrated
 real-money failure modes — anti-hallucination tagging, unit/FX scale,
 portfolio constraints, producer-consumer contracts):
@@ -308,7 +309,7 @@ Codex; the `Skill` tool in Claude Code). Each lives in its own dir with a
 ## Full project guide
 
 The canonical, complete project instructions are in **`CLAUDE.md`** — read it
-for architecture, data flow, the script catalog, and the engineering policy.
+for architecture, data flow, commands, and the engineering policy.
 This adapter intentionally does not duplicate it.
 """
 
