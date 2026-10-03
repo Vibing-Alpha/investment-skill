@@ -78,7 +78,13 @@ the latest fundamentals:
   `outstanding_shares` are ORDINARY shares — `price × shares` is wrong by the
   ADR ratio. Use the file's corrected values (`corrected_pe/pb/ps/...`,
   `market_cap_used`, `adr_ratio`) instead of deriving your own; never multiply
-  an ADR price by ordinary share count.
+  an ADR price by ordinary share count. If the file has no corrected values,
+  the correction was refused, and `00_validation.json` →
+  `categories.eps_validation.eps_consistency.adr_valuation_correction.skip_reason`
+  says why. Only the implied-ratio refusal ("… is not a deposit ratio") can be
+  repaired, by a deposit ratio you source from the filing or a bound
+  WebSearch. Any other reason (currency, period basis, missing fields) is not
+  fixed by a ratio: the per-ADR multiples are unavailable, with that reason.
 - `current_market_cap = current_price × latest_shares_outstanding`
   (balance sheet `outstanding_shares`). This equals the reconciled
   `market_cap` whenever a `market_cap_reconciliation` block is present; if no
@@ -697,8 +703,11 @@ Write `valuation.json` with this structure:
 
 ## Critical Rules
 
-Source tagging and data handling rules are enforced by `.claude/rules/anti-hallucination.md`
-(loaded automatically via glob). In addition:
+Source tagging follows `.claude/rules/anti-hallucination.md`, which a subagent or
+another host may not have loaded. Its core: the only tag kinds are `[API: <file>, <field>]`,
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`, `[Filing: <form>]` and
+`[Calc: <formula>]`, and the validator rejects any other (`[News:]`, `[Derived:]`, ...); a
+figure you computed is `[Calc:]` with the formula shown. In addition:
 
 - Every number in `multiples` must include a `source` field with calculation basis
 - `[Calc:]` payloads must show the calculation itself (formula or named-input

@@ -166,6 +166,24 @@ def _enter_annual_carve_out_assert_usd(income_row, cash_flow_row, balance_row,
 # compute_adr_valuation_correction
 # ---------------------------------------------------------------------------
 
+def _snap_deposit_ratio(raw_ratio: float):
+    """Snap a shares / ADR-units quotient to a deposit ratio, or None.
+
+    A deposit ratio is N ordinary shares per ADS or 1/N of one. A quotient
+    that is neither means the share count and the market-cap-implied ADR
+    count come from sources that disagree (ASX 2026-09-30: 1.723), and
+    every per-ADR figure derived from them is suspect.
+    """
+    whole = round(raw_ratio)
+    if whole >= 1 and abs(raw_ratio - whole) < 0.15:
+        return whole
+    if 0 < raw_ratio < 1:
+        inverse = 1 / raw_ratio
+        if abs(inverse - round(inverse)) < 0.15:
+            return round(1 / round(inverse), 6)
+    return None
+
+
 def compute_adr_valuation_correction(
     profile: AdrProfile,
     metrics_data: Dict,
@@ -789,10 +807,17 @@ def compute_adr_valuation_correction(
 
     if latest_shares is not None and latest_shares > 0 and adr_units > 0:
         raw_ratio = latest_shares / adr_units
-        if abs(raw_ratio - round(raw_ratio)) < 0.15:
-            adr_ratio = round(raw_ratio)
-        else:
-            adr_ratio = round(raw_ratio, 1)
+        adr_ratio = _snap_deposit_ratio(raw_ratio)
+        if adr_ratio is None:
+            result["correction_status"] = "skipped"
+            result["skip_reason"] = (
+                f"implied ADR ratio {raw_ratio:.3f} (shares {latest_shares:,.0f} / "
+                f"ADR units {adr_units:,.0f} from market_cap / price) is not a "
+                "deposit ratio: share count and market cap disagree, so no "
+                "corrected per-ADR value is trustworthy"
+            )
+            result.pop("message", None)
+            return emit_dl3c_root_marker(result)
 
     # Post-impl ISS-014 (fresh-loop1): fail-close when net_income is absent
     # or non-numeric on ANY consumed income row. Pre-fix `_sf(None) → 0`
@@ -1257,7 +1282,9 @@ def compute_adr_eps_check(
         # ADRs (impl-loop3 F1 fix — pre-fix returned None → CLI exited 0
         # silently on missing-data ADR runs).
         "check_status": "not_applicable",  # not_applicable / skipped / applied
-        "needs_ratio_adjustment": False,
+        # None until the comparison runs: a skip established nothing, and
+        # fetch prints False as an affirmative "adjustment=not needed".
+        "needs_ratio_adjustment": None,
         "estimated_ratio": None,
         "corrected_pe": None,
         "corrected_ttm_eps": None,
@@ -1607,10 +1634,18 @@ def compute_adr_eps_check(
         latest_shares = _sf(_latest_inc_row.get("weighted_average_shares"), default=None)
     if latest_shares is not None and latest_shares > 0 and adr_units > 0:
         raw_ratio = latest_shares / adr_units
-        if abs(raw_ratio - round(raw_ratio)) < 0.15:
-            estimated_ratio = round(raw_ratio)
-        else:
-            estimated_ratio = round(raw_ratio, 1)
+        estimated_ratio = _snap_deposit_ratio(raw_ratio)
+        if estimated_ratio is None:
+            # Same refusal as compute_adr_valuation_correction: the share
+            # count and the market cap disagree, so the corrected EPS built
+            # on market_cap / price is no more trustworthy here.
+            result["check_status"] = "skipped"
+            result["skip_reason"] = (
+                f"implied ADR ratio {raw_ratio:.3f} is not a deposit ratio: "
+                "share count and market cap disagree"
+            )
+            result.pop("message", None)
+            return emit_dl3c_root_marker(result)
 
     corrected_ttm_eps = ttm_net_income / adr_units if adr_units > 0 else None
 
@@ -1668,6 +1703,7 @@ def compute_adr_eps_check(
         # a comparison; route to skipped so the CLI blocking gate fires
         # rather than silently emitting "correction not needed".
         eps_check_status = "skipped"
+        needs_adjustment = None   # no comparison was made: unknown, not False
     elif metrics_eps == 0:
         # Provider EPS == 0 is itself a data-quality signal: a real
         # company with non-zero corrected_ttm_eps and provider-reported

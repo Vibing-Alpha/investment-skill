@@ -588,6 +588,28 @@ def _year_quarter(stmt: Dict) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _mixes_share_basis(rows: List[Dict]) -> bool:
+    """True when the weighted share counts across `rows` differ by a split-
+    sized factor, so their per-share figures are on different bases.
+
+    NOW 2026-10-01: FDS restated only the 10-K row for the 5:1 split, so a
+    window holding 2025-Q3 summed EPS 2.40 (209M shares) with three post-split
+    quarters (~1,040M) into a "TTM" of 3.52 against a true ~1.61. The factor
+    is historical_multiples' share-basis step bar. A genuine large issuance
+    trips it too; that only skips a sanity check. Rows without a usable
+    count are not compared.
+    """
+    from scripts.historical_multiples import _SHARE_BASIS_BREAK_FACTOR
+    counts = []
+    for stmt in rows:
+        for key in ("weighted_average_shares_diluted", "weighted_average_shares"):
+            v = _safe_float_module(stmt.get(key))
+            if v is not None and v > 0:
+                counts.append(v)
+                break
+    return len(counts) >= 2 and max(counts) / min(counts) >= _SHARE_BASIS_BREAK_FACTOR
+
+
 def _compute_ttm_eps(quarterly_stmts: List[Dict]) -> Optional[float]:
     """Sum diluted EPS (basic fallback) over the 4 most-recent CONSECUTIVE
     quarters of `quarterly_stmts` (newest-first input). Returns None when there
@@ -611,6 +633,8 @@ def _compute_ttm_eps(quarterly_stmts: List[Dict]) -> Optional[float]:
     # _validate_consecutive expects oldest→newest; quarterly_stmts is newest-first.
     if _validate_consecutive(list(reversed(yq))) is not None:
         return None  # gapped window
+    if _mixes_share_basis(recent):
+        return None  # per-share values on two share bases cannot be summed
     # Consistent basis only — never mix diluted and basic across the 4 quarters
     # (a single basic-fallback row would bias the TTM vs a diluted pe_ratio).
     if all(v is not None for v in diluted_vals):
@@ -684,6 +708,8 @@ def _compute_ttm_eps_both_bases(
         basic_vals.append(_safe_float_module(stmt.get("earnings_per_share")))
     if _validate_consecutive(list(reversed(yq))) is not None:
         return None, None  # gapped window
+    if _mixes_share_basis(recent):
+        return None, None  # see _compute_ttm_eps
     basic = sum(basic_vals) if all(v is not None for v in basic_vals) else None
     diluted = sum(diluted_vals) if all(v is not None for v in diluted_vals) else None
     return basic, diluted
@@ -958,7 +984,7 @@ def validate_eps_consistency(
         else:
             result["checks"]["snapshot_eps_vs_statement_ttm"]["message"] = (
                 "No clean statement-derived TTM EPS available (fewer than 4 "
-                "quarters, a gapped window, or a missing EPS row) — comparison "
+                "quarters, a gapped window, a split inside it, or a missing EPS row) — comparison "
                 "skipped rather than run against a partial sum"
             )
     else:
@@ -1022,9 +1048,9 @@ def validate_eps_consistency(
         # spurious price deviation, so skip rather than warn.
         result["checks"]["pe_eps_vs_price"]["status"] = "SKIPPED"
         result["checks"]["pe_eps_vs_price"]["message"] = (
-            "TTM EPS unavailable (need 4 consecutive quarters; window is "
-            "gapped or short) — P/E sanity check skipped rather than computed "
-            "off a non-TTM EPS."
+            "TTM EPS unavailable (need 4 consecutive quarters on one share "
+            "basis; window is gapped, short, or spans a split) — P/E sanity "
+            "check skipped rather than computed off a non-TTM EPS."
         )
     elif pe_ratio is not None and current_price is not None:
         calculated_price = pe_ratio * ttm_eps

@@ -1152,7 +1152,10 @@ Each Task subagent call returns usage info with `total_tokens`. The
 orchestrator accumulates these across all calls this run (classifier,
 valuation, technical, events [if rerun], synthesis, alpha_advocate +
 alpha_prosecutor [if Phase 3 ran]) plus wall time, and substitutes the
-totals into the heredoc below. The costs file is a run-scoped transient
+totals into the heredoc below. A total you did not observe is `null`, never
+an estimate and never `0` (an estimate is an invented measurement): `tokens`
+when any call returned no usage block, `duration_s` unless you noted the
+Step 0 time yourself. The costs file is a run-scoped transient
 dotfile under `$REPORT_DIR` — portable (native Windows has no /tmp) and
 stable across step boundaries (a separate shell loses `$$`).
 

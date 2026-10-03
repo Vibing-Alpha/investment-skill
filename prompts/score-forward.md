@@ -277,8 +277,11 @@ Write a JSON file with this structure:
 
 ## Critical Rules
 
-Source tagging and data handling rules are enforced by `.claude/rules/anti-hallucination.md`
-(loaded automatically via glob). In addition:
+Source tagging follows `.claude/rules/anti-hallucination.md`, which a subagent or
+another host may not have loaded. Its core: the only tag kinds are `[API: <file>, <field>]`,
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`, `[Filing: <form>]` and
+`[Calc: <formula>]`, and the validator rejects any other (`[News:]`, `[Derived:]`, ...); a
+figure you computed is `[Calc:]` with the formula shown. In addition:
 
 - Compute `overall` as weighted average: `sum(score × weight) / 100`
 - Management quotes must include filing source (e.g., "Q{QUARTER} {CURRENT_YEAR} 10-Q")

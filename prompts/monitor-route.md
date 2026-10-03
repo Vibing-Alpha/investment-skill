@@ -65,7 +65,17 @@ staleness) and note the unknown-news caveat in `reason` if it's otherwise border
 
 For each ticker, judge which `thesis_conditions.invalid_if` / `entry_attractive_if` fired by
 comparing the prose against the probe's EXACT numbers (price, indicators) and material news /
-due catalysts. Cite the matched fact in your reason.
+due catalysts. Cite the matched fact in your reason. A fired `entry_attractive_if` means the
+thesis clause fired, not that an entry qualifies: /portfolio applies its own entry legs (for
+example, "held" = 2 completed sessions above the level) and may disagree. Say "thesis entry
+clause fired", never that the entry evidence is complete.
+- Two kinds of entry clause cannot be settled from this probe; never call them fired or not
+  fired. A clause that counts completed sessions above a level ("held 2 sessions") needs
+  run-day structure facts the probe does not carry. A clause prefixed with a market regime
+  needs today's regime, which the probe does not carry either. Evaluate whatever part of the
+  clause the probe's facts do cover; when that part is met, emit a `watch` item routed to
+  `/portfolio` with reason "thesis entry clause pending <session count / regime>: <the met
+  part>". Never infer a regime from the ticker's own trend.
 - If a condition is **indicator-dependent but `indicators_available` is false**, do NOT treat
   it as "not fired" — emit a `watch` item routed to `/investment-thesis`, reason noting
   "indicators unavailable (<74 bars), deferred", referencing the affected condition's evidence_id.

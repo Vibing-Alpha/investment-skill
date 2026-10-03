@@ -459,10 +459,10 @@ exit side:
   qualifying target to rotate into?
 
 A `hold` is valid ONLY when every status resolves to one of: `not_triggered`,
-`blocked_by_hard_constraint`, `blocked_by_data_integrity`, or
-`deferred_by_named_soft_preference`. If an add or rotation trigger IS present
-and clears its conditions — and the data-integrity gate is clear — the action is
-`add`/`reduce`/`buy` — not `hold`.
+`blocked_by_hard_constraint`, `blocked_by_data_integrity`, `funding_or_priority`,
+or `deferred_by_named_soft_preference`. If an add or rotation trigger IS present
+and clears its conditions — the data-integrity gate is clear and a sanctioned
+source funds it — the action is `add`/`reduce`/`buy` — not `hold`.
 
 `blocked_by_data_integrity` means exactly: `meta.degraded_categories` is present
 and non-empty — or carries one of the corrupt-record shapes from the
@@ -472,6 +472,16 @@ note), in which case name `degradation record unreadable` (or the note's
 categories) as the category. It is not a general-purpose "I have doubts"
 escape hatch; if you cannot name the missing categories (or the corrupt
 record), it does not apply.
+
+`funding_or_priority` means the trigger clears but nothing sanctioned pays for
+it: the cash above any `min_cash` floor plus this set's proposed sell proceeds
+buys less than the increase this decision needs — the `target_weight_pct` you
+would otherwise give it minus the ticker's current weight (state both as % of
+NAV) — and no injected principle
+authorizes selling a named holding to fund it. Name every funding source you
+considered. It is not a hard constraint (none was breached),
+and it does not apply when such a sale is authorized — then that rotation is
+the decision to weigh.
 
 **For every WATCHLIST name**, separate a HARD gate failure from a SOFT deferral:
 
@@ -707,7 +717,7 @@ Schema (write as JSON):
     "summary": "One line: did the rotation/opportunity scan find executable actions this run? If none, say so explicitly (e.g. 'fast tape; scanned; no rotation — strongest candidates fail the entry non-extension condition').",
     "near_misses": [
       {"ticker": "CRDO", "trigger": "entry breakout present (closing_high_status breakout per ticker_price_structure + volume confirm per run-day indicators, not over-extended)", "waiting_on": "deferred_by_named_soft_preference: earnings_window_days (next_earnings_date within window)"},
-      {"ticker": "RKLB", "trigger": "continuation add trigger present per run-day indicators (volume-confirmed, not over-extended, room under cap)", "waiting_on": "funding_or_priority: no confirmed rotation source this run"}
+      {"ticker": "RKLB", "trigger": "continuation add trigger present per run-day indicators (volume-confirmed, not over-extended, room under cap)", "waiting_on": "funding_or_priority: cash above the floor buys 0.4% of NAV against the 2.0% the add needs (5% target, 3% held); no principle authorizes selling a holding to fund it"}
     ]
   },
   "principle_audit_interpretation": "Short note explaining why any principle was NOT cited this run (e.g., 'macro is risk_on so the raise-cash-on-deterioration principle was not triggered' — reference the principle by its current #N, not a hardcoded index).",

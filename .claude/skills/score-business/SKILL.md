@@ -455,7 +455,7 @@ FETCH_RC=$?   # capture IMMEDIATELY: any command below overwrites $?. Gated at t
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
     --phase2 "$REPORT_DIR/data/00_validation.json" \
     || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
-rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
+rm -f "$REPORT_DIR/.validation_phase1.json" 2>/dev/null || true   # best-effort, quiet: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
 
 # Copy fundamental dim from prior
 "$PYBIN" -c "
@@ -529,7 +529,7 @@ FETCH_RC=$?   # capture IMMEDIATELY: any command below overwrites $?. Gated at t
     --phase1 "$REPORT_DIR/.validation_phase1.json" \
     --phase2 "$REPORT_DIR/data/00_validation.json" \
     || { echo "FATAL: validation merge failed — phase-1 degradation would be lost" >&2; exit 1; }
-rm -f "$REPORT_DIR/.validation_phase1.json" || true   # best-effort: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
+rm -f "$REPORT_DIR/.validation_phase1.json" 2>/dev/null || true   # best-effort, quiet: a delete-restricted mount (Cowork FUSE) returns EPERM for an existing file; the merge marker written into 00_validation.json is the evidence, not this file's absence
 
 "$PYBIN" -m scripts.indicators --price-json "$REPORT_DIR/data/01_price_data.json" \
   --output "$REPORT_DIR/data/indicators.json" \
@@ -859,7 +859,7 @@ ctx_p.write_text(json.dumps(ctx, indent=2, ensure_ascii=False), encoding='utf-8'
   --tier-context-json "$TIER_CONTEXT_JSON" \
   || { "$PYBIN" -m scripts.clear_stale "$TIER_CONTEXT_JSON" || true; echo "FATAL: scripts.assemble failed — the canonical bq_analysis.json (if present) is a PRIOR run's artifact, not this run's. Fix the failed score/synthesis input and re-run; do NOT record this run as completed." >&2; exit 1; }
 
-rm -f "$TIER_CONTEXT_JSON" || true   # best-effort cleanup: regenerated next run, and a delete-restricted mount must not make a SUCCEEDED assemble read as failed
+rm -f "$TIER_CONTEXT_JSON" 2>/dev/null || true   # best-effort cleanup, quiet: regenerated next run, and a delete-restricted mount must not make a SUCCEEDED assemble read as failed
 
 # 4) Explicit fail-close schema validation. Mirrors investment-thesis
 # Step 6.4 — bq_analysis.json must load through the typed loader before
@@ -899,8 +899,9 @@ substitute the totals into the heredoc below.
 
 If this host gave you no usage blocks (the serial no-sub-agent path above),
 write `"tokens": null`. Do NOT write `0`, and do NOT substitute an estimate:
-a 0 reads as a free run and an estimate is an invented measurement. Wall
-time is still measurable, so keep `duration_s`.
+a 0 reads as a free run and an estimate is an invented measurement. The same
+holds for `duration_s`: nothing records the Step 0 time, so unless you noted
+it yourself, write `null`.
 
 Compose `$AGENTS_RUN` from what ACTUALLY ran this run, not from the
 tier alone. The **classifier** runs only when there was a prior run to

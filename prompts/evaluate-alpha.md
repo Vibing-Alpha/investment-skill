@@ -270,8 +270,9 @@ does not split the difference or hedge every statement.
    narrative. "Things could go wrong" is not a pre-mortem.
 
 4. **Kill criteria must be actionable** — Specific number + specific date
-   + canonical `[KIND: descriptor]` source tag (per
-   `.claude/rules/anti-hallucination.md`). The user should be able to set
+   + canonical `[KIND: descriptor]` source tag, KIND being one of API,
+   WebSearch, Filing or Calc (per `.claude/rules/anti-hallucination.md`,
+   which you may not have loaded). The user should be able to set
    a calendar reminder.
 
 5. **Epistemic honesty** — Always include the reminder that alpha comes

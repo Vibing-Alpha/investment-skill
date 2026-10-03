@@ -12,7 +12,7 @@ import sys
 from typing import Dict, Final, List
 
 from scripts.sources.common import normalize_currency
-from scripts.sources.yfinance_guard import yfinance_call
+from scripts.sources.yfinance_guard import YfRateLimitError, yfinance_call
 
 # DL3b §3.1: producer USD-uniformity certificate.
 #
@@ -76,14 +76,45 @@ def _try_fetch(ticker: str, field_map: Dict, yf) -> tuple:
                                 or not isinstance(ebitda, (int, float))
                                 or not math.isfinite(ebitda) or ebitda <= 0):
                             continue
-                    multiples[short_name] = round(val, 2)
+                    # A value that rounds to 0.00 is no multiple: it would be
+                    # stored as 0.0 and divide the dispersion ratio by zero.
+                    if round(val, 2) > 0:
+                        multiples[short_name] = round(val, 2)
+        if _reports_in_another_currency(info):
+            for name in _CROSS_CURRENCY_MULTIPLES:
+                multiples.pop(name, None)
         if len(multiples) < 2:
             return {}, {}
         return multiples, info
+    except YfRateLimitError:
+        raise  # not "absent on this exchange" -- the caller must not probe suffixes
     except Exception as exc:
         print(f"[WARN] peers._try_fetch({ticker}) failed: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return {}, {}
+
+
+# Multiples that divide the quote (or an EV built from it) by statement
+# figures. When the statements are in another currency they are off by the
+# exchange rate: TM (JPY statements, USD quote) read P/S 0.0042, and SAP (EUR)
+# carried an EV of 3.43T on a 241.5B market cap, moving the CRM 2026-10-01
+# EV/EBITDA median from 33.3 to 50.5. Same set as the metrics fallback's
+# cross-currency skip in scripts/sources/yahoo_finance.py, plus P/B, whose
+# book value is a statement figure too (SAP 66, TM 14.8). pe / forward_pe /
+# peg stay: yfinance quotes an ADR's EPS per ADR in the quote currency.
+_CROSS_CURRENCY_MULTIPLES = ("ps", "pb", "ev_ebitda", "ev_revenue")
+
+
+def _reports_in_another_currency(info: Dict) -> bool:
+    """True when yfinance names a statement currency that is not the quote
+    currency, or names one that cannot be recognised. An absent field is no
+    evidence either way and leaves the multiples in place (yfinance sends it
+    for every listed peer seen; the fixtures predating this rule omit it)."""
+    raw = info.get("financialCurrency")
+    if raw is None:
+        return False
+    fin = normalize_currency(raw)
+    return fin is None or fin != normalize_currency(info.get("currency"))
 
 
 def _aggregate(peer_recs: Dict, field_map: Dict) -> tuple:
@@ -129,8 +160,8 @@ def _aggregate(peer_recs: Dict, field_map: Dict) -> tuple:
         dispersion[field] = {
             "min": lo,
             "max": hi,
-            # _try_fetch admits only 0 < val <= 10_000, so lo is positive
-            # and the ratio is always well defined for n >= 2.
+            # _try_fetch admits only values that round to > 0 and <= 10_000,
+            # so lo is positive and the ratio is well defined for n >= 2.
             "max_to_min_ratio": round(hi / lo, 2) if n >= 2 else None,
         }
     return medians, sample_size, dispersion
@@ -170,17 +201,21 @@ def fetch_peer_multiples(tickers: List[str]) -> Dict:
     errors = []
 
     for ticker in tickers:
-        multiples, info = _try_fetch(ticker, field_map, yf)
         resolved_ticker = ticker
+        try:
+            multiples, info = _try_fetch(ticker, field_map, yf)
 
-        # If bare ticker fails, try common exchange suffixes
-        if not multiples and "." not in ticker:
-            for suffix in exchange_suffixes:
-                candidate = ticker + suffix
-                multiples, info = _try_fetch(candidate, field_map, yf)
-                if multiples:
-                    resolved_ticker = candidate
-                    break
+            # If bare ticker fails, try common exchange suffixes
+            if not multiples and "." not in ticker:
+                for suffix in exchange_suffixes:
+                    candidate = ticker + suffix
+                    multiples, info = _try_fetch(candidate, field_map, yf)
+                    if multiples:
+                        resolved_ticker = candidate
+                        break
+        except YfRateLimitError as exc:
+            errors.append(f"{ticker}: rate_limited ({exc}); retry later")
+            continue
 
         if multiples:
             peers[ticker] = {

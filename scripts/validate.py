@@ -1487,9 +1487,19 @@ def validate_portfolio(
     # all_buy=-400 / extreme_down=0 / defensive=400 against cash 0, and this
     # text is relayed VERBATIM to the user by the /portfolio skill.
     warnings: List[str] = []
-    if not open_orders:
+    if not open_orders and "open_orders" in state:
+        # `open_orders: []` (or a bare `open_orders:`) is the declaration of
+        # "nothing working at the broker" config_gate accepts; asking that
+        # user to sync is asking for what they already did (2026-10-01).
         warnings.append(
-            "open_orders is empty/absent in portfolio-state.yaml — the "
+            "portfolio-state.yaml declares no working broker orders "
+            "(open_orders is empty), so the all_buy/extreme_down/defensive "
+            "scenarios cover only the orders proposed this run. If the "
+            "broker does hold working orders, add them there."
+        )
+    elif not open_orders:
+        warnings.append(
+            "open_orders is absent in portfolio-state.yaml — the "
             "all_buy/extreme_down/defensive scenarios therefore stress only "
             "the orders proposed this run; no resting broker order is "
             "included in any of them. Sync broker open orders into the state "

@@ -260,7 +260,9 @@ Do NOT include:
 ## Output — summary.md
 
 Write a one-page summary (under 800 words) in the language specified by
-`output_language` in strategy.yaml (default: zh-CN).
+`output_language` in strategy.yaml (default: zh-CN). Word budgets here are
+counted by `scripts.cli_utils.count_word_equivalents`: in Chinese, Japanese or
+Korean two characters count as one word, so 800 words is about 1,600 characters.
 
 **BQ score display rule:** when quoting the
 overall BQ score, round the weighted average to ONE decimal — identical

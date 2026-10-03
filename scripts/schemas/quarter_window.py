@@ -1142,13 +1142,15 @@ _CUMULATIVE_PROBE_FIELD = "depreciation_and_amortization"
 # baseline is (Q1+..+Qn)/Q1 ~= n when depreciation is smooth, so the slack
 # below is how far BELOW n a row may sit and still be called cumulative.
 #
-# Known residual false-positive risk, accepted deliberately: a genuine
-# standalone step-up — e.g. an acquisition entering service in Q2, giving
-# Q1=100, Q2=160 — reads 1.60x and clears the Q2 threshold of 1.5. Measured
-# over all 91 trailing-4 windows in the stored corpus plus the golden
-# fixture this never fires (0 false positives; the nearest benign
-# observation is 1.40x), so the threshold is NOT tuned down to chase it.
-# The trade is deliberate and asymmetric: a false positive costs a visibly
+# A genuine standalone step-up — an acquisition entering service in Q2,
+# Q1=100, Q2=160 — reads 1.60x and clears the Q2 threshold of 1.5. The
+# 91-window corpus never showed one; the NOW 2026-10-01 field run did
+# (1.58x after a 7.45B acquisition) and is suppressed, with its reason. The
+# threshold is NOT tuned down to chase it, and clearing such a row on a
+# capex/OCF proof was built and REMOVED (2026-10-02): each review round found
+# a column the proof did not cover reaching a sum (free_cash_flow, D&A, SBC,
+# FX-converted flows). Do not re-add a release without a per-column proof
+# for every column each consumer reads. The trade is deliberate and asymmetric: a false positive costs a visibly
 # suppressed lens carrying a warning that names the reason, whereas a false
 # negative is a silently wrong TTM reaching a valuation. Per CLAUDE.md the
 # dominant risk here is the wrong number, not the missing one.
@@ -1252,6 +1254,58 @@ def cumulative_detection_ran(window, *, fx_converted: bool = False) -> bool:
     return True
 
 
+# A year-to-date row contains every earlier row of its fiscal year, so on a
+# flow that does not change sign it cannot be smaller than any of them. One
+# column proves only that THAT column is not year-to-date, so both of these
+# must refute. Capex is always an outflow; OCF is compared only where both
+# rows are positive, which drops sign-changed comparisons but does not make
+# OCF proof on its own -- a negative standalone quarter can still leave a
+# true YTD OCF positive and smaller. Capex carries the proof; OCF only
+# corroborates it.
+_CUMULATIVE_REFUTING_FIELDS = ("capital_expenditure", "net_cash_flow_from_operations")
+# Room for restatement and rounding before "smaller" counts as proof.
+_CUMULATIVE_REFUTE_MARGIN = 0.9
+
+
+def _smaller_than_earlier_same_year_row(rows, parsed, idx) -> bool:
+    """True when row `idx` is arithmetically impossible as year-to-date: an
+    EARLIER row of the same fiscal year in the window exceeds it, beyond the
+    margin, on capex AND on OCF.
+
+    It holds whatever basis the earlier row has -- standalone or itself
+    cumulative -- because accumulation only grows. It proves the basis of
+    the capex and OCF columns only, so it never clears a flag: used as a
+    release, it let through rows whose free_cash_flow, D&A or SBC column was
+    still year-to-date, and FX-converted flows faked it (three review rounds,
+    2026-10-02). A missing, non-finite or non-positive OCF never refutes.
+    """
+    year, quarter = parsed[idx].group(1), int(parsed[idx].group(2))
+    row = rows[idx].cash_flow_row
+    for jdx, other in enumerate(parsed):
+        if (other is None or other.group(1) != year
+                or int(other.group(2)) >= quarter):
+            continue
+        earlier = rows[jdx].cash_flow_row
+        if all(_refutes(row.get(f), earlier.get(f), f)
+               for f in _CUMULATIVE_REFUTING_FIELDS):
+            return True
+    return False
+
+
+def _refutes(mine, theirs, field) -> bool:
+    if not (_is_finite(mine) and _is_finite(theirs)):
+        return False
+    if field == "net_cash_flow_from_operations" and (mine <= 0 or theirs <= 0):
+        return False
+    return abs(mine) < _CUMULATIVE_REFUTE_MARGIN * abs(theirs)
+
+
+def _is_finite(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
 def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Optional[str]:
     """Return a diagnostic string if any row in `window` looks like a
     year-to-date CUMULATIVE cash-flow row, else None.
@@ -1298,6 +1352,11 @@ def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Option
         suppressed lens carrying a reason, a false negative is a silently
         wrong TTM reaching a valuation.
 
+    A flag is never cleared here. `cumulative_flag_contradicted` reports
+    when capex and OCF prove a flagged row standalone, for a consumer whose
+    action on "cumulative" is to de-cumulate; it is a reason to stop, never
+    to sum.
+
     Pure predicate — never mutates, never raises on ordinary data, and
     fails OPEN (returns None) whenever the probe field cannot be read.
     "No heuristic evidence" is not "bad cash flows": failing closed on a
@@ -1329,8 +1388,32 @@ def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Option
         # match, and consumers disclose it like any other non-run.
         return None
     rows = list(window or ())
-    if len(rows) < 2:
+    flags = _probe_flags(rows)
+    if not flags:
         return None
+    idx, ratio, threshold, baseline = flags[0]
+    q = rows[idx]
+    quarter_index = int(_FISCAL_PERIOD_RE.fullmatch(q.fiscal_period).group(2))
+    return (
+        f"cash_flow row {q.report_period} ({q.fiscal_period}) looks "
+        f"year-to-date cumulative: {_CUMULATIVE_PROBE_FIELD}="
+        f"{q.cash_flow_row.get(_CUMULATIVE_PROBE_FIELD):,.0f} is {ratio:.2f}x "
+        f"the window's fiscal-Q1 "
+        f"standalone-quarter baseline ({baseline:,.0f}), at or "
+        f"above the {threshold:.1f}x threshold for a fiscal-Q"
+        f"{quarter_index} year-to-date row. Cash-flow-derived TTM "
+        f"aggregates over this window would double-count earlier "
+        f"quarters."
+    )
+
+
+def _probe_flags(rows) -> list:
+    """`[(idx, ratio, threshold, baseline), ...]` for every row the D&A probe
+    reads as year-to-date, oldest first; empty when nothing is flagged or the
+    probe cannot run. The one implementation of the threshold test, shared by
+    `detect_cumulative_cash_flow` and `cumulative_flag_contradicted`."""
+    if len(rows) < 2:
+        return []
 
     # Per-row probe values; None = unusable on THAT row only. A single
     # unusable row must not disable detection for the whole window: the
@@ -1343,9 +1426,7 @@ def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Option
         value = q.cash_flow_row.get(_CUMULATIVE_PROBE_FIELD)
         das.append(float(value) if _is_positive_finite(value) else None)
     if sum(1 for d in das if d is not None) < 2:
-        return None  # fail open — need a probe row AND a baseline
-
-    parsed = [_FISCAL_PERIOD_RE.fullmatch(q.fiscal_period) for q in rows]
+        return []  # fail open — need a probe row AND a baseline
 
     baseline = _usable_q1_anchor(rows)
     if baseline is None:
@@ -1358,9 +1439,10 @@ def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Option
         # pronounced clean while two of its rows double-count. Reporting
         # "not checked" via cumulative_detection_ran() is the honest answer;
         # a confident wrong verdict is the failure mode this repo guards.
-        return None
+        return []
+    flags = []
     for idx, q in enumerate(rows):
-        match = parsed[idx]
+        match = _FISCAL_PERIOD_RE.fullmatch(q.fiscal_period)
         if not match or das[idx] is None:
             continue  # unusable probe row, or a shape AlignedQuarter should have caught
         quarter_index = int(match.group(2))
@@ -1369,14 +1451,26 @@ def detect_cumulative_cash_flow(window, *, fx_converted: bool = False) -> Option
         ratio = das[idx] / baseline
         threshold = quarter_index - _CUMULATIVE_RATIO_SLACK
         if ratio >= threshold:
-            return (
-                f"cash_flow row {q.report_period} ({q.fiscal_period}) looks "
-                f"year-to-date cumulative: {_CUMULATIVE_PROBE_FIELD}="
-                f"{das[idx]:,.0f} is {ratio:.2f}x the window's fiscal-Q1 "
-                f"standalone-quarter baseline ({baseline:,.0f}), at or "
-                f"above the {threshold:.1f}x threshold for a fiscal-Q"
-                f"{quarter_index} year-to-date row. Cash-flow-derived TTM "
-                f"aggregates over this window would double-count earlier "
-                f"quarters."
-            )
-    return None
+            flags.append((idx, ratio, threshold, baseline))
+    return flags
+
+
+def cumulative_flag_contradicted(window) -> bool:
+    """True when the D&A probe flags a row of `window` whose capex AND OCF
+    prove it standalone (`_smaller_than_earlier_same_year_row`).
+
+    The two columns then disagree about the row's basis, and neither can be
+    trusted to settle it. For the FCF / EBITDA consumers that changes
+    nothing -- a flag still suppresses. It matters to a consumer that would
+    DE-CUMULATE on a flag: NOW 2026-Q2 reads 1.58x on D&A after a 7.45B
+    acquisition while its capex (114M vs 141M) and OCF (587M vs 1,670M) are
+    standalone, so subtracting Q1 from its SBC would turn a correct quarter
+    into a 6x understatement. Such a consumer must report the basis unknown.
+    A row that itself declares year-to-date is never contradicted; the
+    declaration speaks for that row only, so another row's declaration does
+    not exempt it (codex review 2026-10-03)."""
+    rows = list(window or ())
+    parsed = [_FISCAL_PERIOD_RE.fullmatch(q.fiscal_period) for q in rows]
+    return any(attested_ytd_basis((rows[idx],)) is None
+               and _smaller_than_earlier_same_year_row(rows, parsed, idx)
+               for idx, _r, _t, _b in _probe_flags(rows))

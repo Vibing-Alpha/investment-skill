@@ -131,10 +131,13 @@ apply them as an interpretive LENS — they adjust how you weigh signals, not
 whether you report them. When `mandate.style_notes` is present, it is the
 authoritative elaboration of the style — read it in full and apply its stated
 weighing rules (e.g. regime-conditional entry modes, or how valuation stretch
-is consumed as sizing input rather than as an entry veto). If the style is
-regime-conditional and no market-regime input is provided at this layer
-(regime classification belongs to /portfolio), state the regime you assumed
-and its basis in `thesis.conviction_reasoning`. Note: the `principles:` field is consumed exclusively
+is consumed as sizing input rather than as an entry veto). The market regime
+is the broad market's state, and no input for it reaches this layer (it is
+classified by /portfolio on the day it decides). The ticker's own trend is not
+the regime. So do not assume one: where the style's entry mode depends on the
+regime, write each regime's entry condition separately in
+`entry_attractive_if`, prefixed with the regime it applies to, and keep
+conviction to what holds in every regime the style names. Note: the `principles:` field is consumed exclusively
 by `/portfolio`, not here.
 
 Examples:
@@ -236,6 +239,11 @@ Then specify two sets of conditions:
 - Good: "RSI drops below 30 while BQ remains above 7.0"
 - Good: "Stock pulls back to $150 support level (15% margin of safety)"
 - Bad: "If the market improves" (vague, unmonitorable)
+- A condition built on a moving-average reclaim uses /portfolio's
+  observable definitions, since that is where it is acted on: "held" means 2
+  consecutive completed sessions above the level, and a higher low or fading
+  distribution is not machine-observable, so name it as a confirming
+  condition, never as one that completes the setup.
 
 **thesis_invalid_if** — Specific, measurable conditions that would break the
 thesis entirely. This is as important as the thesis itself — it makes the
@@ -374,7 +382,8 @@ emit neither field. The schema accepts this form for backward compatibility.
 ## Output — thesis_summary.md
 
 Write in the language specified by `output_language` in strategy.yaml (default: zh-CN).
-Keep under 600 words. This is the human-facing deliverable.
+Keep under 600 words (in Chinese, Japanese or Korean two characters count as one
+word, so about 1,200 characters). This is the human-facing deliverable.
 
 Structure:
 

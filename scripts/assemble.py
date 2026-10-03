@@ -438,14 +438,36 @@ def _summarize_degradation(validation):
         # INCOMPLETE+not_found — content exists and a required piece of it
         # was lost, which contradicts structural absence on its face.
         # Measured: every exempted entry in the 43 stored runs is already
-        # FAILED+not_found, so the scoping moves nothing.
+        # FAILED+not_found, so the scoping moves nothing. The one INCOMPLETE
+        # filing that IS absence -- no annual report yet -- is the separate,
+        # field-exact `_is_no_annual_report_yet` below.
         if (entry_status == Status.FAILED
                 and entry.get("error_code") in _STRUCTURAL_ABSENCE_CODES
                 and name in _STRUCTURAL_ABSENCE_CATEGORIES
                 and not _fallback_contradicts_absence(validation, name)):
             continue
+        if name == "filing" and _is_no_annual_report_yet(entry):
+            continue
         degraded.append(name)
     return status, sorted(degraded)
+
+
+def _is_no_annual_report_yet(entry) -> bool:
+    """The one INCOMPLETE filing that is structural absence: no 10-K or 20-F
+    exists yet, and the 10-Q that does exist was fetched whole.
+
+    A recent listing (SPCX, 2026-06 IPO) is in this state on every run until
+    its first annual report. The thirteenth-round shape the FAILED-only rule
+    guards -- a 10-K on file beside a lost 10-Q section -- has has_10k true
+    or a non-empty missing_items, so it still gates. Every field must be
+    present with exactly this value; unreadable evidence gates.
+    """
+    return (entry.get("status") == Status.INCOMPLETE
+            and entry.get("error_code") == "not_found"
+            and entry.get("has_10k") is False
+            and entry.get("has_20f") is False
+            and entry.get("has_10q") is True
+            and entry.get("missing_items") == [])
 
 
 # DELIBERATE TRADEOFF — financial-freshness (days_old) is DISCLOSURE, not a

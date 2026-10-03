@@ -90,7 +90,7 @@ fi
 cd "$ROOT" 2>/dev/null || { echo "stock-v7: run the setup skill first" >&2; exit 1; }
 printf 'STOCK_V7_ROOT=%s\n' "$PWD"   # Step 0 EMITS the resolved abs root (post-cd $PWD) for the agent to capture
 PYBIN="$PWD/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN="$PWD/.venv/Scripts/python.exe"; [ -x "$PYBIN" ] || PYBIN=python3
-"$PYBIN" -m scripts.version_skew --expected-min "1.23.1" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
+"$PYBIN" -m scripts.version_skew --expected-min "1.24.0" || true   # skew WARNING only (installed plugin vs clone) — never gates; placeholder baked to the release VERSION by the publish-time sync. Run this line VERBATIM — never substitute a version for the placeholder: unsubstituted it exits 0 silently, a guessed one prints a real-looking skew WARNING built from nothing, and the clone's OWN VERSION is the worst of the three — it compares equal by construction, so it exits 0 with no output and reads exactly like a clean check (feedback 2026-09-01)
 ```
 
 > **Single-writer note (concurrency probe 2026-08-03):** run dirs are
@@ -1152,7 +1152,10 @@ Each Task subagent call returns usage info with `total_tokens`. The
 orchestrator accumulates these across all calls this run (classifier,
 valuation, technical, events [if rerun], synthesis, alpha_advocate +
 alpha_prosecutor [if Phase 3 ran]) plus wall time, and substitutes the
-totals into the heredoc below. The costs file is a run-scoped transient
+totals into the heredoc below. A total you did not observe is `null`, never
+an estimate and never `0` (an estimate is an invented measurement): `tokens`
+when any call returned no usage block, `duration_s` unless you noted the
+Step 0 time yourself. The costs file is a run-scoped transient
 dotfile under `$REPORT_DIR` — portable (native Windows has no /tmp) and
 stable across step boundaries (a separate shell loses `$$`).
 

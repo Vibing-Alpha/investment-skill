@@ -31,6 +31,7 @@ from scripts.schemas.quarter_window import (
     aligned_pair,
     AlignedQuarter,
     cumulative_detection_ran,
+    cumulative_flag_contradicted,
     detect_cumulative_cash_flow,
     InsufficientQuartersError,
     row_matches_period,
@@ -313,8 +314,10 @@ def _sbc_period_basis(latest_cf: Mapping, cf_rows) -> tuple[Optional[str], Optio
     series satisfies. ADBE's provider rows are discrete (534 / 509 / 489),
     so 534M was "de-cumulated" to 25M — a 21x understatement published as
     `trigger_values.sbc_amount`. The provider's basis is genuinely mixed
-    per-ticker (NOW's 2026-Q2 row IS cumulative on the same feed), so
-    neither always-subtract nor never-subtract is right; only the probe is.
+    per-ticker, and even per column: NOW's 2026-Q2 row reads year-to-date on
+    the D&A probe while its capex and OCF are provably standalone (and its
+    SBC is corrupt). So neither always-subtract nor never-subtract is right;
+    the probe decides, and when capex/OCF contradict it the basis is unknown.
     """
     if latest_cf.get("data_source") == "yfinance":
         # yfinance `quarterly_cashflow` is discrete by contract — an
@@ -357,8 +360,22 @@ def _sbc_period_basis(latest_cf: Mapping, cf_rows) -> tuple[Optional[str], Optio
                           f"ratio is not currency-invariant")
         return None, (f"period basis unknown: no fiscal {fy}-Q1 cash_flow row "
                       f"to baseline {latest_cf.get('fiscal_period')} against")
-    try:
-        window = [
+    # The quarters between Q1 and the latest row are not needed for the D&A
+    # verdict (Q1 is its baseline), but they are for the contradiction check:
+    # a refuting row can be any earlier quarter of the year (codex review
+    # 2026-10-03: Q3 refuted by Q2 was de-cumulated to a third of its value).
+    middle = sorted(
+        (r for r in cf_rows
+         if isinstance(r, Mapping) and r is not latest_cf and r is not q1_row
+         and r.get("data_source") != "yfinance"
+         and (_parse_fiscal_quarter(r.get("fiscal_period")) or (None, 0))[0] == fy
+         and 1 < _parse_fiscal_quarter(r.get("fiscal_period"))[1] < q
+         and not (latest_cur and str(r.get("currency") or "").strip().upper()
+                  not in ("", latest_cur))),
+        key=lambda r: _parse_fiscal_quarter(r.get("fiscal_period"))[1])
+
+    def _probe(rows):
+        return [
             AlignedQuarter(
                 report_period=str(r.get("report_period")),
                 fiscal_period=str(r.get("fiscal_period")),
@@ -367,14 +384,30 @@ def _sbc_period_basis(latest_cf: Mapping, cf_rows) -> tuple[Optional[str], Optio
                 income_row={}, cash_flow_row=r, balance_row={},
                 source_tag=_SBC_PROBE_TAG,
             )
-            for r in (q1_row, latest_cf)
+            for r in rows
         ]
+    try:
+        window = _probe((q1_row, latest_cf))
+        year_window = _probe((q1_row, *middle, latest_cf))
     except (SchemaError, ValueError, TypeError) as exc:
         return None, f"period basis unknown: probe window not constructible ({exc})"
     if not cumulative_detection_ran(window):
         return None, ("period basis unknown: the cumulative probe could not "
                       "run (no usable depreciation_and_amortization baseline)")
-    return ("cumulative" if detect_cumulative_cash_flow(window) else "discrete"), None
+    if detect_cumulative_cash_flow(window) is None:
+        return "discrete", None
+    if cumulative_flag_contradicted(year_window):
+        # De-cumulating is only right if the row really is year-to-date.
+        # When capex and OCF prove it standalone, subtracting Q1 would turn a
+        # correct quarter into a several-fold understatement. A contradiction
+        # on any quarter of the year counts: the feed's basis for that year
+        # is in doubt, and the cost of over-reading it is a disclosed skip.
+        return None, ("period basis unknown: in fiscal "
+                      f"{fy}, D&A reads a quarter as year-to-date while that "
+                      "quarter's capex and OCF are standalone, so the SBC "
+                      f"column's basis for {latest_cf.get('fiscal_period')} "
+                      "cannot be established")
+    return "cumulative", None
 
 
 def _discrete_quarter_sbc(latest_cf: Mapping, cf_rows,

@@ -249,8 +249,11 @@ own, verify with a current-year WebSearch before including it, or drop it.
 
 ## Critical Rules
 
-Source tagging and data handling rules are enforced by `.claude/rules/anti-hallucination.md`
-(loaded automatically via glob). In addition:
+Source tagging follows `.claude/rules/anti-hallucination.md`, which a subagent or
+another host may not have loaded. Its core: the only tag kinds are `[API: <file>, <field>]`,
+`[WebSearch: <outlet>, <url>, accessed <YYYY-MM-DD>]`, `[Filing: <form>]` and
+`[Calc: <formula>]`, and the validator rejects any other (`[News:]`, `[Derived:]`, ...); a
+figure you computed is `[Calc:]` with the formula shown. In addition:
 
 - Compute `overall` as weighted average: `sum(score × weight) / 100`
 - Market share and TAM data require WebSearch with source name and publication date
